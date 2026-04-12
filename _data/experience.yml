@@ -7,9 +7,9 @@ jobs:
     end_date: now
     current: true
     description: |
-    to be added
+         - to be added
     highlights:
-    to be added
+         - to be added
 
   # - company: 某创业科技公司
   #   position: 前端开发工程师
