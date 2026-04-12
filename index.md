@@ -28,9 +28,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
 
       <div class="profile-summary">
         <p>
-          拥有 5 年 Web 开发经验的全栈工程师，专注于构建高性能、
-          可扩展的 Web 应用。热爱开源，活跃于技术社区。
-          擅长 React 生态系统和 Node.js 后端开发。
+          通信工程->嵌入式工程->AI Infra
         </p>
       </div>
 
