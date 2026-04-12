@@ -1,0 +1,29 @@
+<!-- 页脚区域 -->
+<footer class="site-footer">
+  <div class="container">
+
+    <!-- 社交媒体链接 -->
+    <div class="social-links">
+      {% if site.author.github %}
+        <a href="https://github.com/{{ site.author.github }}" target="_blank" rel="noopener">
+          GitHub
+        </a>
+      {% endif %}
+
+      {% if site.author.linkedin %}
+        <a href="https://linkedin.com/in/{{ site.author.linkedin }}" target="_blank" rel="noopener">
+          LinkedIn
+        </a>
+      {% endif %}
+
+      <a href="mailto:{{ site.author.email }}">Email</a>
+    </div>
+
+    <!-- 版权信息 -->
+    <p class="copyright">
+      &copy; {{ site.time | date: '%Y' }} {{ site.author.name }}. 
+      使用 Jekyll & GitHub Pages 构建。
+    </p>
+
+  </div>
+</footer>

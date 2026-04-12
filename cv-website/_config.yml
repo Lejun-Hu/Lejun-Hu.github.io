@@ -1,0 +1,54 @@
+# ============================================
+# 网站基础信息配置
+# ============================================
+
+# 网站标题（显示在浏览器标签和页面头部）
+title: "张三的个人简历"
+
+# 副标题/一句话介绍
+description: "全栈开发工程师 | 5年经验 | 专注Web技术"
+
+# 你的邮箱
+email: zhangsan@example.com
+
+# 网站域名（GitHub Pages 会自动配置，本地开发时可留空）
+# url: "https://your-username.github.io"
+
+# 作者信息（用于 SEO 和元数据）
+author:
+  name: 张三
+  email: zhangsan@example.com
+  github: your-github-username
+  linkedin: your-linkedin-id
+  location: 北京, 中国
+
+# ============================================
+# Jekyll 构建设置
+# ============================================
+
+# 使用的主题（可选，如果不使用远程主题则留空）
+# theme: minima
+
+# 插件（GitHub Pages 白名单内的插件）
+plugins:
+  - jekyll-feed      # 生成 RSS 订阅
+  - jekyll-sitemap   # 生成站点地图（利于 SEO）
+  - jekyll-seo-tag   # 自动生成 SEO 标签
+
+# 排除文件（这些文件不会被构建到最终网站）
+exclude:
+  - README.md
+  - Gemfile
+  - Gemfile.lock
+  - node_modules
+  - vendor
+  - cv-website.zip
+
+# 默认 Front Matter（为所有文件设置默认值）
+defaults:
+  -
+    scope:
+      path: ""        # 应用到所有文件
+      type: "pages"   # 仅页面类型
+    values:
+      layout: "default"  # 默认使用 default 布局

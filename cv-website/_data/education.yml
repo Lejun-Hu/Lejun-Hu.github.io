@@ -1,0 +1,12 @@
+degrees:
+  - school: 某某大学
+    degree: 计算机科学与技术 硕士
+    start_year: 2015
+    end_year: 2018
+    description: 研究方向：人机交互，GPA 3.8/4.0
+
+  - school: 某某理工大学
+    degree: 软件工程 学士
+    start_year: 2011
+    end_year: 2015
+    description: 优秀毕业生，多次获得奖学金

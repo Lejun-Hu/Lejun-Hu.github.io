@@ -1,0 +1,27 @@
+# 工作经历列表（按时间倒序）
+jobs:
+  - company: 某知名互联网公司
+    position: 高级前端工程师
+    location: 北京
+    start_date: 2021-03
+    end_date: 至今
+    current: true
+    description: |
+      负责公司核心产品的前端架构设计与开发，带领 5 人团队。
+    highlights:
+      - 主导微前端架构改造，提升页面加载速度 40%
+      - 建立前端工程化体系，减少 60% 的重复工作
+      - 设计并实现组件库，被 10+ 个项目采用
+
+  - company: 某创业科技公司
+    position: 前端开发工程师
+    location: 上海
+    start_date: 2018-07
+    end_date: 2021-02
+    current: false
+    description: |
+      作为早期员工参与产品从 0 到 1 的开发。
+    highlights:
+      - 独立完成移动端 H5 应用开发，日活用户 10万+
+      - 优化首屏加载时间，从 3s 降至 1.2s
+      - 实现复杂的动画交互效果，提升用户体验

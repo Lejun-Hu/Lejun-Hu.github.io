@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+  <!-- 引入 head 部分（包含 meta 标签、CSS 链接等） -->
+  {% include head.html %}
+
+  <body>
+    <!-- 页面容器 -->
+    <div class="page-wrapper">
+
+      <!-- 引入顶部导航栏 -->
+      {% include header.html %}
+
+      <!-- 主内容区域 -->
+      <main class="main-content" role="main">
+        <!-- 
+          {{ content }} 是 Liquid 的特殊变量
+          它会被替换为具体页面（如 index.md）的内容
+        -->
+        {{ content }}
+      </main>
+
+      <!-- 引入页脚 -->
+      {% include footer.html %}
+
+    </div>
+
+    <!-- 引入 JavaScript -->
+    <script src="{{ '/assets/js/main.js' | relative_url }}"></script>
+  </body>
+</html>

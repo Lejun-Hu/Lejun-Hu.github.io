@@ -1,0 +1,34 @@
+<head>
+  <!-- 基础 meta 标签 -->
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- 
+    页面标题逻辑：
+    如果页面有自定义 title，则显示 "页面标题 | 网站标题"
+    否则只显示网站标题
+  -->
+  <title>
+    {% if page.title %}
+      {{ page.title }} | {{ site.title }}
+    {% else %}
+      {{ site.title }}
+    {% endif %}
+  </title>
+
+  <!-- 网站描述（用于搜索引擎展示） -->
+  <meta name="description" content="{{ page.description | default: site.description }}">
+
+  <!-- 引入 SEO 插件生成的标签（如果启用了 jekyll-seo-tag） -->
+  {% seo %}
+
+  <!-- 主样式表 -->
+  <link rel="stylesheet" href="{{ '/assets/css/main.css' | relative_url }}">
+
+  <!-- 引入中文字体（可选：使用 Google Fonts 的 Noto Sans SC） -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+
+  <!-- 网站图标（favicon） -->
+  <link rel="icon" type="image/png" href="{{ '/assets/images/favicon.png' | relative_url }}">
+</head>
