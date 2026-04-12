@@ -1,8 +1,8 @@
 ---
 # Front Matter：这个页面的元数据
 layout: default        # 使用 default 布局
-title: 个人简历        # 页面标题
-description: 张三的详细个人简历，包含工作经历、技能专长和项目展示
+title: 个人网页       # 页面标题
+description: Egan的详细个人简历，包含工作经历、技能专长和项目展示
 ---
 
 <!-- 
