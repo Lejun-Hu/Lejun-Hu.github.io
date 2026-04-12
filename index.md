@@ -28,7 +28,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
 
       <div class="profile-summary">
         <p>
-          通信工程->嵌入式工程->AI Infra
+          通信工程->嵌入式工程->AI Infra ， 希望能在这个空间展示分享自己的学习心得的同时，找到潜在的合作伙伴
         </p>
       </div>
 
