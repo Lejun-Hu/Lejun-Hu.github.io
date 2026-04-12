@@ -1,0 +1,29 @@
+# Jekyll 生成的站点文件
+_site/
+.sass-cache/
+.jekyll-cache/
+.jekyll-metadata
+
+# Ruby 依赖
+.bundle/
+vendor/
+Gemfile.lock
+
+# IDE 和编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# 日志和临时文件
+*.log
+tmp/
+
+# 不需要提交的大型资源（可选）
+# assets/images/*.psd
+# assets/images/*.ai

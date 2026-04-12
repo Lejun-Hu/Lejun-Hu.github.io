@@ -1,4 +1,5 @@
 # 个人简历网站
+# Everything about me will be added soon !!!!  Hope So LOL~
 
 这是一个基于 Jekyll 和 GitHub Pages 构建的个人简历网站模板。
 
