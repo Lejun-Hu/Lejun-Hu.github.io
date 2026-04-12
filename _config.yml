@@ -3,24 +3,24 @@
 # ============================================
 
 # 网站标题（显示在浏览器标签和页面头部）
-title: "张三的个人简历"
+title: "胡乐俊的个人简历"
 
 # 副标题/一句话介绍
-description: "全栈开发工程师 | 5年经验 | 专注Web技术"
+description: "Ai infra Learing"
 
 # 你的邮箱
-email: zhangsan@example.com
+email: 443462147@qq.com
 
 # 网站域名（GitHub Pages 会自动配置，本地开发时可留空）
 # url: "https://your-username.github.io"
 
 # 作者信息（用于 SEO 和元数据）
 author:
-  name: 张三
-  email: zhangsan@example.com
-  github: your-github-username
-  linkedin: your-linkedin-id
-  location: 北京, 中国
+  name: 胡乐俊
+  email: 443462147@qq.com
+  github: tbd
+  linkedin: tbd
+  location: 深圳, 中国
 
 # ============================================
 # Jekyll 构建设置
