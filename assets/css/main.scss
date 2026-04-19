@@ -621,70 +621,137 @@ a {
 // 9. 项目展示
 // ============================================
 
-.projects-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-  gap: var(--space-xl);
+.projects-list {
   max-width: 1000px;
   margin: 0 auto;
-
-  @media (max-width: 768px) {
-    grid-template-columns: 1fr;
-  }
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
 }
 
-.project-card {
+.project-row {
   background: white;
   border-radius: var(--radius-lg);
-  overflow: hidden;
-  box-shadow: var(--shadow-sm);
   border: 1px solid var(--color-border);
-  transition: transform 0.3s, box-shadow 0.3s;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  transition: box-shadow 0.2s;
 
   &:hover {
-    transform: translateY(-4px);
+    box-shadow: var(--shadow-md);
+  }
+
+  &.expanded {
     box-shadow: var(--shadow-lg);
   }
 }
 
-.project-image {
-  height: 200px;
-  overflow: hidden;
+.project-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-md) var(--space-lg);
+  cursor: pointer;
+  transition: background-color 0.2s;
 
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    transition: transform 0.3s;
+  &:hover {
+    background-color: var(--color-bg-alt);
   }
 
-  &:hover img {
-    transform: scale(1.05);
+  @media (max-width: 768px) {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-xs);
   }
 }
 
-.project-info {
-  padding: var(--space-md);
+.project-header-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
 
-  h3 {
-    font-size: 1.25rem;
-    margin-bottom: var(--space-sm);
-    color: var(--color-text);
+  @media (max-width: 768px) {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+.project-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.project-period {
+  font-size: 0.9rem;
+  color: var(--color-text-light);
+  font-weight: 500;
+}
+
+.project-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-primary);
+  transition: transform 0.3s;
+
+  .toggle-icon {
+    font-size: 0.85rem;
+    display: inline-block;
+    transition: transform 0.3s;
   }
 
-  p {
-    color: var(--color-text-light);
-    font-size: 0.95rem;
-    margin-bottom: var(--space-md);
-    line-height: 1.6;
+  &[aria-expanded="true"] .toggle-icon {
+    transform: rotate(180deg);
   }
+
+  @media (max-width: 768px) {
+    position: absolute;
+    right: var(--space-md);
+    top: var(--space-md);
+  }
+}
+
+.project-details {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.4s ease-out, padding 0.4s ease-out;
+  padding: 0 var(--space-lg);
+
+  .project-row.expanded & {
+    max-height: 2000px;  // 足够大的值以容纳内容
+    padding: 0 var(--space-lg) var(--space-lg);
+    border-top: 1px solid var(--color-border);
+  }
+}
+
+.project-section {
+  margin-top: var(--space-lg);
+
+  &:first-child {
+    margin-top: var(--space-md);
+  }
+}
+
+.project-section-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: var(--space-sm);
 }
 
 .project-tags {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-xs);
-  margin-bottom: var(--space-md);
 }
 
 .tag {
@@ -697,14 +764,41 @@ a {
   font-weight: 500;
 }
 
-.project-link {
-  display: inline-flex;
-  align-items: center;
-  font-weight: 500;
+.project-description {
+  color: var(--color-text);
   font-size: 0.95rem;
+  line-height: 1.7;
 
-  &:hover {
-    gap: 4px;  // 悬停时箭头移动效果
+  p {
+    margin-bottom: var(--space-sm);
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
+}
+
+.project-achievements {
+  list-style: none;
+
+  li {
+    position: relative;
+    padding-left: 1.2rem;
+    margin-bottom: 0.5rem;
+    font-size: 0.95rem;
+    color: var(--color-text);
+    line-height: 1.6;
+
+    &::before {
+      content: '▸';
+      position: absolute;
+      left: 0;
+      color: var(--color-primary);
+    }
+
+    &:last-child {
+      margin-bottom: 0;
+    }
   }
 }
 

@@ -159,49 +159,63 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
   </div>
 </section>
 
-<!-- ===== 项目展示部分（硬编码示例，也可放入 _data） ===== -->
+<!-- ===== 项目展示部分 ===== -->
 <section id="projects" class="section section-alt">
   <div class="container">
     <h2 class="section-title">项目作品</h2>
 
-    <div class="projects-grid">
-
-      <!-- 项目 1 -->
-      <article class="project-card">
-        <div class="project-image">
-          <img src="{{ '/assets/images/project1.jpg' | relative_url }}" 
-               alt="项目截图" loading="lazy">
-        </div>
-        <div class="project-info">
-          <h3>电商平台前端重构</h3>
-          <p>使用 Next.js 重构 legacy 系统，提升性能指标，实现 SSR 渲染。</p>
-          <div class="project-tags">
-            <span class="tag">React</span>
-            <span class="tag">Next.js</span>
-            <span class="tag">TypeScript</span>
+    <div class="projects-list">
+      {% for project in site.data.projects.projects %}
+      <article class="project-row" data-project-index="{{ forloop.index }}">
+        <!-- 标题行（始终可见） -->
+        <div class="project-header">
+          <div class="project-header-main">
+            <h3 class="project-title">{{ project.title }}</h3>
+            <span class="project-period">{{ project.period }}</span>
           </div>
-          <a href="#" class="project-link" target="_blank">查看详情 →</a>
+          <button class="project-toggle" aria-label="展开项目详情" aria-expanded="false">
+            <span class="toggle-icon">▼</span>
+          </button>
+        </div>
+
+        <!-- 详情面板（默认折叠） -->
+        <div class="project-details">
+          <!-- 技术栈 -->
+          {% if project.tech_stack %}
+          <div class="project-section">
+            <h4 class="project-section-title">涉及技术栈</h4>
+            <div class="project-tags">
+              {% for tech in project.tech_stack %}
+              <span class="tag">{{ tech }}</span>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+
+          <!-- 工作内容描述 -->
+          {% if project.description %}
+          <div class="project-section">
+            <h4 class="project-section-title">工作内容描述</h4>
+            <div class="project-description">
+              {{ project.description | markdownify }}
+            </div>
+          </div>
+          {% endif %}
+
+          <!-- 项目成果 -->
+          {% if project.achievements %}
+          <div class="project-section">
+            <h4 class="project-section-title">项目成果</h4>
+            <ul class="project-achievements">
+              {% for achievement in project.achievements %}
+              <li>{{ achievement }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
         </div>
       </article>
-
-      <!-- 项目 2 -->
-      <article class="project-card">
-        <div class="project-image">
-          <img src="{{ '/assets/images/project2.jpg' | relative_url }}" 
-               alt="项目截图" loading="lazy">
-        </div>
-        <div class="project-info">
-          <h3>数据可视化大屏</h3>
-          <p>为物联网项目开发实时监控大屏，支持 WebSocket 实时数据更新。</p>
-          <div class="project-tags">
-            <span class="tag">Vue 3</span>
-            <span class="tag">D3.js</span>
-            <span class="tag">WebSocket</span>
-          </div>
-          <a href="#" class="project-link" target="_blank">查看详情 →</a>
-        </div>
-      </article>
-
+      {% endfor %}
     </div>
 
   </div>

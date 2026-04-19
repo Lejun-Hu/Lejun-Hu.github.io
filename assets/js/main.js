@@ -82,3 +82,28 @@ document.querySelectorAll('a[href^="#"]').forEach(anchor => {
     }
   });
 });
+
+/**
+ * 项目展开/收起交互
+ * 点击项目标题行时展开/收起详情面板
+ */
+document.addEventListener('DOMContentLoaded', () => {
+  const projectRows = document.querySelectorAll('.project-row');
+
+  projectRows.forEach(row => {
+    const header = row.querySelector('.project-header');
+    const toggleBtn = row.querySelector('.project-toggle');
+
+    if (!header || !toggleBtn) return;
+
+    const toggleProject = () => {
+      const isExpanded = row.classList.contains('expanded');
+
+      // 切换展开状态
+      row.classList.toggle('expanded');
+      toggleBtn.setAttribute('aria-expanded', !isExpanded);
+    };
+
+    header.addEventListener('click', toggleProject);
+  });
+});
