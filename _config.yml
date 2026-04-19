@@ -44,6 +44,16 @@ exclude:
   - vendor
   - cv-website.zip
 
+# ============================================
+# 自定义集合配置
+# ============================================
+
+# 笔记集合：_notes/ 目录下的文章
+collections:
+  notes:
+    output: true          # 生成独立的 HTML 页面
+    permalink: /notes/:title/  # 输出路径格式
+
 # 默认 Front Matter（为所有文件设置默认值）
 defaults:
   -
@@ -52,3 +62,9 @@ defaults:
       type: "pages"   # 仅页面类型
     values:
       layout: "default"  # 默认使用 default 布局
+  -
+    scope:
+      path: ""        # 应用到所有文件
+      type: "notes"   # 仅笔记类型
+    values:
+      layout: "note"  # 笔记默认使用 note 布局

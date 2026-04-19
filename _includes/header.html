@@ -11,11 +11,12 @@
     <nav class="site-nav">
       <!-- 桌面端导航链接 -->
       <div class="nav-links">
-        <a href="#about" class="nav-link">关于我</a>
-        <a href="#experience" class="nav-link">工作经历</a>
-        <a href="#skills" class="nav-link">技能</a>
-        <a href="#projects" class="nav-link">项目</a>
-        <a href="#contact" class="nav-link">联系方式</a>
+        <a href="{{ '/' | relative_url }}#about" class="nav-link">关于我</a>
+        <a href="{{ '/' | relative_url }}#experience" class="nav-link">工作经历</a>
+        <a href="{{ '/' | relative_url }}#skills" class="nav-link">技能</a>
+        <a href="{{ '/' | relative_url }}#projects" class="nav-link">项目</a>
+        <a href="{{ '/notes/' | relative_url }}" class="nav-link">笔记</a>
+        <a href="{{ '/' | relative_url }}#contact" class="nav-link">联系方式</a>
       </div>
 
       <!-- 移动端汉堡菜单按钮（小屏幕显示） -->

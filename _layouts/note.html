@@ -1,0 +1,63 @@
+---
+# 笔记文章详情页布局
+---
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+  {% include head.html %}
+
+  <body>
+    <div class="page-wrapper">
+
+      {% include header.html %}
+
+      <main class="main-content" role="main">
+        <!-- 笔记文章头部 -->
+        <section class="section note-header">
+          <div class="container">
+            <div class="note-header-content">
+              <div class="note-meta">
+                <span class="note-date">{{ page.date | date: "%Y年%m月%d日" }}</span>
+                {% if page.category %}
+                <span class="note-category">{{ page.category }}</span>
+                {% endif %}
+              </div>
+              
+              <h1 class="note-page-title">{{ page.title }}</h1>
+              
+              {% if page.tags %}
+              <div class="note-tags">
+                {% for tag in page.tags %}
+                <span class="tag">{{ tag }}</span>
+                {% endfor %}
+              </div>
+              {% endif %}
+            </div>
+          </div>
+        </section>
+
+        <!-- 笔记正文 -->
+        <section class="section note-body">
+          <div class="container">
+            <article class="note-content">
+              {{ content }}
+            </article>
+            
+            <!-- 返回链接 -->
+            <div class="note-nav">
+              <a href="{{ '/notes/' | relative_url }}" class="btn btn-secondary">
+                ← 返回笔记列表
+              </a>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      {% include footer.html %}
+
+    </div>
+
+    <script src="{{ '/assets/js/main.js' | relative_url }}"></script>
+  </body>
+</html>
