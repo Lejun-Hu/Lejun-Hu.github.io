@@ -113,10 +113,10 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
     <div class="tech-stack-controls">
       <button type="button" class="macro-toggle-btn" id="macro-toggle" aria-expanded="true">
         <span class="toggle-icon">▼</span>
-        <span class="toggle-text">收起目录</span>
+        <span class="toggle-text">收起一级目录</span>
       </button>
       <button type="button" class="btn btn-secondary" id="toggle-all-categories" aria-expanded="true">
-        <span class="toggle-text">收起全部</span>
+        <span class="toggle-text">收起全部二级目录</span>
         <span class="toggle-icon">▼</span>
       </button>
     </div>

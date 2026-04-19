@@ -64,7 +64,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const textSpan = macroToggle.querySelector('.toggle-text');
       const iconSpan = macroToggle.querySelector('.toggle-icon');
       if (textSpan) {
-        textSpan.textContent = newState ? '收起目录' : '展开目录';
+        textSpan.textContent = newState ? '收起一级目录' : '展开一级目录';
       }
       if (iconSpan) {
         iconSpan.textContent = newState ? '▼' : '▶';
@@ -116,7 +116,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const textSpan = globalToggle.querySelector('.toggle-text');
       const iconSpan = globalToggle.querySelector('.toggle-icon');
       if (textSpan) {
-        textSpan.textContent = newState ? '收起全部' : '展开全部';
+        textSpan.textContent = newState ? '收起全部二级目录' : '展开全部二级目录';
       }
       if (iconSpan) {
         iconSpan.textContent = newState ? '▼' : '▶';
