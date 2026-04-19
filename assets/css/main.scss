@@ -504,11 +504,15 @@ a {
   color: var(--color-text-light);
   font-size: 1.05rem;
   line-height: 1.8;
+  padding: 0 var(--space-md);
 }
 
 .tech-stack-global-toggle {
-  text-align: center;
-  margin-bottom: var(--space-lg);
+  display: flex;
+  justify-content: flex-end;
+  max-width: 1000px;
+  margin: 0 auto var(--space-md);
+  padding: 0 var(--space-md);
 }
 
 .tech-stack-grid {
@@ -526,10 +530,10 @@ a {
   box-shadow: var(--shadow-sm);
   border: 1px solid var(--color-border);
   transition: box-shadow 0.2s;
+}
 
-  &.collapsed {
-    box-shadow: var(--shadow-sm);
-  }
+.tech-category.collapsed {
+  box-shadow: var(--shadow-sm);
 }
 
 .tech-category-header {
@@ -541,11 +545,11 @@ a {
   border-bottom: 2px solid var(--color-primary);
   margin-bottom: var(--space-lg);
   transition: margin-bottom 0.3s;
+}
 
-  .tech-category.collapsed & {
-    margin-bottom: 0;
-    border-bottom: 2px solid var(--color-border);
-  }
+.tech-category.collapsed .tech-category-header {
+  margin-bottom: 0;
+  border-bottom: 2px solid var(--color-border);
 }
 
 .tech-category-title {
@@ -565,20 +569,22 @@ a {
   justify-content: center;
   color: var(--color-primary);
   transition: transform 0.3s;
+  flex-shrink: 0;
+  margin-left: var(--space-sm);
+}
 
-  .toggle-icon {
-    font-size: 0.9rem;
-    display: inline-block;
-    transition: transform 0.3s;
-  }
+.category-toggle-btn .toggle-icon {
+  font-size: 0.9rem;
+  display: inline-block;
+  transition: transform 0.3s;
+}
 
-  &[aria-expanded="false"] .toggle-icon {
-    transform: rotate(-90deg);
-  }
+.category-toggle-btn[aria-expanded="false"] .toggle-icon {
+  transform: rotate(-90deg);
+}
 
-  &:hover {
-    color: var(--color-primary-dark);
-  }
+.category-toggle-btn:hover {
+  color: var(--color-primary-dark);
 }
 
 .tech-subcategories {
@@ -587,17 +593,20 @@ a {
   gap: var(--space-md);
   max-height: 5000px;
   overflow: hidden;
-  transition: max-height 0.4s ease-out, opacity 0.3s ease-out;
+  transition: max-height 0.4s ease-out, opacity 0.3s ease-out, gap 0.3s ease-out;
   opacity: 1;
+}
 
-  @media (max-width: 768px) {
+@media (max-width: 768px) {
+  .tech-subcategories {
     grid-template-columns: 1fr;
   }
+}
 
-  .tech-category.collapsed & {
-    max-height: 0;
-    opacity: 0;
-  }
+.tech-category.collapsed .tech-subcategories {
+  max-height: 0;
+  opacity: 0;
+  gap: 0;
 }
 
 .tech-subcategory {

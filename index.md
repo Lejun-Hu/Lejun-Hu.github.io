@@ -111,7 +111,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
 
     <!-- 全局折叠按钮 -->
     <div class="tech-stack-global-toggle">
-      <button class="btn btn-secondary" id="toggle-all-categories" aria-expanded="true">
+      <button type="button" class="btn btn-secondary" id="toggle-all-categories" aria-expanded="true">
         <span class="toggle-text">收起全部</span>
         <span class="toggle-icon">▼</span>
       </button>
@@ -122,7 +122,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
       <div class="tech-category" data-category-index="{{ forloop.index }}">
         <div class="tech-category-header">
           <h3 class="tech-category-title">{{ category.name }}</h3>
-          <button class="category-toggle-btn" aria-label="折叠分类" aria-expanded="true">
+          <button type="button" class="category-toggle-btn" aria-label="折叠分类" aria-expanded="true">
             <span class="toggle-icon">▼</span>
           </button>
         </div>
