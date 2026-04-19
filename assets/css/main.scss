@@ -507,12 +507,53 @@ a {
   padding: 0 var(--space-md);
 }
 
-.tech-stack-global-toggle {
+.tech-stack-controls {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-sm);
   max-width: 1000px;
   margin: 0 auto var(--space-md);
   padding: 0 var(--space-md);
+}
+
+.macro-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  font-size: 0.95rem;
+  background: white;
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.macro-toggle-btn:hover {
+  background: var(--color-bg-alt);
+  border-color: var(--color-secondary);
+}
+
+.macro-toggle-btn .toggle-icon {
+  font-size: 0.8rem;
+  display: inline-block;
+  transition: transform 0.3s;
+}
+
+.macro-toggle-btn[aria-expanded="false"] .toggle-icon {
+  transform: rotate(-90deg);
+}
+
+.tech-stack-grid.collapsed-macro {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  gap: 0;
+  margin: 0;
+  padding: 0;
 }
 
 .tech-stack-grid {
@@ -521,6 +562,10 @@ a {
   gap: var(--space-lg);
   max-width: 1000px;
   margin: 0 auto;
+  max-height: 20000px;
+  overflow: hidden;
+  transition: max-height 0.5s ease-out, opacity 0.4s ease-out, gap 0.4s ease-out, margin 0.3s ease-out;
+  opacity: 1;
 }
 
 .tech-category {

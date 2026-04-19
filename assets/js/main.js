@@ -44,13 +44,41 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /**
  * 技术栈分类折叠/展开交互
- * 支持单个分类折叠和全局全部折叠/展开
+ * 支持：1) 折叠宏（收起/展开整个技术栈网格）
+ *       2) 单个分类折叠/展开
+ *       3) 全局全部折叠/展开（控制每个分类的展开状态）
  */
 document.addEventListener('DOMContentLoaded', () => {
+  const grid = document.getElementById('tech-stack-grid');
+  const macroToggle = document.getElementById('macro-toggle');
   const categories = document.querySelectorAll('.tech-category');
   const globalToggle = document.getElementById('toggle-all-categories');
 
-  // 单个分类折叠/展开
+  // 1. 折叠宏：收起/展开整个技术栈网格
+  if (macroToggle && grid) {
+    macroToggle.addEventListener('click', () => {
+      const isExpanded = macroToggle.getAttribute('aria-expanded') === 'true';
+      const newState = !isExpanded;
+
+      macroToggle.setAttribute('aria-expanded', newState);
+      const textSpan = macroToggle.querySelector('.toggle-text');
+      const iconSpan = macroToggle.querySelector('.toggle-icon');
+      if (textSpan) {
+        textSpan.textContent = newState ? '收起目录' : '展开目录';
+      }
+      if (iconSpan) {
+        iconSpan.textContent = newState ? '▼' : '▶';
+      }
+
+      if (newState) {
+        grid.classList.remove('collapsed-macro');
+      } else {
+        grid.classList.add('collapsed-macro');
+      }
+    });
+  }
+
+  // 2. 单个分类折叠/展开
   categories.forEach(category => {
     const header = category.querySelector('.tech-category-header');
     const toggleBtn = category.querySelector('.category-toggle-btn');
@@ -66,7 +94,7 @@ document.addEventListener('DOMContentLoaded', () => {
     header.addEventListener('click', toggleCategory);
   });
 
-  // 全局折叠/展开按钮
+  // 3. 全局折叠/展开按钮：控制每个分类的展开状态
   if (globalToggle) {
     globalToggle.addEventListener('click', () => {
       const isAllExpanded = globalToggle.getAttribute('aria-expanded') === 'true';
