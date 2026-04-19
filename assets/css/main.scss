@@ -636,8 +636,8 @@ a {
   transition: transform 0.3s;
 }
 
-.macro-toggle-btn[aria-expanded="false"] .toggle-icon {
-  transform: rotate(-90deg);
+.macro-toggle-btn[aria-expanded="true"] .toggle-icon {
+  transform: rotate(90deg);
 }
 
 .tech-stack-grid.collapsed-macro {
