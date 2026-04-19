@@ -111,22 +111,22 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
 
     <!-- 技术栈控制栏：折叠宏 + 全局展开 -->
     <div class="tech-stack-controls">
-      <button type="button" class="macro-toggle-btn" id="macro-toggle" aria-expanded="true">
-        <span class="toggle-icon">▼</span>
-        <span class="toggle-text">收起一级目录</span>
+      <button type="button" class="macro-toggle-btn" id="macro-toggle" aria-expanded="false">
+        <span class="toggle-icon">▶</span>
+        <span class="toggle-text">展开一级目录</span>
       </button>
-      <button type="button" class="btn btn-secondary" id="toggle-all-categories" aria-expanded="true">
-        <span class="toggle-text">收起全部二级目录</span>
-        <span class="toggle-icon">▼</span>
+      <button type="button" class="btn btn-secondary" id="toggle-all-categories" aria-expanded="false">
+        <span class="toggle-text">展开全部二级目录</span>
+        <span class="toggle-icon">▶</span>
       </button>
     </div>
 
-    <div class="tech-stack-grid" id="tech-stack-grid">
+    <div class="tech-stack-grid collapsed-macro" id="tech-stack-grid">
       {% for category in site.data.skills.categories %}
-      <div class="tech-category" data-category-index="{{ forloop.index }}">
+      <div class="tech-category collapsed" data-category-index="{{ forloop.index }}">
         <div class="tech-category-header">
           <h3 class="tech-category-title">{{ category.name }}</h3>
-          <button type="button" class="category-toggle-btn" aria-label="折叠分类" aria-expanded="true">
+          <button type="button" class="category-toggle-btn" aria-label="折叠分类" aria-expanded="false">
             <span class="toggle-icon">▼</span>
           </button>
         </div>
