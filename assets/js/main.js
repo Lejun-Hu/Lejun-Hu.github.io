@@ -1,4 +1,38 @@
 /**
+ * 主题切换
+ * 在浅色和深色主题之间切换
+ */
+function toggleTheme() {
+  const html = document.documentElement;
+  const currentTheme = html.getAttribute('data-theme') || 'light';
+  const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+
+  html.setAttribute('data-theme', newTheme);
+  localStorage.setItem('theme', newTheme);
+}
+
+/**
+ * 同步主题切换按钮状态
+ * 根据当前主题显示/隐藏对应的图标
+ */
+function syncThemeToggle() {
+  const html = document.documentElement;
+  const currentTheme = html.getAttribute('data-theme') || 'light';
+  const lightIcon = document.querySelector('.theme-icon-light');
+  const darkIcon = document.querySelector('.theme-icon-dark');
+
+  if (lightIcon && darkIcon) {
+    if (currentTheme === 'dark') {
+      lightIcon.style.display = 'none';
+      darkIcon.style.display = 'inline';
+    } else {
+      lightIcon.style.display = 'inline';
+      darkIcon.style.display = 'none';
+    }
+  }
+}
+
+/**
  * 移动端菜单切换
  * 点击汉堡按钮时显示/隐藏导航菜单
  */
@@ -40,6 +74,9 @@ document.addEventListener('DOMContentLoaded', () => {
       tag.style.transform = 'translateY(0)';
     });
   });
+
+  // 同步主题切换按钮图标
+  syncThemeToggle();
 });
 
 /**

@@ -6,7 +6,7 @@
 // 1. 变量定义（设计系统）
 // ============================================
 
-// 颜色系统
+// 颜色系统（浅色主题为默认）
 :root {
   --color-primary: #2563eb;      // 主色：蓝色
   --color-primary-dark: #1d4ed8; // 主色深
@@ -16,6 +16,28 @@
   --color-bg: #ffffff;           // 背景白
   --color-bg-alt: #f8fafc;       // 交替背景：浅灰
   --color-border: #e2e8f0;       // 边框色
+  --color-card-bg: #ffffff;      // 卡片背景
+  --color-header-bg: rgba(255, 255, 255, 0.95); // 头部背景
+  --color-footer-bg: #1e293b;    // 页脚背景
+  --color-footer-text: rgba(255, 255, 255, 0.8); // 页脚文字
+  --color-footer-copyright: rgba(255, 255, 255, 0.6); // 页脚版权
+  --color-code-bg: #1e293b;      // 代码块背景
+  --color-code-text: #e2e8f0;    // 代码块文字
+  --color-code-inline: #c7254e;  // 行内代码颜色
+  --color-hero-gradient-start: #f0f9ff; // Hero渐变起始
+  --color-hero-gradient-end: #ffffff;   // Hero渐变结束
+  --color-tag-bg: rgba(37, 99, 235, 0.08); // 标签背景
+  --color-tag-border: rgba(37, 99, 235, 0.25); // 标签边框
+  --color-tag-bg-hover: rgba(37, 99, 235, 0.15); // 标签悬停背景
+  --color-tag-border-hover: rgba(37, 99, 235, 0.4); // 标签悬停边框
+  --color-green-tag-bg: rgba(16, 185, 129, 0.08);
+  --color-green-tag-border: rgba(16, 185, 129, 0.25);
+  --color-green-tag-bg-hover: rgba(16, 185, 129, 0.15);
+  --color-green-tag-border-hover: rgba(16, 185, 129, 0.4);
+  --color-gray-tag-bg: rgba(100, 116, 139, 0.08);
+  --color-gray-tag-border: rgba(100, 116, 139, 0.25);
+  --color-gray-tag-bg-hover: rgba(100, 116, 139, 0.15);
+  --color-gray-tag-border-hover: rgba(100, 116, 139, 0.4);
 
   // 间距系统（8px 基准）
   --space-xs: 0.5rem;   // 8px
@@ -37,6 +59,44 @@
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+}
+
+// 深色主题（GitHub Dark Dimmed 风格）
+[data-theme="dark"] {
+  --color-primary: #58a6ff;
+  --color-primary-dark: #79b8ff;
+  --color-secondary: #8b949e;
+  --color-text: #c9d1d9;
+  --color-text-light: #8b949e;
+  --color-bg: #0d1117;
+  --color-bg-alt: #161b22;
+  --color-border: #30363d;
+  --color-card-bg: #161b22;
+  --color-header-bg: rgba(13, 17, 23, 0.95);
+  --color-footer-bg: #010409;
+  --color-footer-text: rgba(201, 209, 217, 0.8);
+  --color-footer-copyright: rgba(139, 148, 158, 0.6);
+  --color-code-bg: #161b22;
+  --color-code-text: #c9d1d9;
+  --color-code-inline: #ff7b72;
+  --color-hero-gradient-start: #161b22;
+  --color-hero-gradient-end: #0d1117;
+  --color-tag-bg: rgba(88, 166, 255, 0.12);
+  --color-tag-border: rgba(88, 166, 255, 0.3);
+  --color-tag-bg-hover: rgba(88, 166, 255, 0.2);
+  --color-tag-border-hover: rgba(88, 166, 255, 0.45);
+  --color-green-tag-bg: rgba(35, 197, 94, 0.12);
+  --color-green-tag-border: rgba(35, 197, 94, 0.3);
+  --color-green-tag-bg-hover: rgba(35, 197, 94, 0.2);
+  --color-green-tag-border-hover: rgba(35, 197, 94, 0.45);
+  --color-gray-tag-bg: rgba(139, 148, 158, 0.12);
+  --color-gray-tag-border: rgba(139, 148, 158, 0.3);
+  --color-gray-tag-bg-hover: rgba(139, 148, 158, 0.2);
+  --color-gray-tag-border-hover: rgba(139, 148, 158, 0.45);
+
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.5);
 }
 
 // ============================================
@@ -130,7 +190,7 @@ a {
 .site-header {
   position: sticky;  // 滚动时固定在顶部
   top: 0;
-  background: rgba(255, 255, 255, 0.95);
+  background: var(--color-header-bg);
   backdrop-filter: blur(10px);  // 毛玻璃效果
   border-bottom: 1px solid var(--color-border);
   z-index: 100;
@@ -168,7 +228,7 @@ a {
     top: 64px;
     left: 0;
     right: 0;
-    background: white;
+    background: var(--color-card-bg);
     flex-direction: column;
     padding: var(--space-md);
     border-bottom: 1px solid var(--color-border);
@@ -196,6 +256,39 @@ a {
     &:last-child {
       border-bottom: none;
     }
+  }
+}
+
+// 主题切换按钮
+.theme-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  font-size: 1.25rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: var(--space-sm);
+  border-radius: var(--radius-sm);
+  transition: background-color 0.2s;
+
+  &:hover {
+    background-color: var(--color-bg-alt);
+  }
+
+  .theme-icon-dark {
+    display: none;
+  }
+}
+
+[data-theme="dark"] .theme-toggle {
+  .theme-icon-light {
+    display: none;
+  }
+  .theme-icon-dark {
+    display: inline;
   }
 }
 
@@ -239,7 +332,7 @@ a {
 
 .hero-section {
   padding: var(--space-2xl) 0;
-  background: linear-gradient(135deg, #f0f9ff 0%, #ffffff 100%);
+  background: linear-gradient(135deg, var(--color-hero-gradient-start) 0%, var(--color-hero-gradient-end) 100%);
 
   .container {
     display: grid;
@@ -260,7 +353,7 @@ a {
     height: 280px;
     object-fit: cover;
     border-radius: 50%;  // 圆形头像
-    border: 4px solid white;
+    border: 4px solid var(--color-bg);
     box-shadow: var(--shadow-lg);
     margin: 0 auto;
 
@@ -313,18 +406,18 @@ a {
 
   &.btn-primary {
     background: var(--color-primary);
-    color: white;
+    color: #ffffff;
 
     &:hover {
       background: var(--color-primary-dark);
-      color: white;
+      color: #ffffff;
       transform: translateY(-2px);
       box-shadow: var(--shadow-md);
     }
   }
 
   &.btn-secondary {
-    background: white;
+    background: var(--color-card-bg);
     color: var(--color-text);
     border: 1px solid var(--color-border);
 
@@ -392,7 +485,7 @@ a {
   // 当前工作的特殊样式
   &.current .timeline-marker {
     background: var(--color-primary);
-    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.2);
+    box-shadow: 0 0 0 4px var(--color-tag-bg);
   }
 }
 
@@ -400,7 +493,7 @@ a {
   position: absolute;
   width: 16px;
   height: 16px;
-  background: white;
+  background: var(--color-bg);
   border: 3px solid var(--color-secondary);
   border-radius: 50%;
   top: 4px;
@@ -426,7 +519,7 @@ a {
 }
 
 .timeline-content {
-  background: white;
+  background: var(--color-card-bg);
   padding: var(--space-md);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
@@ -525,7 +618,7 @@ a {
   border-radius: var(--radius-md);
   font-weight: 500;
   font-size: 0.95rem;
-  background: white;
+  background: var(--color-card-bg);
   color: var(--color-text);
   border: 1px solid var(--color-border);
   cursor: pointer;
@@ -569,7 +662,7 @@ a {
 }
 
 .tech-category {
-  background: white;
+  background: var(--color-card-bg);
   padding: var(--space-lg);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
@@ -701,37 +794,37 @@ a {
   // 默认 / 熟悉 → 蓝色主题
   &[data-level="熟悉"],
   &:not([data-level]) {
-    background: rgba(37, 99, 235, 0.08);
+    background: var(--color-tag-bg);
     color: var(--color-primary);
-    border-color: rgba(37, 99, 235, 0.25);
+    border-color: var(--color-tag-border);
 
     &:hover {
-      background: rgba(37, 99, 235, 0.15);
-      border-color: rgba(37, 99, 235, 0.4);
+      background: var(--color-tag-bg-hover);
+      border-color: var(--color-tag-border-hover);
     }
   }
 
   // 使用过 → 绿色主题
   &[data-level="使用过"] {
-    background: rgba(16, 185, 129, 0.08);
+    background: var(--color-green-tag-bg);
     color: #059669;
-    border-color: rgba(16, 185, 129, 0.25);
+    border-color: var(--color-green-tag-border);
 
     &:hover {
-      background: rgba(16, 185, 129, 0.15);
-      border-color: rgba(16, 185, 129, 0.4);
+      background: var(--color-green-tag-bg-hover);
+      border-color: var(--color-green-tag-border-hover);
     }
   }
 
   // 了解基本概念 → 灰色主题
   &[data-level="了解基本概念"] {
-    background: rgba(100, 116, 139, 0.08);
+    background: var(--color-gray-tag-bg);
     color: #475569;
-    border-color: rgba(100, 116, 139, 0.25);
+    border-color: var(--color-gray-tag-border);
 
     &:hover {
-      background: rgba(100, 116, 139, 0.15);
-      border-color: rgba(100, 116, 139, 0.4);
+      background: var(--color-gray-tag-bg-hover);
+      border-color: var(--color-gray-tag-border-hover);
     }
   }
 }
@@ -753,7 +846,7 @@ a {
   grid-template-columns: 150px 1fr;
   gap: var(--space-md);
   padding: var(--space-md);
-  background: white;
+  background: var(--color-card-bg);
   border-radius: var(--radius-lg);
   border: 1px solid var(--color-border);
 
@@ -801,7 +894,7 @@ a {
 }
 
 .project-row {
-  background: white;
+  background: var(--color-card-bg);
   border-radius: var(--radius-lg);
   border: 1px solid var(--color-border);
   box-shadow: var(--shadow-sm);
@@ -1001,7 +1094,7 @@ a {
   align-items: center;
   gap: var(--space-sm);
   padding: var(--space-md) var(--space-lg);
-  background: white;
+  background: var(--color-card-bg);
   border-radius: var(--radius-lg);
   border: 1px solid var(--color-border);
   transition: all 0.2s;
@@ -1022,8 +1115,8 @@ a {
 // ============================================
 
 .site-footer {
-  background: var(--color-text);
-  color: white;
+  background: var(--color-footer-bg);
+  color: var(--color-footer-text);
   padding: var(--space-xl) 0 var(--space-md);
   margin-top: var(--space-2xl);
 
@@ -1039,16 +1132,16 @@ a {
   margin-bottom: var(--space-md);
 
   a {
-    color: rgba(255, 255, 255, 0.8);
+    color: var(--color-footer-text);
 
     &:hover {
-      color: white;
+      color: var(--color-text);
     }
   }
 }
 
 .copyright {
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--color-footer-copyright);
   font-size: 0.9rem;
 }
 
@@ -1059,7 +1152,7 @@ a {
 // 笔记列表页
 .notes-hero {
   padding: var(--space-2xl) 0 var(--space-xl);
-  background: linear-gradient(135deg, #f0f9ff 0%, #ffffff 100%);
+  background: linear-gradient(135deg, var(--color-hero-gradient-start) 0%, var(--color-hero-gradient-end) 100%);
 }
 
 .notes-intro {
@@ -1084,7 +1177,7 @@ a {
 }
 
 .note-card {
-  background: white;
+  background: var(--color-card-bg);
   border-radius: var(--radius-lg);
   padding: var(--space-lg);
   border: 1px solid var(--color-border);
@@ -1115,7 +1208,7 @@ a {
   display: inline-block;
   padding: 2px 10px;
   background: var(--color-primary);
-  color: white;
+  color: #ffffff;
   border-radius: 20px;
   font-size: 0.75rem;
   font-weight: 500;
@@ -1171,7 +1264,7 @@ a {
 // 笔记详情页
 .note-header {
   padding: var(--space-2xl) 0 var(--space-xl);
-  background: linear-gradient(135deg, #f0f9ff 0%, #ffffff 100%);
+  background: linear-gradient(135deg, var(--color-hero-gradient-start) 0%, var(--color-hero-gradient-end) 100%);
 }
 
 .note-header-content {
@@ -1254,12 +1347,12 @@ a {
     border-radius: var(--radius-sm);
     font-family: 'Fira Code', 'Consolas', monospace;
     font-size: 0.9em;
-    color: #c7254e;
+    color: var(--color-code-inline);
   }
 
   pre {
-    background: #1e293b;
-    color: #e2e8f0;
+    background: var(--color-code-bg);
+    color: var(--color-code-text);
     padding: var(--space-md);
     border-radius: var(--radius-md);
     overflow-x: auto;

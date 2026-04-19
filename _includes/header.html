@@ -19,6 +19,12 @@
         <a href="{{ '/' | relative_url }}#contact" class="nav-link">联系方式</a>
       </div>
 
+      <!-- 主题切换按钮 -->
+      <button type="button" class="theme-toggle" id="theme-toggle" aria-label="切换主题" onclick="toggleTheme()">
+        <span class="theme-icon-light" aria-hidden="true">☀️</span>
+        <span class="theme-icon-dark" aria-hidden="true">🌙</span>
+      </button>
+
       <!-- 移动端汉堡菜单按钮（小屏幕显示） -->
       <button class="menu-toggle" aria-label="切换菜单" onclick="toggleMenu()">
         <span></span>
