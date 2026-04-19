@@ -9,6 +9,9 @@ function toggleTheme() {
 
   html.setAttribute('data-theme', newTheme);
   localStorage.setItem('theme', newTheme);
+
+  // 同步切换按钮图标
+  syncThemeToggle();
 }
 
 /**
