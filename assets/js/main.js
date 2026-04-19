@@ -102,8 +102,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
       macroToggle.setAttribute('aria-expanded', newState);
       const textSpan = macroToggle.querySelector('.toggle-text');
+      const iconSpan = macroToggle.querySelector('.toggle-icon');
       if (textSpan) {
         textSpan.textContent = newState ? '收起一级目录' : '展开一级目录';
+      }
+      if (iconSpan) {
+        iconSpan.textContent = newState ? '▼' : '▶';
       }
 
       if (newState) {
