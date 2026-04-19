@@ -43,6 +43,61 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 /**
+ * 技术栈分类折叠/展开交互
+ * 支持单个分类折叠和全局全部折叠/展开
+ */
+document.addEventListener('DOMContentLoaded', () => {
+  const categories = document.querySelectorAll('.tech-category');
+  const globalToggle = document.getElementById('toggle-all-categories');
+
+  // 单个分类折叠/展开
+  categories.forEach(category => {
+    const header = category.querySelector('.tech-category-header');
+    const toggleBtn = category.querySelector('.category-toggle-btn');
+
+    if (!header || !toggleBtn) return;
+
+    const toggleCategory = () => {
+      const isCollapsed = category.classList.contains('collapsed');
+      category.classList.toggle('collapsed');
+      toggleBtn.setAttribute('aria-expanded', isCollapsed);
+    };
+
+    header.addEventListener('click', toggleCategory);
+  });
+
+  // 全局折叠/展开按钮
+  if (globalToggle) {
+    globalToggle.addEventListener('click', () => {
+      const isAllExpanded = globalToggle.getAttribute('aria-expanded') === 'true';
+      const newState = !isAllExpanded;
+
+      categories.forEach(category => {
+        const toggleBtn = category.querySelector('.category-toggle-btn');
+        if (newState) {
+          category.classList.remove('collapsed');
+        } else {
+          category.classList.add('collapsed');
+        }
+        if (toggleBtn) {
+          toggleBtn.setAttribute('aria-expanded', newState);
+        }
+      });
+
+      globalToggle.setAttribute('aria-expanded', newState);
+      const textSpan = globalToggle.querySelector('.toggle-text');
+      const iconSpan = globalToggle.querySelector('.toggle-icon');
+      if (textSpan) {
+        textSpan.textContent = newState ? '收起全部' : '展开全部';
+      }
+      if (iconSpan) {
+        iconSpan.textContent = newState ? '▼' : '▶';
+      }
+    });
+  }
+});
+
+/**
  * 平滑滚动（为不支持 CSS scroll-behavior 的浏览器提供回退）
  * 当点击导航链接时，平滑滚动到对应区域
  */

@@ -497,6 +497,20 @@ a {
 // 7. 技术栈展示
 // ============================================
 
+.tech-stack-desc {
+  text-align: center;
+  max-width: 700px;
+  margin: 0 auto var(--space-xl);
+  color: var(--color-text-light);
+  font-size: 1.05rem;
+  line-height: 1.8;
+}
+
+.tech-stack-global-toggle {
+  text-align: center;
+  margin-bottom: var(--space-lg);
+}
+
 .tech-stack-grid {
   display: flex;
   flex-direction: column;
@@ -511,24 +525,78 @@ a {
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
   border: 1px solid var(--color-border);
+  transition: box-shadow 0.2s;
+
+  &.collapsed {
+    box-shadow: var(--shadow-sm);
+  }
+}
+
+.tech-category-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  padding-bottom: var(--space-sm);
+  border-bottom: 2px solid var(--color-primary);
+  margin-bottom: var(--space-lg);
+  transition: margin-bottom 0.3s;
+
+  .tech-category.collapsed & {
+    margin-bottom: 0;
+    border-bottom: 2px solid var(--color-border);
+  }
 }
 
 .tech-category-title {
   color: var(--color-primary);
   font-weight: 700;
   font-size: 1.3rem;
-  margin-bottom: var(--space-lg);
-  padding-bottom: var(--space-sm);
-  border-bottom: 2px solid var(--color-primary);
+  margin: 0;
+}
+
+.category-toggle-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-primary);
+  transition: transform 0.3s;
+
+  .toggle-icon {
+    font-size: 0.9rem;
+    display: inline-block;
+    transition: transform 0.3s;
+  }
+
+  &[aria-expanded="false"] .toggle-icon {
+    transform: rotate(-90deg);
+  }
+
+  &:hover {
+    color: var(--color-primary-dark);
+  }
 }
 
 .tech-subcategories {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: var(--space-md);
+  max-height: 5000px;
+  overflow: hidden;
+  transition: max-height 0.4s ease-out, opacity 0.3s ease-out;
+  opacity: 1;
 
   @media (max-width: 768px) {
     grid-template-columns: 1fr;
+  }
+
+  .tech-category.collapsed & {
+    max-height: 0;
+    opacity: 0;
   }
 }
 

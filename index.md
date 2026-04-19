@@ -105,11 +105,27 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
 <section id="skills" class="section section-alt">
   <div class="container">
     <h2 class="section-title">技术栈</h2>
+    <p class="tech-stack-desc">
+      这里尽量列出来了我涉及到的技术栈，这样能方便我对自己的知识框架进行查漏补缺，也能更好的让合作方了解匹配情况。
+    </p>
+
+    <!-- 全局折叠按钮 -->
+    <div class="tech-stack-global-toggle">
+      <button class="btn btn-secondary" id="toggle-all-categories" aria-expanded="true">
+        <span class="toggle-text">收起全部</span>
+        <span class="toggle-icon">▼</span>
+      </button>
+    </div>
 
     <div class="tech-stack-grid">
       {% for category in site.data.skills.categories %}
-      <div class="tech-category">
-        <h3 class="tech-category-title">{{ category.name }}</h3>
+      <div class="tech-category" data-category-index="{{ forloop.index }}">
+        <div class="tech-category-header">
+          <h3 class="tech-category-title">{{ category.name }}</h3>
+          <button class="category-toggle-btn" aria-label="折叠分类" aria-expanded="true">
+            <span class="toggle-icon">▼</span>
+          </button>
+        </div>
 
         <div class="tech-subcategories">
           {% for sub in category.subcategories %}
