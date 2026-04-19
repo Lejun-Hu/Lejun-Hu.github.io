@@ -101,29 +101,28 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
   </div>
 </section>
 
-<!-- ===== 技能部分 ===== -->
+<!-- ===== 技术栈部分 ===== -->
 <section id="skills" class="section section-alt">
   <div class="container">
-    <h2 class="section-title">专业技能</h2>
+    <h2 class="section-title">技术栈</h2>
 
-    <div class="skills-grid">
+    <div class="tech-stack-grid">
       {% for category in site.data.skills.categories %}
-      <div class="skill-category">
-        <h3 class="category-title">
-          <span class="category-icon">{{ category.icon }}</span>
-          {{ category.name }}
-        </h3>
+      <div class="tech-category">
+        <h3 class="tech-category-title">{{ category.name }}</h3>
 
-        <div class="skill-list">
-          {% for skill in category.items %}
-          <div class="skill-item">
-            <div class="skill-info">
-              <span class="skill-name">{{ skill.name }}</span>
-              <span class="skill-level">{{ skill.level }}%</span>
-            </div>
-            <!-- 进度条 -->
-            <div class="skill-bar">
-              <div class="skill-progress" style="width: {{ skill.level }}%"></div>
+        <div class="tech-subcategories">
+          {% for sub in category.subcategories %}
+          <div class="tech-subcategory">
+            <h4 class="tech-subcategory-title">{{ sub.name }}</h4>
+            <div class="tech-skill-tags">
+              {% for skill in sub.skills %}
+              <span class="tech-skill-tag" data-level="{{ skill.level }}">
+                <span class="skill-name">{{ skill.name }}</span>
+                <span class="skill-sep">·</span>
+                <span class="skill-level-text">{{ skill.level }}</span>
+              </span>
+              {% endfor %}
             </div>
           </div>
           {% endfor %}

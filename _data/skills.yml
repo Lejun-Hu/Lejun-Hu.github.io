@@ -1,33 +1,293 @@
-# 技能分类列表
+# 技术栈分类列表（两级结构）
 categories:
-  - name: 前端开发
-    icon: 💻
-    items:
-      - name: HTML5/CSS3
-        level: 95
-      - name: JavaScript/ES6+
-        level: 90
-      - name: React/Vue
-        level: 85
-      - name: TypeScript
-        level: 80
+  - name: 大模型系统与推理框架层
+    subcategories:
+      - name: LLM 架构
+        skills:
+          - name: Transformer
+            level: 熟悉
+          - name: Decoder-only
+            level: 熟悉
+          - name: KV Cache
+            level: 熟悉
+          - name: MoE
+            level: 熟悉
+      - name: 推理服务
+        skills:
+          - name: vLLM
+            level: 熟悉
+          - name: TGI
+            level: 熟悉
+          - name: SGLang
+            level: 熟悉
+          - name: LightLLM
+            level: 熟悉
+      - name: 推理优化
+        skills:
+          - name: PagedAttention
+            level: 熟悉
+          - name: 动态 Batch
+            level: 熟悉
+          - name: Continuous Batching
+            level: 熟悉
+      - name: 模型定制
+        skills:
+          - name: LoRA
+            level: 熟悉
+          - name: QLoRA
+            level: 熟悉
+          - name: PTQ 量化（INT8/FP8/INT4）
+            level: 熟悉
+      - name: 检索增强
+        skills:
+          - name: RAG 流程
+            level: 熟悉
+          - name: 向量数据库
+            level: 熟悉
 
-  - name: 后端开发
-    icon: ⚙️
-    items:
-      - name: Node.js
-        level: 85
-      - name: Python
-        level: 80
-      - name: SQL/NoSQL
-        level: 75
+  - name: 深度学习框架与计算图层
+    subcategories:
+      - name: 框架
+        skills:
+          - name: PyTorch
+            level: 熟悉
+          - name: TorchScript
+            level: 熟悉
+          - name: ONNX
+            level: 熟悉
+          - name: TorchDynamo
+            level: 熟悉
+      - name: 计算图
+        skills:
+          - name: 算子 IR
+            level: 熟悉
+          - name: 图优化
+            level: 熟悉
+          - name: 常量折叠
+            level: 熟悉
+          - name: 死代码消除
+            level: 熟悉
+      - name: 模型导出
+        skills:
+          - name: ONNX 导出
+            level: 熟悉
+          - name: Engine 构建
+            level: 熟悉
+          - name: 模型序列化
+            level: 熟悉
 
-  - name: 工具与平台
-    icon: 🛠️
-    items:
-      - name: Git/GitHub
-        level: 90
-      - name: Docker
-        level: 75
-      - name: AWS/阿里云
-        level: 70
+  - name: 算子与计算优化层
+    subcategories:
+      - name: 基础算子
+        skills:
+          - name: MatMul
+            level: 熟悉
+          - name: GEMM
+            level: 熟悉
+          - name: ReLU
+            level: 熟悉
+          - name: Softmax
+            level: 熟悉
+          - name: LayerNorm
+            level: 熟悉
+          - name: Attention
+            level: 熟悉
+      - name: 高级算子
+        skills:
+          - name: FlashAttention
+            level: 熟悉
+          - name: 算子融合
+            level: 熟悉
+          - name: Fused Attention
+            level: 熟悉
+      - name: 算子库
+        skills:
+          - name: cuBLAS
+            level: 熟悉
+          - name: cuDNN
+            level: 熟悉
+          - name: CUTLASS
+            level: 熟悉
+          - name: TVM/Ansor
+            level: 熟悉
+      - name: 优化方法
+        skills:
+          - name: Tiling
+            level: 熟悉
+          - name: 数据复用
+            level: 熟悉
+          - name: 向量化
+            level: 熟悉
+          - name: 共享内存优化
+            level: 熟悉
+
+  - name: 推理引擎与编译器层
+    subcategories:
+      - name: NVIDIA 推理引擎
+        skills:
+          - name: TensorRT
+            level: 熟悉
+      - name: 通用编译器
+        skills:
+          - name: TVM
+            level: 熟悉
+          - name: MLIR
+            level: 熟悉
+          - name: Halide
+            level: 熟悉
+      - name: 图优化
+        skills:
+          - name: 层融合
+            level: 熟悉
+          - name: 精度转换
+            level: 熟悉
+          - name: kernel selection
+            level: 熟悉
+          - name: auto-tuning
+            level: 熟悉
+
+  - name: 并行计算与集合通信层
+    subcategories:
+      - name: 并行策略
+        skills:
+          - name: 张量并行 TP
+            level: 熟悉
+          - name: 流水线并行 PP
+            level: 熟悉
+          - name: 数据并行 DP
+            level: 熟悉
+      - name: 通信库
+        skills:
+          - name: NCCL
+            level: 熟悉
+          - name: UCX
+            level: 熟悉
+          - name: MPI
+            level: 熟悉
+      - name: 通信原语
+        skills:
+          - name: AllReduce
+            level: 熟悉
+          - name: AllGather
+            level: 熟悉
+          - name: Broadcast
+            level: 熟悉
+          - name: P2P
+            level: 熟悉
+      - name: 优化
+        skills:
+          - name: 计算通信重叠
+            level: 熟悉
+          - name: 拓扑感知调度
+            level: 熟悉
+          - name: 多机多卡集群
+            level: 熟悉
+
+  - name: 底层编程与运行时层
+    subcategories:
+      - name: GPU 编程
+        skills:
+          - name: CUDA C++
+            level: 熟悉
+          - name: CUDA Runtime
+            level: 熟悉
+          - name: Kernel 启动
+            level: 熟悉
+      - name: 编译工具
+        skills:
+          - name: nvcc
+            level: 熟悉
+          - name: CMake
+            level: 熟悉
+          - name: Makefile
+            level: 熟悉
+      - name: 中间指令
+        skills:
+          - name: PTX
+            level: 熟悉
+          - name: SASS（GPU 汇编）
+            level: 熟悉
+      - name: 性能分析
+        skills:
+          - name: nsys
+            level: 熟悉
+          - name: nvprof
+            level: 熟悉
+          - name: Roofline 模型
+            level: 熟悉
+
+  - name: AI 芯片体系结构层
+    subcategories:
+      - name: 架构
+        skills:
+          - name: GPU
+            level: 熟悉
+          - name: TPU
+            level: 熟悉
+          - name: LPU
+            level: 熟悉
+          - name: NPU
+            level: 熟悉
+      - name: 存储层次
+        skills:
+          - name: HBM
+            level: 熟悉
+          - name: SRAM
+            level: 熟悉
+          - name: 片上缓存
+            level: 熟悉
+          - name: 寄存器
+            level: 熟悉
+      - name: 计算单元
+        skills:
+          - name: Tensor Core
+            level: 熟悉
+          - name: MXM
+            level: 熟悉
+          - name: Systolic Array
+            level: 熟悉
+          - name: SIMT/SIMD
+            level: 熟悉
+      - name: 架构特点
+        skills:
+          - name: LPU 静态数据流
+            level: 熟悉
+          - name: 无缓存设计
+            level: 熟悉
+          - name: KV Cache 友好
+            level: 熟悉
+
+  - name: 系统与工程工具层
+    subcategories:
+      - name: 开发工具
+        skills:
+          - name: Git
+            level: 熟悉
+          - name: Linux
+            level: 熟悉
+          - name: SSH
+            level: 熟悉
+          - name: Vim/VSCode
+            level: 熟悉
+      - name: 构建工具
+        skills:
+          - name: CMake
+            level: 熟悉
+          - name: Make
+            level: 熟悉
+          - name: conda
+            level: 熟悉
+          - name: pip
+            level: 熟悉
+      - name: 容器化
+        skills:
+          - name: Docker
+            level: 熟悉
+      - name: 性能监控
+        skills:
+          - name: 显存分析
+            level: 熟悉
+          - name: 带宽利用率
+            level: 熟悉
+          - name: 算力利用率
+            level: 熟悉

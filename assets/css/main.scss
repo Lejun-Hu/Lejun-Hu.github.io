@@ -494,18 +494,18 @@ a {
 }
 
 // ============================================
-// 7. 技能展示
+// 7. 技术栈展示
 // ============================================
 
-.skills-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: var(--space-xl);
+.tech-stack-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
   max-width: 1000px;
   margin: 0 auto;
 }
 
-.skill-category {
+.tech-category {
   background: white;
   padding: var(--space-lg);
   border-radius: var(--radius-lg);
@@ -513,56 +513,105 @@ a {
   border: 1px solid var(--color-border);
 }
 
-.category-title {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  font-size: 1.25rem;
-  margin-bottom: var(--space-md);
-  color: var(--color-text);
+.tech-category-title {
+  color: var(--color-primary);
+  font-weight: 700;
+  font-size: 1.3rem;
+  margin-bottom: var(--space-lg);
+  padding-bottom: var(--space-sm);
+  border-bottom: 2px solid var(--color-primary);
 }
 
-.category-icon {
-  font-size: 1.5rem;
-}
+.tech-subcategories {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-md);
 
-.skill-item {
-  margin-bottom: var(--space-md);
-
-  &:last-child {
-    margin-bottom: 0;
+  @media (max-width: 768px) {
+    grid-template-columns: 1fr;
   }
 }
 
-.skill-info {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: var(--space-xs);
-  font-size: 0.9rem;
-}
-
-.skill-name {
-  font-weight: 500;
-  color: var(--color-text);
-}
-
-.skill-level {
-  color: var(--color-text-light);
-  font-size: 0.85rem;
-}
-
-.skill-bar {
-  height: 8px;
+.tech-subcategory {
+  padding: var(--space-md);
   background: var(--color-bg-alt);
-  border-radius: 4px;
-  overflow: hidden;
+  border-radius: var(--radius-md);
 }
 
-.skill-progress {
-  height: 100%;
-  background: linear-gradient(90deg, var(--color-primary), #60a5fa);
-  border-radius: 4px;
-  transition: width 1s ease-out;
+.tech-subcategory-title {
+  color: var(--color-text);
+  font-weight: 600;
+  font-size: 1rem;
+  margin-bottom: var(--space-sm);
+}
+
+.tech-skill-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.tech-skill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border: 1px solid;
+  transition: all 0.2s;
+
+  .skill-name {
+    color: inherit;
+  }
+
+  .skill-sep {
+    opacity: 0.5;
+    font-size: 0.75rem;
+  }
+
+  .skill-level-text {
+    font-size: 0.75rem;
+    opacity: 0.85;
+  }
+
+  // 默认 / 熟悉 → 蓝色主题
+  &[data-level="熟悉"],
+  &:not([data-level]) {
+    background: rgba(37, 99, 235, 0.08);
+    color: var(--color-primary);
+    border-color: rgba(37, 99, 235, 0.25);
+
+    &:hover {
+      background: rgba(37, 99, 235, 0.15);
+      border-color: rgba(37, 99, 235, 0.4);
+    }
+  }
+
+  // 使用过 → 绿色主题
+  &[data-level="使用过"] {
+    background: rgba(16, 185, 129, 0.08);
+    color: #059669;
+    border-color: rgba(16, 185, 129, 0.25);
+
+    &:hover {
+      background: rgba(16, 185, 129, 0.15);
+      border-color: rgba(16, 185, 129, 0.4);
+    }
+  }
+
+  // 了解基本概念 → 灰色主题
+  &[data-level="了解基本概念"] {
+    background: rgba(100, 116, 139, 0.08);
+    color: #475569;
+    border-color: rgba(100, 116, 139, 0.25);
+
+    &:hover {
+      background: rgba(100, 116, 139, 0.15);
+      border-color: rgba(100, 116, 139, 0.4);
+    }
+  }
 }
 
 // ============================================

@@ -25,39 +25,21 @@ window.addEventListener('scroll', () => {
 });
 
 /**
- * 技能条动画
- * 当技能区域进入视口时，触发进度条宽度动画
+ * 技术栈标签悬停效果
+ * 为技术栈标签添加简单的交互反馈
  */
-const observerOptions = {
-  threshold: 0.5,  // 当 50% 的元素可见时触发
-  rootMargin: '0px'
-};
-
-const skillsObserver = new IntersectionObserver((entries) => {
-  entries.forEach(entry => {
-    if (entry.isIntersecting) {
-      const progressBars = entry.target.querySelectorAll('.skill-progress');
-      progressBars.forEach(bar => {
-        // 获取目标宽度（从 style 属性中读取）
-        const width = bar.style.width;
-        // 先设为 0，然后动画到目标宽度
-        bar.style.width = '0';
-        setTimeout(() => {
-          bar.style.width = width;
-        }, 100);
-      });
-      // 动画触发一次后停止观察
-      skillsObserver.unobserve(entry.target);
-    }
-  });
-}, observerOptions);
-
-// 页面加载完成后启动观察
 document.addEventListener('DOMContentLoaded', () => {
-  const skillsSection = document.querySelector('#skills');
-  if (skillsSection) {
-    skillsObserver.observe(skillsSection);
-  }
+  const skillTags = document.querySelectorAll('.tech-skill-tag');
+
+  skillTags.forEach(tag => {
+    tag.addEventListener('mouseenter', () => {
+      tag.style.transform = 'translateY(-1px)';
+    });
+
+    tag.addEventListener('mouseleave', () => {
+      tag.style.transform = 'translateY(0)';
+    });
+  });
 });
 
 /**
