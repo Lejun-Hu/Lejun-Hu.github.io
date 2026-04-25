@@ -54,46 +54,31 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
   <div class="container">
     <h2 class="section-title">工作经历</h2>
 
-    <div class="timeline">
-      <!-- 
-        使用 Liquid 循环遍历 _data/experience.yml 中的数据 
-        site.data.experience 会自动对应 _data/experience.yml
-      -->
+    <div class="experience-list">
       {% for job in site.data.experience.jobs %}
-      <div class="timeline-item {% if job.current %}current{% endif %}">
-
-        <!-- 时间标记 -->
-        <div class="timeline-marker"></div>
-
-        <!-- 内容卡片 -->
-        <div class="timeline-content">
-          <div class="job-header">
-            <h3 class="job-company">{{ job.company }}</h3>
-            <span class="job-location">{{ job.location }}</span>
+      <div class="experience-item {% if job.current %}current{% endif %}">
+        <div class="experience-header">
+          <div class="experience-main">
+            <h3 class="experience-company">{{ job.company }}</h3>
+            <span class="experience-position">{{ job.position }}</span>
           </div>
-
-          <div class="job-meta">
-            <span class="job-position">{{ job.position }}</span>
-            <span class="job-date">
-              {{ job.start_date }} - {{ job.end_date }}
-            </span>
+          <div class="experience-meta">
+            <span class="experience-location">{{ job.location }}</span>
+            <span class="experience-date">{{ job.start_date }} - {{ job.end_date }}</span>
           </div>
-
-          <!-- 使用 markdownify 过滤器将 Markdown 转为 HTML -->
-          <div class="job-description">
-            {{ job.description | markdownify }}
-          </div>
-
-          <!-- 工作亮点列表 -->
-          {% if job.highlights %}
-          <ul class="job-highlights">
-            {% for highlight in job.highlights %}
-            <li>{{ highlight }}</li>
-            {% endfor %}
-          </ul>
-          {% endif %}
         </div>
 
+        <div class="experience-description">
+          {{ job.description | markdownify }}
+        </div>
+
+        {% if job.highlights %}
+        <ul class="experience-highlights">
+          {% for highlight in job.highlights %}
+          <li>{{ highlight }}</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
       </div>
       {% endfor %}
     </div>
@@ -168,7 +153,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
         </div>
         <div class="edu-content">
           <h3>{{ edu.school }}</h3>
-          <p class="edu-degree">{{ edu.degree }}</p>
+          <div class="edu-degree">{{ edu.degree | markdownify }}</div>
           <p class="edu-desc">{{ edu.description }}</p>
         </div>
       </div>

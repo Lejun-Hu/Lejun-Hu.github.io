@@ -429,146 +429,113 @@ a {
 }
 
 // ============================================
-// 6. 时间线（工作经历）
+// 6. 工作经历（简洁列表式）
 // ============================================
 
-.timeline {
-  position: relative;
+.experience-list {
   max-width: 800px;
   margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+}
 
-  // 中间的时间线
-  &::before {
-    content: '';
-    position: absolute;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 2px;
-    height: 100%;
-    background: var(--color-border);
+.experience-item {
+  padding-bottom: var(--space-lg);
+  border-bottom: 1px solid var(--color-border);
 
-    @media (max-width: 768px) {
-      left: 20px;
-    }
+  &:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  &.current .experience-company {
+    color: var(--color-primary);
   }
 }
 
-.timeline-item {
-  position: relative;
-  margin-bottom: var(--space-xl);
-  width: 50%;
-  padding: 0 var(--space-lg);
-
-  // 奇数项在左，偶数项在右
-  &:nth-child(odd) {
-    left: 0;
-    text-align: right;
-
-    @media (max-width: 768px) {
-      text-align: left;
-      left: 0;
-      width: 100%;
-      padding-left: 50px;
-    }
-  }
-
-  &:nth-child(even) {
-    left: 50%;
-
-    @media (max-width: 768px) {
-      left: 0;
-      width: 100%;
-      padding-left: 50px;
-    }
-  }
-
-  // 当前工作的特殊样式
-  &.current .timeline-marker {
-    background: var(--color-primary);
-    box-shadow: 0 0 0 4px var(--color-tag-bg);
-  }
-}
-
-.timeline-marker {
-  position: absolute;
-  width: 16px;
-  height: 16px;
-  background: var(--color-bg);
-  border: 3px solid var(--color-secondary);
-  border-radius: 50%;
-  top: 4px;
-
-  // 奇数项的标记在右侧
-  .timeline-item:nth-child(odd) & {
-    right: -8px;
-
-    @media (max-width: 768px) {
-      right: auto;
-      left: 12px;
-    }
-  }
-
-  // 偶数项的标记在左侧
-  .timeline-item:nth-child(even) & {
-    left: -8px;
-
-    @media (max-width: 768px) {
-      left: 12px;
-    }
-  }
-}
-
-.timeline-content {
-  background: var(--color-card-bg);
-  padding: var(--space-md);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-  border: 1px solid var(--color-border);
-}
-
-.job-company {
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: var(--color-text);
-  margin-bottom: 4px;
-}
-
-.job-location {
-  font-size: 0.875rem;
-  color: var(--color-text-light);
-}
-
-.job-meta {
+.experience-header {
   display: flex;
   justify-content: space-between;
-  margin: var(--space-sm) 0;
-  padding-bottom: var(--space-sm);
-  border-bottom: 1px solid var(--color-border);
-  font-size: 0.9rem;
+  align-items: flex-start;
+  margin-bottom: var(--space-sm);
+  gap: var(--space-md);
 
   @media (max-width: 768px) {
     flex-direction: column;
-    gap: 4px;
+    gap: var(--space-xs);
   }
 }
 
-.job-position {
+.experience-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.experience-company {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.experience-position {
   color: var(--color-primary);
+  font-weight: 500;
+  font-size: 1rem;
+}
+
+.experience-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+
+  @media (max-width: 768px) {
+    align-items: flex-start;
+  }
+}
+
+.experience-location {
+  font-size: 0.9rem;
+  color: var(--color-text-light);
+}
+
+.experience-date {
+  font-size: 0.9rem;
+  color: var(--color-text-light);
   font-weight: 500;
 }
 
-.job-date {
-  color: var(--color-text-light);
-}
-
-.job-description {
+.experience-description {
   color: var(--color-text-light);
   margin-bottom: var(--space-sm);
   font-size: 0.95rem;
+  line-height: 1.7;
+
+  p {
+    margin-bottom: var(--space-xs);
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
+
+  ul {
+    padding-left: 1.5rem;
+    margin-bottom: var(--space-xs);
+  }
+
+  li {
+    margin-bottom: 4px;
+  }
 }
 
-.job-highlights {
+.experience-highlights {
   list-style: none;
+  margin-top: var(--space-sm);
 
   li {
     position: relative;
@@ -845,7 +812,7 @@ a {
 
 .education-item {
   display: grid;
-  grid-template-columns: 150px 1fr;
+  grid-template-columns: 200px 1fr;
   gap: var(--space-md);
   padding: var(--space-md);
   background: var(--color-card-bg);
@@ -876,6 +843,14 @@ a {
   color: var(--color-primary);
   font-weight: 500;
   margin-bottom: var(--space-xs);
+
+  p {
+    margin-bottom: 2px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
 }
 
 .edu-desc {
