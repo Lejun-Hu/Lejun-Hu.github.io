@@ -153,7 +153,10 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
         </div>
         <div class="edu-content">
           <h3>{{ edu.school }}</h3>
-          <div class="edu-degree">{{ edu.degree | markdownify }}</div>
+          <div class="edu-degree">
+            <p class="degree-ch">{{ edu.degree_ch }}</p>
+            <p class="degree-en">{{ edu.degree_en }}</p>
+          </div>
           <p class="edu-desc">{{ edu.description }}</p>
         </div>
       </div>
