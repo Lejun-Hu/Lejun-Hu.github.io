@@ -1,6 +1,7 @@
 # 技术栈分类列表（两级结构）
 categories:
   - name: 大模型系统与推理框架层
+    enabled: true
     subcategories:
       - name: LLM 架构
         skills:
@@ -46,6 +47,7 @@ categories:
             level: 熟悉
 
   - name: 深度学习框架与计算图层
+    enabled: true
     subcategories:
       - name: 框架
         skills:
@@ -77,6 +79,7 @@ categories:
             level: 熟悉
 
   - name: 算子与计算优化层
+    enabled: true
     subcategories:
       - name: 基础算子
         skills:
@@ -122,6 +125,7 @@ categories:
             level: 熟悉
 
   - name: 推理引擎与编译器层
+    enabled: true
     subcategories:
       - name: NVIDIA 推理引擎
         skills:
@@ -147,6 +151,7 @@ categories:
             level: 熟悉
 
   - name: 并行计算与集合通信层
+    enabled: true
     subcategories:
       - name: 并行策略
         skills:
@@ -184,6 +189,7 @@ categories:
             level: 熟悉
 
   - name: 底层编程与运行时层
+    enabled: true
     subcategories:
       - name: GPU 编程
         skills:
@@ -217,6 +223,7 @@ categories:
             level: 熟悉
 
   - name: AI 芯片体系结构层
+    enabled: true
     subcategories:
       - name: 架构
         skills:
@@ -258,6 +265,7 @@ categories:
             level: 熟悉
 
   - name: 系统与工程工具层
+    enabled: true
     subcategories:
       - name: 开发工具
         skills:

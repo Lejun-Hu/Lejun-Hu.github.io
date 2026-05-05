@@ -108,6 +108,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
 
     <div class="tech-stack-grid collapsed-macro" id="tech-stack-grid">
       {% for category in site.data.skills.categories %}
+      {% if category.enabled != false %}
       <div class="tech-category collapsed" data-category-index="{{ forloop.index }}">
         <div class="tech-category-header">
           <h3 class="tech-category-title">{{ category.name }}</h3>
@@ -134,6 +135,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
         </div>
 
       </div>
+      {% endif %}
       {% endfor %}
     </div>
 
