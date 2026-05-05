@@ -168,6 +168,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
   </div>
 </section>
 
+{% if site.data.projects.enabled != false %}
 <!-- ===== 项目展示部分 ===== -->
 <section id="projects" class="section section-alt">
   <div class="container">
@@ -229,6 +230,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
 
   </div>
 </section>
+{% endif %}
 
 <!-- ===== 联系方式部分 ===== -->
 <section id="contact" class="section">

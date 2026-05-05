@@ -1,4 +1,7 @@
 # 项目列表（按时间倒序）
+# 总开关：设置 enabled: false 可隐藏整个项目作品板块
+enabled: true
+
 projects:
   - title: 电商平台前端重构
     period: 2023.09 - 2024.02
