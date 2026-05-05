@@ -6,9 +6,11 @@
 title: "Egan's Personal Page"
 
 # 副标题/一句话介绍
-description: "Dedicated to learning and designing 
-- full-stack AI compute systems, covering hardware drivers,
-- communication primitives, protocol interaction, LLM training and inference optimization"
+description: |
+  Dedicated to learning and designing full-stack AI compute systems
+  - Hardware drivers & low-level protocol interaction
+  - Collective communication primitives
+  - LLM training & inference optimization
 
 # 你的邮箱
 email: 443462147@qq.com
