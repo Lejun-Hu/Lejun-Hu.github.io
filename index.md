@@ -69,7 +69,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
         </div>
 
         <div class="experience-description">
-          {{ job.description | markdownify }}
+          {{ job.description | replace: '\n', ' ' | strip }}
         </div>
 
         {% if job.highlights %}
