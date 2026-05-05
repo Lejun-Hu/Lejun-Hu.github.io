@@ -1,7 +1,7 @@
 # 技术栈分类列表（两级结构）
 categories:
   - name: 大模型系统与推理框架层
-    enabled: true
+    enabled: true # false 就不显示
     subcategories:
       - name: LLM 架构
         skills:
@@ -125,7 +125,7 @@ categories:
             level: 熟悉
 
   - name: 推理引擎与编译器层
-    enabled: true
+    enabled: false
     subcategories:
       - name: NVIDIA 推理引擎
         skills:
