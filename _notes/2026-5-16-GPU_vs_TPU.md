@@ -4,6 +4,7 @@ date: 2025-05-16
 category: "AI 硬件"
 tags: ["GPU", "TPU", "LPU", "AI 加速器", "体系结构"]
 description: "从体系结构、内存层次、软件栈、互联扩展与硬件利用率等维度，深入对比 GPU、TPU 与 LPU 的设计哲学与技术取舍。"
+published: true
 ---
 
 # GPU、TPU 与 LPU：AI 时代计算架构的分野

@@ -19,6 +19,7 @@ description: 记录技术学习心得、工具使用笔记和收藏的有用链�
   <div class="container">
     <div class="notes-grid">
       {% for note in site.notes reversed %}
+      {% if note.published %}
       <article class="note-card">
         <div class="note-meta">
           <span class="note-date">{{ note.date | date: "%Y-%m-%d" }}</span>
@@ -47,6 +48,7 @@ description: 记录技术学习心得、工具使用笔记和收藏的有用链�
           阅读全文 →
         </a>
       </article>
+      {% endif %}
       {% endfor %}
     </div>
     
