@@ -39,16 +39,31 @@
 
         <!-- 笔记正文 -->
         <section class="section note-body">
-          <div class="container">
-            <article class="note-content">
-              {{ content }}
-            </article>
-            
-            <!-- 返回链接 -->
-            <div class="note-nav">
-              <a href="{{ '/notes/' | relative_url }}" class="btn btn-secondary">
-                ← 返回笔记列表
-              </a>
+          <div class="container note-container">
+            <!-- 左侧浮动目录 -->
+            <aside class="toc-sidebar">
+              <div class="toc-sidebar-inner">
+                <nav class="toc-nav" aria-label="文章目录">
+                  <div class="toc-title">目录</div>
+                  <ul class="toc-list" id="toc-list">
+                    <!-- JS 动态生成目录项 -->
+                  </ul>
+                </nav>
+              </div>
+            </aside>
+
+            <!-- 右侧文章内容 -->
+            <div class="note-body-main">
+              <article class="note-content" id="note-content">
+                {{ content }}
+              </article>
+              
+              <!-- 返回链接 -->
+              <div class="note-nav">
+                <a href="{{ '/notes/' | relative_url }}" class="btn btn-secondary">
+                  ← 返回笔记列表
+                </a>
+              </div>
             </div>
           </div>
         </section>

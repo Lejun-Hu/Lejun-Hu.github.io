@@ -208,3 +208,106 @@ document.addEventListener('DOMContentLoaded', () => {
     header.addEventListener('click', toggleProject);
   });
 });
+
+// ============================================
+// 笔记页面目录侧边栏 (TOC Sidebar)
+// ============================================
+
+/**
+ * 生成并管理笔记页面的浮动目录
+ * - 从文章内容的 h1, h2 标题提取目录
+ * - 点击目录项平滑滚动到对应标题
+ * - 滚动时高亮当前阅读的章节
+ */
+(function() {
+  const tocList = document.getElementById('toc-list');
+  const noteContent = document.getElementById('note-content');
+  if (!tocList || !noteContent) return;
+
+  // 提取 h1, h2 标题
+  const headings = noteContent.querySelectorAll('h1, h2');
+  if (headings.length === 0) {
+    // 没有标题时隐藏目录栏
+    const sidebar = document.querySelector('.toc-sidebar');
+    if (sidebar) sidebar.style.display = 'none';
+    return;
+  }
+
+  const tocItems = [];
+
+  headings.forEach((heading, index) => {
+    // 确保每个标题都有 id
+    if (!heading.id) {
+      heading.id = 'toc-heading-' + index;
+    }
+
+    const level = heading.tagName.toLowerCase(); // h1 或 h2
+    const text = heading.textContent.trim();
+    const id = heading.id;
+
+    const li = document.createElement('li');
+    li.className = 'toc-item';
+
+    const a = document.createElement('a');
+    a.href = '#' + id;
+    a.className = 'toc-link toc-link-' + level;
+    a.textContent = text;
+    a.dataset.target = id;
+
+    // 点击平滑滚动
+    a.addEventListener('click', function(e) {
+      e.preventDefault();
+      const target = document.getElementById(id);
+      if (target) {
+        const headerOffset = 80; // 留出顶部导航空间
+        const elementPosition = target.getBoundingClientRect().top;
+        const offsetPosition = elementPosition + window.pageYOffset - headerOffset;
+
+        window.scrollTo({
+          top: offsetPosition,
+          behavior: 'smooth'
+        });
+
+        // 更新 URL hash（不触发默认跳转）
+        history.pushState(null, null, '#' + id);
+      }
+    });
+
+    li.appendChild(a);
+    tocList.appendChild(li);
+
+    tocItems.push({ link: a, heading: heading });
+  });
+
+  // 滚动高亮当前章节（使用 IntersectionObserver）
+  const observerOptions = {
+    root: null,
+    rootMargin: '-80px 0px -60% 0px',
+    threshold: 0
+  };
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        // 移除所有高亮
+        tocItems.forEach(item => item.link.classList.remove('active'));
+        // 高亮当前
+        const activeItem = tocItems.find(item => item.heading === entry.target);
+        if (activeItem) {
+          activeItem.link.classList.add('active');
+        }
+      }
+    });
+  }, observerOptions);
+
+  headings.forEach(heading => observer.observe(heading));
+
+  // 页面加载时，如果 URL 有 hash，高亮对应目录项
+  if (window.location.hash) {
+    const hash = window.location.hash.slice(1);
+    const activeItem = tocItems.find(item => item.heading.id === hash);
+    if (activeItem) {
+      activeItem.link.classList.add('active');
+    }
+  }
+})();
