@@ -1581,6 +1581,31 @@ a {
   margin: 0;
 }
 
+.footer-disclaimer {
+  margin: var(--space-md) auto;
+  padding: var(--space-sm) var(--space-lg);
+  max-width: 600px;
+  font-size: 0.8rem;
+  color: var(--color-footer-copyright);
+  line-height: 1.6;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: var(--space-md);
+
+  p {
+    margin: 0;
+  }
+
+  a {
+    color: var(--color-footer-text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+
+    &:hover {
+      color: #ffffff;
+    }
+  }
+}
+
 // ============================================
 // 13. 打印优化（生成 PDF 简历时有用）
 // ============================================
