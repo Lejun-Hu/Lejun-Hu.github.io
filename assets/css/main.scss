@@ -1290,6 +1290,28 @@ a {
     color: var(--color-text);
   }
 
+  // 图片居中并放大
+  img {
+    display: block;
+    margin: var(--space-lg) auto;
+    max-width: 100%;
+    width: 90%;
+    height: auto;
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+  }
+
+  // 图片标题/说明文字居中
+  img + em,
+  p > em:only-child {
+    display: block;
+    text-align: center;
+    font-size: 0.9rem;
+    color: var(--color-text-light);
+    margin-top: var(--space-sm);
+    margin-bottom: var(--space-lg);
+  }
+
   h1 {
     font-size: 1.8rem;
     border-bottom: 2px solid var(--color-border);
