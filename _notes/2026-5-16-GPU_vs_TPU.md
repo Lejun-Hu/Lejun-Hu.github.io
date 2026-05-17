@@ -9,13 +9,9 @@ published: true
 
 > **Abstract** — 过去十几年，GPU 几乎一直是“AI 算力”的代名词。尤其在 2012 年 AlexNet 使用 NVIDIA GTX 580 在 ImageNet 上取得突破之后，基于 CUDA 的 GPU 并行计算迅速成为深度学习的事实标准。从实验室里最早的一批 CNN 模型，到如今上千卡集群训练的大语言模型，绝大部分 AI 工作都建立在 GPU 生态之上。
 >
-> 但如果把视线再拉远一些，会发现这个格局正在逐渐变化。Google 早在 2015 年就已经在内部部署第一代 TPU，并于 2016 年正式公开这种专门面向 Tensor 运算的 ASIC 架构。随后 TPU v2 开始支持大规模训练，逐渐成为 Google 内部搜索、推荐与 Gemini、PaLM 等超大规模模型的重要基础设施。与此同时，Groq 等公司则进一步把“专用化”推向推理领域，提出了 LPU（Language Processing Unit）这一面向大语言模型推理的数据流架构。尤其在 2023 年之后，随着 LLM 推理延迟与 token throughput 成为新的瓶颈，LPU 开始逐渐进入大众视野。
+> 但如果把视线再拉远一些，会发现这个格局正在逐渐变化。Google 早在 2015 年就已经在内部部署第一代 TPU，并于 2016 年正式公开这种专门面向 Tensor 运算的 ASIC 架构。随后 TPU v2 开始支持大规模训练，逐渐成为 Google 内部搜索、推荐与 Gemini、PaLM 等超大规模模型的重要基础设施。与此同时，Groq 等公司则进一步把“专用化”推向推理领域，提出了 LPU（Language Processing Unit）这一面向大语言模型推理的数据流架构。尤其在 2023 年之后，随着 LLM 推理延迟与 token throughput 成为新的瓶颈，LPU 开始逐渐进入大众视野。而 NVIDIA 自己也在不断把 GPU 做得越来越不像传统意义上的 GPU。Tensor Core、NVLink、NVSwitch、Transformer Engine 等设计，实际上都在让 GPU 越来越偏向专门为 AI workload 优化的数据流机器。
 >
-> 而 NVIDIA 自己也在不断把 GPU 做得越来越不像传统意义上的 GPU。Tensor Core、NVLink、NVSwitch、Transformer Engine 等设计，实际上都在让 GPU 越来越偏向专门为 AI workload 优化的数据流机器。
->
-> 三者的演进，实际上指向同一个趋势：
->
-> > AI 计算正在从“通用并行处理器”逐步走向“为张量数据流高度定制化的专用计算系统”。
+> 三者的演进，实际上指向同一个趋势：AI 计算正在从“通用并行处理器”逐步走向“为张量数据流高度定制化的专用计算系统”。
 >
 > GPU、TPU、LPU 恰好可以看作这条路线上的三个不同坐标。本文将从架构、内存系统、软件栈、互联扩展、硬件利用率以及设计思路几个维度，认真梳理它们之间的本质区别。
 
