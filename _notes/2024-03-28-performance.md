@@ -1,5 +1,6 @@
 ---
 title: "前端性能优化笔记"
+permalink: /notes/frontend-performance-optimization/
 date: 2024-03-28
 category: "前端"
 tags: ["Performance", "Web"]

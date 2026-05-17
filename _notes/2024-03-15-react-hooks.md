@@ -1,5 +1,6 @@
 ---
 title: "React Hooks 最佳实践"
+permalink: /notes/react-hooks-best-practices/
 date: 2024-03-15
 category: "前端"
 tags: ["React", "JavaScript"]
