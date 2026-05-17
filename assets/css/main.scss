@@ -1498,6 +1498,90 @@ a {
 }
 
 // ============================================
+// 12c. 笔记页面免责声明
+// ============================================
+
+.note-disclaimer {
+  max-width: 800px;
+  margin: var(--space-xl) auto 0;
+  padding: var(--space-md) var(--space-lg);
+  background: var(--color-bg-alt);
+  border-left: 4px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: var(--space-md);
+  align-items: flex-start;
+
+  @media (max-width: 768px) {
+    flex-direction: column;
+    gap: var(--space-sm);
+  }
+}
+
+.note-disclaimer-icon {
+  font-size: 1.5rem;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.note-disclaimer-content {
+  font-size: 0.9rem;
+  line-height: 1.7;
+  color: var(--color-text-light);
+
+  p {
+    margin: 0;
+  }
+
+  a {
+    color: var(--color-primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+
+    &:hover {
+      color: var(--color-primary-dark);
+    }
+  }
+}
+
+// ============================================
+// 12d. 页脚版权声明扩展
+// ============================================
+
+.footer-license {
+  margin-bottom: var(--space-md);
+  padding: var(--space-md) var(--space-lg);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-md);
+  max-width: 600px;
+  margin-left: auto;
+  margin-right: auto;
+
+  [data-theme="dark"] & {
+    background: rgba(255, 255, 255, 0.03);
+  }
+}
+
+.license-text {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--color-footer-text);
+  margin-bottom: var(--space-xs);
+}
+
+.license-icon {
+  font-size: 1.1rem;
+  margin-right: 2px;
+}
+
+.license-detail {
+  font-size: 0.85rem;
+  color: var(--color-footer-copyright);
+  line-height: 1.6;
+  margin: 0;
+}
+
+// ============================================
 // 13. 打印优化（生成 PDF 简历时有用）
 // ============================================
 
