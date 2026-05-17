@@ -22,6 +22,9 @@ Groq 的 LPU 则在这个方向上更进一步。LPU 从硅片定义阶段就只
 ![GPU SM 内部结构与 TPU MXU 脉动阵列对比示意图]({{ '/assets/images/notes/placeholder-arch.png' | relative_url }})
 *图 1：GPU SM 内部结构与 TPU MXU 脉动阵列对比示意图（占位图）*
 
+![TPU v5e 脉动阵列结构示意图]({{ '/assets/images/notes/TPU.png' | relative_url }})
+*图 1b：TPU v5e 脉动阵列结构示意图*
+
 ## 二、内存层次：自动缓存与显式调度
 
 两套架构在内存子系统上的差异同样深刻，而且最能体现"运行时灵活性"与"编译时确定性"之间的取舍。
