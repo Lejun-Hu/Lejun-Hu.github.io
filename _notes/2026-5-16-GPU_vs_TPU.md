@@ -19,7 +19,8 @@ TPU 则完全是另一条路。Google TPU v5e 的计算核心是四个 MXU（Mat
 
 Groq 的 LPU 则在这个方向上更进一步。LPU 从硅片定义阶段就只面向大语言模型推理，不支持训练。其架构是一种完全确定性的可编程流水线——编译完成后，每个时钟周期内数据在哪个位置、执行何种运算、经哪条路径流动，全部是已知且不可更改的。它不依赖传统的 cache hierarchy，不进行运行时动态调度，几乎已经可以被看作是一块专为 Transformer 推理设计的可编程 ASIC。
 
-<!-- 图片位置：GPU SM 内部结构与 TPU MXU 脉动阵列对比示意图 -->
+![GPU SM 内部结构与 TPU MXU 脉动阵列对比示意图]({{ '/assets/images/notes/placeholder-arch.png' | relative_url }})
+*图 1：GPU SM 内部结构与 TPU MXU 脉动阵列对比示意图（占位图）*
 
 ## 二、内存层次：自动缓存与显式调度
 
@@ -31,7 +32,8 @@ TPU 的内存层次则采用三级显式管理，取消了自动缓存。最外�
 
 LPU 走得更远——它干脆用数百 MB 的片上 SRAM 直接存放模型权重，避免了 HBM 的访问延迟。SRAM 的访问速度约为 HBM 的 20 倍，这意味着流水线可以全速运转，几乎不存在等待权重数据的问题。
 
-<!-- 图片位置：GPU 与 TPU 内存层级结构对比图，标注 HBM/VMEM/L1/L2 等 -->
+![GPU 与 TPU 内存层级结构对比图]({{ '/assets/images/notes/placeholder-memory.png' | relative_url }})
+*图 2：GPU 与 TPU 内存层级结构对比图（占位图）*
 
 ## 三、软件体系：运行时与编译器的权责划分
 
