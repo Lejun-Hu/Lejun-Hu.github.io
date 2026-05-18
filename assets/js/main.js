@@ -84,17 +84,76 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /**
  * 技术栈分类折叠/展开交互
- * 支持：1) 折叠宏（收起/展开整个技术栈网格）
- *       2) 单个分类折叠/展开
- *       3) 全局全部折叠/展开（控制每个分类的展开状态）
+ * 支持：1) 总开关（显示/隐藏整个技术栈区域）
+ *       2) 子开关（显示/隐藏单个分类）
+ *       3) 折叠宏（收起/展开整个技术栈网格）
+ *       4) 单个分类折叠/展开
+ *       5) 全局全部折叠/展开（控制每个分类的展开状态）
  */
 document.addEventListener('DOMContentLoaded', () => {
+  const masterToggle = document.getElementById('tech-stack-master-toggle');
+  const controls = document.getElementById('tech-stack-controls');
   const grid = document.getElementById('tech-stack-grid');
   const macroToggle = document.getElementById('macro-toggle');
   const categories = document.querySelectorAll('.tech-category');
   const globalToggle = document.getElementById('toggle-all-categories');
 
-  // 1. 折叠宏：收起/展开整个技术栈网格
+  // 1. 总开关：显示/隐藏整个技术栈
+  if (masterToggle && grid && controls) {
+    masterToggle.addEventListener('change', () => {
+      const isOn = masterToggle.checked;
+      if (isOn) {
+        controls.style.display = '';
+        grid.style.display = '';
+      } else {
+        controls.style.display = 'none';
+        grid.style.display = 'none';
+      }
+    });
+  }
+
+  // 2. 子开关：显示/隐藏单个分类
+  categories.forEach(category => {
+    const subToggle = category.querySelector('.category-toggle-input');
+    if (subToggle) {
+      subToggle.addEventListener('change', () => {
+        const isOn = subToggle.checked;
+        // 如果总开关关闭，子开关无效
+        if (masterToggle && !masterToggle.checked) {
+          subToggle.checked = false;
+          return;
+        }
+        if (isOn) {
+          category.classList.remove('disabled');
+        } else {
+          category.classList.add('disabled');
+        }
+      });
+    }
+  });
+
+  // 总开关变化时，同步处理所有子开关
+  if (masterToggle) {
+    masterToggle.addEventListener('change', () => {
+      const isOn = masterToggle.checked;
+      categories.forEach(category => {
+        const subToggle = category.querySelector('.category-toggle-input');
+        if (!isOn) {
+          // 总开关关闭时，隐藏所有分类
+          category.classList.add('disabled');
+        } else if (subToggle) {
+          // 总开关打开时，根据子开关状态恢复
+          if (subToggle.checked) {
+            category.classList.remove('disabled');
+          } else {
+            category.classList.add('disabled');
+          }
+        }
+      });
+    });
+  }
+
+  // 3. 折叠宏：收起/展开整个技术栈网格
   if (macroToggle && grid) {
     macroToggle.addEventListener('click', () => {
       const isExpanded = macroToggle.getAttribute('aria-expanded') === 'true';
@@ -114,7 +173,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 2. 单个分类折叠/展开
+  // 4. 单个分类折叠/展开
   categories.forEach(category => {
     const header = category.querySelector('.tech-category-header');
     const toggleBtn = category.querySelector('.category-toggle-btn');
@@ -130,7 +189,7 @@ document.addEventListener('DOMContentLoaded', () => {
     header.addEventListener('click', toggleCategory);
   });
 
-  // 3. 全局折叠/展开按钮：控制每个分类的展开状态
+  // 5. 全局折叠/展开按钮：控制每个分类的展开状态
   if (globalToggle) {
     globalToggle.addEventListener('click', () => {
       const isAllExpanded = globalToggle.getAttribute('aria-expanded') === 'true';

@@ -567,6 +567,107 @@ a {
   padding: 0 var(--space-md);
 }
 
+// 技术栈总开关
+.tech-stack-master-switch {
+  display: flex;
+  justify-content: center;
+  margin-bottom: var(--space-lg);
+}
+
+.switch-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--color-text);
+  user-select: none;
+}
+
+.switch-label input {
+  display: none;
+}
+
+.switch-slider {
+  position: relative;
+  width: 48px;
+  height: 26px;
+  background: var(--color-border);
+  border-radius: 26px;
+  transition: background 0.3s;
+  flex-shrink: 0;
+}
+
+.switch-slider::before {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.3s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.switch-label input:checked + .switch-slider {
+  background: var(--color-primary);
+}
+
+.switch-label input:checked + .switch-slider::before {
+  transform: translateX(22px);
+}
+
+// 分类子开关
+.category-switch {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  margin-right: var(--space-sm);
+  cursor: pointer;
+}
+
+.category-switch input {
+  display: none;
+}
+
+.switch-slider-small {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: var(--color-border);
+  border-radius: 20px;
+  transition: background 0.3s;
+}
+
+.switch-slider-small::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.3s;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+}
+
+.category-switch input:checked + .switch-slider-small {
+  background: var(--color-primary);
+}
+
+.category-switch input:checked + .switch-slider-small::before {
+  transform: translateX(16px);
+}
+
+// 分类被禁用时隐藏
+.tech-category.disabled {
+  display: none !important;
+}
+
 .tech-stack-controls {
   display: flex;
   justify-content: flex-end;
