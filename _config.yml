@@ -56,7 +56,7 @@ exclude:
 collections:
   notes:
     output: true          # 生成独立的 HTML 页面
-    permalink: /notes/:title/  # 输出路径格式
+    permalink: /notes/:name/  # 默认基于文件名生成 URL
 
 # 默认 Front Matter（为所有文件设置默认值）
 defaults:
