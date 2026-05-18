@@ -86,6 +86,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
   </div>
 </section>
 
+{% if site.data.skills.enabled != false %}
 <!-- ===== 技术栈部分 ===== -->
 <section id="skills" class="section section-alt">
   <div class="container">
@@ -93,15 +94,6 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
     <p class="tech-stack-desc">
       这里尽量列出来了我涉及到的技术栈，这样能方便我对自己的知识框架进行查漏补缺，也能更好的让合作方了解匹配情况。
     </p>
-
-    <!-- 技术栈总开关 -->
-    <div class="tech-stack-master-switch">
-      <label class="switch-label">
-        <input type="checkbox" id="tech-stack-master-toggle" checked>
-        <span class="switch-slider"></span>
-        <span class="switch-text">显示技术栈</span>
-      </label>
-    </div>
 
     <!-- 技术栈控制栏：折叠宏 + 全局展开 -->
     <div class="tech-stack-controls" id="tech-stack-controls">
@@ -117,13 +109,10 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
 
     <div class="tech-stack-grid collapsed-macro" id="tech-stack-grid">
       {% for category in site.data.skills.categories %}
-      <div class="tech-category collapsed" data-category-index="{{ forloop.index }}" data-category-name="{{ category.name }}">
+      {% if category.enabled != false %}
+      <div class="tech-category collapsed" data-category-index="{{ forloop.index }}">
         <div class="tech-category-header">
           <h3 class="tech-category-title">{{ category.name }}</h3>
-          <label class="category-switch">
-            <input type="checkbox" class="category-toggle-input" checked data-category="{{ category.name }}">
-            <span class="switch-slider-small"></span>
-          </label>
           <button type="button" class="category-toggle-btn" aria-label="折叠分类" aria-expanded="false">
             <span class="toggle-icon">▼</span>
           </button>
@@ -147,11 +136,13 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
         </div>
 
       </div>
+      {% endif %}
       {% endfor %}
     </div>
 
   </div>
 </section>
+{% endif %}
 
 <!-- ===== 教育背景部分 ===== -->
 <section id="education" class="section">

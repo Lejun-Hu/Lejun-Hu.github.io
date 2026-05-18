@@ -1,3 +1,6 @@
+# 技术栈总开关：false 时整个技术栈部分不显示
+enabled: true
+
 # 技术栈分类列表（两级结构）
 categories:
   - name: 大模型系统与推理框架层
