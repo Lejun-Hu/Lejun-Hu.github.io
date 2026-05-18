@@ -1,5 +1,5 @@
 # 技术栈总开关：false 时整个技术栈部分不显示
-enabled: true
+enabled: false
 
 # 技术栈分类列表（两级结构）
 categories:
