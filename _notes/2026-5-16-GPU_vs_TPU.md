@@ -19,8 +19,6 @@ published: true
 ## 一、TPU、GPU、LPU 的架构差异
 
 ### GPU：AI 时代最成功的通用并行计算平台
-![GPU的内部结构]({{ '/assets/images/notes/GPU-arch.png' | relative_url }})
-*图 1：GPU SM 内部结构*
 
 
 如果你对于计算机体系结构有一些基本了解，我们通常知道，一个现代处理器大致都会由两部分组成：负责执行计算的运算单元，以及负责存放和搬运数据的内存系统。前者包括 ALU（Arithmetic Logic Unit）、FPU（Floating Point Unit）、乘法器、向量运算单元等，后者则包括寄存器、L1/L2/L3 Cache、主存等分级结构。这种“计算单元 + 分级内存”的设计，本质上就是经典冯诺依曼架构在现代处理器中的延续。CPU 之所以强大，很大程度上来自于它对复杂逻辑、分支预测、乱序执行以及低延迟任务的极致优化。
@@ -32,6 +30,9 @@ CPU 通常只有几十个核心，但每个核心都非常复杂，拥有深流�
 这种设计背后，其实对应的是经典的 Amdahl's Law（阿姆达尔定律）。它指出，一个程序能够被并行化加速的上限，最终取决于其中“不可并行”的那部分比例。GPU 的核心假设其实是：**图形处理、矩阵运算以及深度学习中的绝大多数工作，天然具有极高的数据并行性。** 也就是说，只要能把任务拆成足够多的小块，同时喂给大量执行单元，那么整体吞吐量就会远远超过传统 CPU。
 
 理解这一点之后，我们再来看 GPU 内部的结构就会清晰很多。现代 NVIDIA GPU 的核心计算单元是 SM。SM 本身并不是“一个核心”，而更像是一个完整的小型计算簇。一个 SM 内部会包含 CUDA Core、Tensor Core、Warp Scheduler、Load/Store Unit、Register File、Shared Memory / L1 Cache，以及特殊函数单元（SFU）。其中 CUDA Core 负责最基础的标量和向量运算，比如加减乘除、地址计算、控制逻辑等；Tensor Core 则是后来为了 AI 和矩阵乘法专门加入的高吞吐矩阵计算单元；Warp Scheduler 负责线程调度；而 Shared Memory 和寄存器则承担数据缓存和局部数据复用。
+
+![GPU的内部结构]({{ '/assets/images/notes/GPU-arch.png' | relative_url }})
+*图 1：GPU SM 内部结构*
 
 这里一个特别容易混淆的概念是，很多人会把 CUDA Core、SM、Stream Processor 混在一起。实际上，SM 是一个大的执行集群，CUDA Core 是 SM 内部真正执行标量运算的小执行单元，而 Stream Processor 则是 AMD GPU 对类似 CUDA Core 的称呼。例如 H100 一共有上百个 SM，而每个 SM 内部又包含数十到上百个 CUDA Core。真正执行程序指令的，其实是这些 CUDA Core。
 
