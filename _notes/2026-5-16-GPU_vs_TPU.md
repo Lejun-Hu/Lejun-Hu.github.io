@@ -18,38 +18,28 @@ published: true
 
 ## 一、TPU、GPU、LPU 的架构差异
 
-如果你对计算机体系结构有一些基本了解，就会知道：一个现代处理器大致由两部分组成——负责执行计算的运算单元（ALU、FPU、乘法器、向量单元等），以及负责存放和搬运数据的内存系统（寄存器、L1/L2/L3 Cache、主存等）。这种“计算单元 + 分级内存”的设计，本质上是冯·诺依曼架构在现代处理器中的延续。CPU 的强大，来自于它对复杂逻辑、分支预测、乱序执行以及低延迟任务的极致优化。
+### GPU：AI 时代最成功的通用并行计算平台
+![GPU的内部结构]({{ '/assets/images/notes/GPU-arch.png' | relative_url }})
+*图 1：GPU SM 内部结构*
 
-GPU 虽然最早是图形处理器，但它的本质仍然属于这一大类计算机架构。NVIDIA 在 1999 年正式提出 GPU 概念，初衷是加速图形渲染中的海量并行计算（像素着色、顶点变换、光栅化等）。这类任务有一个鲜明特点：**大量数据执行相同类型的运算**。因此，GPU 从一开始就没有像 CPU 那样把大量晶体管投入到复杂控制逻辑和超大缓存上，而是走上了另一条路：
 
-> **用数量极多的小型计算核心，换取超高吞吐量的并行计算能力。**
+如果你对于计算机体系结构有一些基本了解，我们通常知道，一个现代处理器大致都会由两部分组成：负责执行计算的运算单元，以及负责存放和搬运数据的内存系统。前者包括 ALU（Arithmetic Logic Unit）、FPU（Floating Point Unit）、乘法器、向量运算单元等，后者则包括寄存器、L1/L2/L3 Cache、主存等分级结构。这种“计算单元 + 分级内存”的设计，本质上就是经典冯诺依曼架构在现代处理器中的延续。CPU 之所以强大，很大程度上来自于它对复杂逻辑、分支预测、乱序执行以及低延迟任务的极致优化。
 
-这也是 GPU 与 CPU 在架构思路上最本质的区别。CPU 通常只有几十个核心，每个核心都非常复杂（深流水线、分支预测器、乱序执行引擎、大缓存）；而 GPU 则把芯片面积尽可能让给更多的执行单元。以现代 NVIDIA GPU 为例，整个芯片被划分为大量 SM（Streaming Multiprocessor，流式多处理器），每个 SM 内部再包含大量 CUDA Core、Tensor Core、寄存器文件、Warp Scheduler 和 Shared Memory。相比 CPU 的“大核”，SM 更像是功能相对简单、但吞吐量极高的小型并行计算集群。
+GPU 虽然最早是作为图形处理器诞生的，但它本质上仍然属于这一大类计算机架构。NVIDIA 在 1999 年正式提出 GPU（Graphics Processing Unit）这一概念，最初的目标其实非常直接：加速图形渲染中的海量并行计算。例如像素着色、顶点变换、光栅化，这些工作都具有一个非常鲜明的特点——大量数据执行相同类型的运算。也正因为如此，GPU 从一开始就没有像 CPU 一样，把大量晶体管投入到复杂控制逻辑、超大缓存和超强单线程性能上，而是走向了另一条路线：**用数量极多的小型计算核心，换取超高吞吐量的并行计算能力。** 这也是 GPU 和 CPU 在架构思路上最本质的区别。
 
-这种设计背后对应的是经典的 **Amdahl 定律**：一个程序能够被并行化加速的上限，取决于其中“不可并行”的那部分比例。GPU 的核心假设是：
+CPU 通常只有几十个核心，但每个核心都非常复杂，拥有深流水线、分支预测器、乱序执行引擎以及极大的缓存。而 GPU 则会把芯片面积尽可能让给更多的执行单元。以现代 NVIDIA GPU 为例，整个芯片会被划分为大量 SM（Streaming Multiprocessor，流式多处理器），每个 SM 内部再包含大量 CUDA Core、Tensor Core、寄存器文件、Warp Scheduler 和 Shared Memory。相比 CPU 的“大核”，SM 更像是大量功能相对简单、但吞吐量极高的小型并行计算集群。
 
-> **图形处理、矩阵运算以及深度学习中的绝大多数工作，天然具有极高的数据并行性。**
+这种设计背后，其实对应的是经典的 Amdahl's Law（阿姆达尔定律）。它指出，一个程序能够被并行化加速的上限，最终取决于其中“不可并行”的那部分比例。GPU 的核心假设其实是：**图形处理、矩阵运算以及深度学习中的绝大多数工作，天然具有极高的数据并行性。** 也就是说，只要能把任务拆成足够多的小块，同时喂给大量执行单元，那么整体吞吐量就会远远超过传统 CPU。
 
-只要能把任务拆成足够多的小块，同时喂给大量执行单元，整体吞吐量就会远远超过 CPU。
+理解这一点之后，我们再来看 GPU 内部的结构就会清晰很多。现代 NVIDIA GPU 的核心计算单元是 SM。SM 本身并不是“一个核心”，而更像是一个完整的小型计算簇。一个 SM 内部会包含 CUDA Core、Tensor Core、Warp Scheduler、Load/Store Unit、Register File、Shared Memory / L1 Cache，以及特殊函数单元（SFU）。其中 CUDA Core 负责最基础的标量和向量运算，比如加减乘除、地址计算、控制逻辑等；Tensor Core 则是后来为了 AI 和矩阵乘法专门加入的高吞吐矩阵计算单元；Warp Scheduler 负责线程调度；而 Shared Memory 和寄存器则承担数据缓存和局部数据复用。
 
-### GPU 内部结构：SM、CUDA Core 与 Warp
+这里一个特别容易混淆的概念是，很多人会把 CUDA Core、SM、Stream Processor 混在一起。实际上，SM 是一个大的执行集群，CUDA Core 是 SM 内部真正执行标量运算的小执行单元，而 Stream Processor 则是 AMD GPU 对类似 CUDA Core 的称呼。例如 H100 一共有上百个 SM，而每个 SM 内部又包含数十到上百个 CUDA Core。真正执行程序指令的，其实是这些 CUDA Core。
 
-现代 NVIDIA GPU 的核心计算单元是 SM。SM 本身不是一个“核心”，而是一个小型计算簇，包含：
-- CUDA Core（标量和向量运算）
-- Tensor Core（矩阵运算，专为 AI 加速）
-- Warp Scheduler（线程调度）
-- Load/Store Unit、Register File、Shared Memory / L1 Cache、特殊函数单元（SFU）
+而 CUDA 编程模型中的线程（thread），则并不是“一线程对应一个 CUDA Core”这么简单。GPU 实际执行时，会把线程以 32 个为一组打包成 Warp。Warp 是 NVIDIA GPU 中真正的硬件调度单位。也就是说，Warp Scheduler 并不是单独调度某一个线程，而是一次调度整个 Warp。
 
-这里容易混淆的概念是：
-- **SM** 是一个执行集群
-- **CUDA Core** 是 SM 内部真正执行标量运算的小单元
-- **Stream Processor** 是 AMD GPU 对类似 CUDA Core 的称呼
+这里就引出了 GPU 一个非常核心的设计：SIMT（Single Instruction Multiple Threads）。从表面上看，它很像 SIMD（Single Instruction Multiple Data），即“一条指令处理多个数据”。但两者其实存在重要区别。SIMD 更强调多个数据严格执行同一条指令，而 GPU 的 SIMT 模型则更加灵活。一个 Warp 中的 32 个线程虽然通常会同时执行同一条指令，但每个线程本身仍然拥有独立的程序计数器（Program Counter）、寄存器状态以及线程上下文。这意味着，理论上同一个 Warp 中的不同线程可以执行不同逻辑。
 
-例如 H100 有上百个 SM，每个 SM 内部包含数十到上百个 CUDA Core。真正执行程序指令的就是这些 CUDA Core。
-
-CUDA 编程模型中的线程，并不是“一线程对应一个 CUDA Core”。GPU 实际执行时，会把线程以 32 个为一组打包成 **Warp**。Warp 是 NVIDIA GPU 中真正的硬件调度单位。Warp Scheduler 不是单独调度某一个线程，而是一次调度整个 Warp。
-
-这就引出了 GPU 一个非常核心的设计：**SIMT（Single Instruction Multiple Threads）**。它看起来很像 SIMD（单指令多数据），但两者有重要区别。SIMD 强调“一条指令处理多个数据”，而 GPU 的 SIMT 模型更加灵活：一个 Warp 中的 32 个线程虽然通常会同时执行同一条指令，但每个线程本身仍然拥有独立的程序计数器、寄存器状态以及线程上下文。这意味着，理论上同一个 Warp 中的不同线程可以执行不同逻辑。例如：
+例如下面这样一段 CUDA 代码：
 
 ```cpp
 if (threadIdx.x < 16) {
@@ -57,7 +47,15 @@ if (threadIdx.x < 16) {
 } else {
     do_B();
 }
+```
 
+此时 Warp 会发生所谓的 Warp Divergence（Warp 分歧）。前 16 个线程执行 `do_A()` 时，后 16 个线程实际上会被 mask 掉；随后 GPU 再切换回来执行 `do_B()`。也就是说，虽然逻辑上两个分支都能执行，但在任何一个 cycle 内，实际上只有部分 CUDA Core 真正在工作。因此一旦 Warp 内部出现大量条件分支，性能就会明显下降。
+
+这也是 GPU 和 TPU 在设计上的一个非常重要区别。GPU 的 SIMT 模型，本质上是在 **用部分执行效率，换取更强的通用性。** 因为开发者并不需要每次都严格准备好“刚好适合 Warp Size 的规则数据”，也不需要所有线程永远执行完全相同的逻辑。GPU 可以允许程序中存在一定程度的不规则控制流，而不会直接无法运行。代价则是 Warp Divergence、调度开销、部分执行单元空转、cache miss 以及 runtime 不确定性，这些都会导致 GPU 实际利用率低于理论峰值。
+
+但也正因为这种灵活性，CUDA 编程的门槛其实比很多专用 AI 加速器低得多。开发者可以先把功能跑通，后续再慢慢调优 grid size、block size、occupancy、memory coalescing、shared memory reuse 等性能细节。因此 GPU 的成功，本质上并不仅仅来自硬件性能，还来自于它在“通用性”和“吞吐量”之间找到了一个非常现实的平衡点。
+
+另外一个近年来越来越重要的变化，是 GPU 内部的 Tensor Core 正在变得越来越强，以至于传统的 CUDA Core 反而逐渐退居辅助角色。尤其在 Transformer 成为主流之后，大量 workload 已经变成了标准化矩阵乘法和 attention 计算。为了持续给 Tensor Core 提供数据，NVIDIA 在 Blackwell 架构中进一步加入了 TMEM（Tensor Memory）。TMEM 本质上是一种更加靠近 Tensor Core 的专用片上存储结构，用来减少 Tensor Core 在等待数据时产生的 pipeline bubble。随着 AI workload 越来越规则化，GPU 的内部结构也开始越来越偏向“数据流机器”而非传统图形处理器。这其实也是为什么今天的 GPU，已经越来越不像最早那个为了游戏图形而设计的 GPU 了。
 TPU 则完全是另一条路。Google TPU v5e 的计算核心是四个 MXU（Matrix Multiply Unit），每个 MXU 实质上是一个 128×128 的二维脉动阵列。在脉动阵列中，权重被预加载到每一个处理单元内，输入数据沿阵列方向流动，每个处理单元接收数据后与本地权重执行乘加运算，中间结果则沿另一个方向传递给下游单元继续累加。这种"权重静止、数据流动"的工作方式，最大限度地复用了从内存加载的数据，极大减少了片上数据搬运开销。TPU 没有 SM 那样的通用执行单元，也没有 warp scheduler，它对复杂控制流的支持十分有限，但其 dense tensor algebra 的吞吐效率远非通用架构可比。从 GPU 到 TPU，实质上是从"什么都能够做，而且做得不错"，走向"只做好一件事，但把它做到极致"。
 
 Groq 的 LPU 则在这个方向上更进一步。LPU 从硅片定义阶段就只面向大语言模型推理，不支持训练。其架构是一种完全确定性的可编程流水线——编译完成后，每个时钟周期内数据在哪个位置、执行何种运算、经哪条路径流动，全部是已知且不可更改的。它不依赖传统的 cache hierarchy，不进行运行时动态调度，几乎已经可以被看作是一块专为 Transformer 推理设计的可编程 ASIC。
@@ -65,8 +63,7 @@ Groq 的 LPU 则在这个方向上更进一步。LPU 从硅片定义阶段就只
 
 
 
-![GPU的内部结构]({{ '/assets/images/notes/GPU-arch.png' | relative_url }})
-*图 1：GPU SM 内部结构*
+
 
 ![TPU v5e 脉动阵列结构示意图]({{ '/assets/images/notes/TPU.png' | relative_url }})
 *图 2：TPU v5e 脉动阵列结构示意图*
