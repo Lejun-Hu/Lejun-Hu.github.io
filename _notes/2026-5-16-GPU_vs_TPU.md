@@ -56,6 +56,7 @@ if (threadIdx.x < 16) {
 但也正因为这种灵活性，CUDA 编程的门槛其实比很多专用 AI 加速器低得多。开发者可以先把功能跑通，后续再慢慢调优 grid size、block size、occupancy、memory coalescing、shared memory reuse 等性能细节。因此 GPU 的成功，本质上并不仅仅来自硬件性能，还来自于它在“通用性”和“吞吐量”之间找到了一个非常现实的平衡点。
 
 另外一个近年来越来越重要的变化，是 GPU 内部的 Tensor Core 正在变得越来越强，以至于传统的 CUDA Core 反而逐渐退居辅助角色。尤其在 Transformer 成为主流之后，大量 workload 已经变成了标准化矩阵乘法和 attention 计算。为了持续给 Tensor Core 提供数据，NVIDIA 在 Blackwell 架构中进一步加入了 TMEM（Tensor Memory）。TMEM 本质上是一种更加靠近 Tensor Core 的专用片上存储结构，用来减少 Tensor Core 在等待数据时产生的 pipeline bubble。随着 AI workload 越来越规则化，GPU 的内部结构也开始越来越偏向“数据流机器”而非传统图形处理器。这其实也是为什么今天的 GPU，已经越来越不像最早那个为了游戏图形而设计的 GPU 了。
+
 TPU 则完全是另一条路。Google TPU v5e 的计算核心是四个 MXU（Matrix Multiply Unit），每个 MXU 实质上是一个 128×128 的二维脉动阵列。在脉动阵列中，权重被预加载到每一个处理单元内，输入数据沿阵列方向流动，每个处理单元接收数据后与本地权重执行乘加运算，中间结果则沿另一个方向传递给下游单元继续累加。这种"权重静止、数据流动"的工作方式，最大限度地复用了从内存加载的数据，极大减少了片上数据搬运开销。TPU 没有 SM 那样的通用执行单元，也没有 warp scheduler，它对复杂控制流的支持十分有限，但其 dense tensor algebra 的吞吐效率远非通用架构可比。从 GPU 到 TPU，实质上是从"什么都能够做，而且做得不错"，走向"只做好一件事，但把它做到极致"。
 
 Groq 的 LPU 则在这个方向上更进一步。LPU 从硅片定义阶段就只面向大语言模型推理，不支持训练。其架构是一种完全确定性的可编程流水线——编译完成后，每个时钟周期内数据在哪个位置、执行何种运算、经哪条路径流动，全部是已知且不可更改的。它不依赖传统的 cache hierarchy，不进行运行时动态调度，几乎已经可以被看作是一块专为 Transformer 推理设计的可编程 ASIC。
