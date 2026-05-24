@@ -24,8 +24,8 @@ TPU 则完全是另一条路。Google TPU v5e 的计算核心是四个 MXU（Mat
 
 Groq 的 LPU 则在这个方向上更进一步。LPU 从硅片定义阶段就只面向大语言模型推理，不支持训练。其架构是一种完全确定性的可编程流水线——编译完成后，每个时钟周期内数据在哪个位置、执行何种运算、经哪条路径流动，全部是已知且不可更改的。它不依赖传统的 cache hierarchy，不进行运行时动态调度，几乎已经可以被看作是一块专为 Transformer 推理设计的可编程 ASIC。
 
-![GPU SM 内部结构与 TPU MXU 脉动阵列对比示意图]({{ '/assets/images/notes/placeholder-arch.png' | relative_url }})
-*图 1：GPU SM 内部结构与 TPU MXU 脉动阵列对比示意图（占位图）*
+![GPU的内部结构]({{ '/assets/images/notes/GPU-arch.png' | relative_url }})
+*图 1：GPU SM 内部结构*
 
 ![TPU v5e 脉动阵列结构示意图]({{ '/assets/images/notes/TPU.png' | relative_url }})
 *图 1b：TPU v5e 脉动阵列结构示意图*
