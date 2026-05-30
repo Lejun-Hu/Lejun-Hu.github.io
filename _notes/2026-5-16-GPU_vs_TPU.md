@@ -66,9 +66,15 @@ if (threadIdx.x < 16) {
 
 从整体架构来看，TPU 比 GPU 简洁得多。如果把现代 GPU 看作一个拥有上百个 SM、数千个 CUDA Core 的大型并行处理器，那么 TPU 更像是一台专门执行矩阵乘法的数据流机器。以目前广泛部署的 TPU v4 和 TPU v5 系列为例，一个 TPU 芯片通常只包含两个 TensorCore，而不是上百个类似 GPU SM 的执行集群。
 
+![TPU v5e 脉动阵列结构示意图]({{ '/assets/images/notes/TPU.png' | relative_url }})
+*图 2：TPU v5e 脉动阵列结构示意图*
+
 这里需要特别说明的是，TPU 的 TensorCore 与 NVIDIA Tensor Core 虽然名字相似，但实际上并不是同一个概念。NVIDIA 的 Tensor Core 是 SM 内部的一个矩阵计算单元，而 TPU 的 TensorCore 则更接近于一个完整的计算核心，其规模远大于单个 GPU Tensor Core，甚至可以看作是一个独立的数据流处理器。如果对应到 GPU 的架构来看，TPU 的一个 TensorCore 大致承担了 GPU 中 Tensor Core 的矩阵计算、Shared Memory 的局部数据缓存、Warp Scheduler 的执行调度以及 Load/Store Unit 的数据搬运等多种功能，只是这些功能在 TPU 中被重新组织成了一个高度专门化的数据流系统。
 
 TPU TensorCore 内部最重要的组件是 MXU（Matrix Multiply Unit），可以认为是整个 TPU 的计算心脏。以 TPU v4 为例，每个 TensorCore 内包含两个 128×128 的 Systolic Array（脉动阵列），总计超过三万个乘加单元同时工作。与 GPU 中由大量 CUDA Core 分散执行矩阵运算不同，TPU 的矩阵计算几乎完全由这些二维阵列完成。在脉动阵列中，数据会像流水一样在阵列内部持续流动。权重矩阵从一个方向进入阵列，激活值从另一个方向进入阵列，每个计算单元只负责执行最简单的乘加操作，然后把结果传递给相邻单元继续处理。整个过程中，数据会在阵列内部被反复复用，而不是频繁访问外部存储。
+
+![TPU v5e 脉动阵列结构示意图]({{ '/assets/images/notes/2TPU.png' | relative_url }})
+*图 2：2个组合 TPU 脉动阵列结构示意图*
 
 这种设计最大的优势在于数据搬运成本极低。事实上，在现代芯片中，真正昂贵的往往不是乘法本身，而是把数据搬运到乘法器旁边。Google 在 TPU 的设计中投入了大量面积给片上 SRAM 和数据流控制逻辑，而不是复杂的调度器和缓存系统，其核心目标就是尽可能减少数据移动。这也是 TPU 和 GPU 在架构哲学上的第一次重大分歧。GPU 的思路是提供大量执行单元，再通过 Warp Scheduler、Cache Hierarchy 和运行时调度尽可能把它们喂饱。而 TPU 的思路则是提前规划好数据流，让计算单元永远知道下一拍应该计算什么。
 
@@ -84,8 +90,7 @@ TPU TensorCore 内部最重要的组件是 MXU（Matrix Multiply Unit），可�
 
 
 
-![TPU v5e 脉动阵列结构示意图]({{ '/assets/images/notes/TPU.png' | relative_url }})
-*图 2：TPU v5e 脉动阵列结构示意图*
+
 
 ## 二、GPU 与 TPU 的内存系统差异
 
