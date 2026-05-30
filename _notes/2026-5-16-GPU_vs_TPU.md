@@ -58,6 +58,8 @@ if (threadIdx.x < 16) {
 
 另外一个近年来越来越重要的变化，是 GPU 内部的 Tensor Core 正在变得越来越强，以至于传统的 CUDA Core 反而逐渐退居辅助角色。尤其在 Transformer 成为主流之后，大量 workload 已经变成了标准化矩阵乘法和 attention 计算。为了持续给 Tensor Core 提供数据，NVIDIA 在 Blackwell 架构中进一步加入了 TMEM（Tensor Memory）。TMEM 本质上是一种更加靠近 Tensor Core 的专用片上存储结构，用来减少 Tensor Core 在等待数据时产生的 pipeline bubble。随着 AI workload 越来越规则化，GPU 的内部结构也开始越来越偏向“数据流机器”而非传统图形处理器。这其实也是为什么今天的 GPU，已经越来越不像最早那个为了游戏图形而设计的 GPU 了。
 
+
+## TPU：为矩阵计算而生的数据流机器
 相比 GPU 的历史，TPU 的出现要晚得多。NVIDIA 在 1999 年正式提出 GPU（Graphics Processing Unit）这一概念，当时的主要目标还是加速图形渲染。而 Google 第一代 TPU 则直到 2015 年才开始在内部数据中心部署，并于 2016 年发表在论文《In-Datacenter Performance Analysis of a Tensor Processing Unit》中正式对外公开。从时间线上看，当 TPU 诞生时，GPU 已经经历了十余年的发展，并且凭借 CUDA 生态逐渐成为深度学习训练的事实标准。
 
 但 Google 在大规模部署神经网络之后很快发现，GPU 虽然拥有强大的通用性，却并不一定是执行神经网络最理想的硬件。搜索排序、语音识别、翻译模型等工作负载中，绝大部分时间都消耗在矩阵乘法和张量运算上，而 GPU 中大量用于支持复杂控制流、线程调度、缓存一致性以及图形渲染的硬件，在这些场景下其实很少被真正利用。于是 Google 开始思考一个问题：如果只保留神经网络真正需要的部分，并把所有晶体管都投入到矩阵运算本身，会得到怎样一种处理器？TPU 就是在这种背景下诞生的。
