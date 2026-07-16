@@ -31,7 +31,7 @@ CPU 通常只有几十个核心，但每个核心都非常复杂，拥有深流�
 
 理解这一点之后，我们再来看 GPU 内部的结构就会清晰很多。现代 NVIDIA GPU 的核心计算单元是 SM。SM 本身并不是“一个核心”，而更像是一个完整的小型计算簇。一个 SM 内部会包含 CUDA Core、Tensor Core、Warp Scheduler、Load/Store Unit、Register File、Shared Memory / L1 Cache，以及特殊函数单元（SFU）。其中 CUDA Core 负责最基础的标量和向量运算，比如加减乘除、地址计算、控制逻辑等；Tensor Core 则是后来为了 AI 和矩阵乘法专门加入的高吞吐矩阵计算单元；Warp Scheduler 负责线程调度；而 Shared Memory 和寄存器则承担数据缓存和局部数据复用。
 
-![GPU的内部结构]({{ '/assets/images/notes/GPU-arch.png' | relative_url }})
+![GPU的内部结构]({{ '/assets/images/notes/gpu-tpu-lpu-architecture/GPU-arch.png' | relative_url }})
 *图 1：GPU SM 内部结构*
 
 这里一个特别容易混淆的概念是，很多人会把 CUDA Core、SM、Stream Processor 混在一起。实际上，SM 是一个大的执行集群，CUDA Core 是 SM 内部真正执行标量运算的小执行单元，而 Stream Processor 则是 AMD GPU 对类似 CUDA Core 的称呼。例如 H100 一共有上百个 SM，而每个 SM 内部又包含数十到上百个 CUDA Core。真正执行程序指令的，其实是这些 CUDA Core。
@@ -66,14 +66,14 @@ if (threadIdx.x < 16) {
 
 从整体架构来看，TPU 比 GPU 简洁得多。如果把现代 GPU 看作一个拥有上百个 SM、数千个 CUDA Core 的大型并行处理器，那么 TPU 更像是一台专门执行矩阵乘法的数据流机器。以目前广泛部署的 TPU v4 和 TPU v5 系列为例，一个 TPU 芯片通常只包含两个 TensorCore，而不是上百个类似 GPU SM 的执行集群。
 
-![TPU v5e 脉动阵列结构示意图]({{ '/assets/images/notes/TPU.png' | relative_url }})
+![TPU v5e 脉动阵列结构示意图]({{ '/assets/images/notes/gpu-tpu-lpu-architecture/TPU.png' | relative_url }})
 *图 2：TPU v5e 脉动阵列结构示意图*
 
 这里需要特别说明的是，TPU 的 TensorCore 与 NVIDIA Tensor Core 虽然名字相似，但实际上并不是同一个概念。NVIDIA 的 Tensor Core 是 SM 内部的一个矩阵计算单元，而 TPU 的 TensorCore 则更接近于一个完整的计算核心，其规模远大于单个 GPU Tensor Core，甚至可以看作是一个独立的数据流处理器。如果对应到 GPU 的架构来看，TPU 的一个 TensorCore 大致承担了 GPU 中 Tensor Core 的矩阵计算、Shared Memory 的局部数据缓存、Warp Scheduler 的执行调度以及 Load/Store Unit 的数据搬运等多种功能，只是这些功能在 TPU 中被重新组织成了一个高度专门化的数据流系统。
 
 TPU TensorCore 内部最重要的组件是 MXU（Matrix Multiply Unit），可以认为是整个 TPU 的计算心脏。以 TPU v4 为例，每个 TensorCore 内包含两个 128×128 的 Systolic Array（脉动阵列），总计超过三万个乘加单元同时工作。与 GPU 中由大量 CUDA Core 分散执行矩阵运算不同，TPU 的矩阵计算几乎完全由这些二维阵列完成。在脉动阵列中，数据会像流水一样在阵列内部持续流动。权重矩阵从一个方向进入阵列，激活值从另一个方向进入阵列，每个计算单元只负责执行最简单的乘加操作，然后把结果传递给相邻单元继续处理。整个过程中，数据会在阵列内部被反复复用，而不是频繁访问外部存储。
 
-![TPU v5e 脉动阵列结构示意图]({{ '/assets/images/notes/2TPU.png' | relative_url }})
+![TPU v5e 脉动阵列结构示意图]({{ '/assets/images/notes/gpu-tpu-lpu-architecture/2TPU.png' | relative_url }})
 *图 3：2个组合 TPU 脉动阵列结构示意图*
 
 这种设计最大的优势在于数据搬运成本极低。事实上，在现代芯片中，真正昂贵的往往不是乘法本身，而是把数据搬运到乘法器旁边。Google 在 TPU 的设计中投入了大量面积给片上 SRAM 和数据流控制逻辑，而不是复杂的调度器和缓存系统，其核心目标就是尽可能减少数据移动。这也是 TPU 和 GPU 在架构哲学上的第一次重大分歧。GPU 的思路是提供大量执行单元，再通过 Warp Scheduler、Cache Hierarchy 和运行时调度尽可能把它们喂饱。而 TPU 的思路则是提前规划好数据流，让计算单元永远知道下一拍应该计算什么。
@@ -129,12 +129,12 @@ TPU 的软件栈则走向了完全不同的方向。如果说 GPU 的核心思�
 GPU 与 TPU 除了在芯片架构和软件栈上存在巨大差异之外，它们在大规模组网方式上的区别其实同样深刻。事实上，当模型规模来到数百亿甚至数万亿参数之后，决定训练速度的往往已经不再是单颗芯片本身的算力，而是这些芯片之间交换数据的能力。从结果上来看，GPU 和 TPU 最终都能够支撑超大规模模型训练，GPT-4、Llama、Gemini、Claude 等模型都运行在由数千甚至数万颗加速器组成的集群上，但如果继续向下观察，就会发现两者对于网络的理解几乎是完全不同的。
 
 GPU 的组网方式本质上更接近传统数据中心网络，采用一种多级交换网络的结构。在单机内部，多张 GPU 首先通过 NVLink 相互连接。以 H100 为例，每颗 GPU 拥有 18 条第四代 NVLink，总双向带宽达到 900 GB/s，而 Blackwell B200 则进一步提升到了 1.8 TB/s。多个 GPU 再通过 NVSwitch 组成一个统一的 NVLink 域，使得任意两张 GPU 都能够通过交换机直接通信。继续向外扩展时，多个 GPU 节点会通过 InfiniBand 或 RoCE 网络连接到更大的集群中，这一层通常被 NVIDIA 称为 Scale-Out Network，而 NVLink 域内部则被称为 Scale-Up Network。从网络拓扑角度来看，这是一种典型的多级 Fat-Tree 或 Clos 结构，数据包从源 GPU 发出之后，会经过若干级交换机转发，最终到达目标 GPU，依次经过 NVSwitch、Leaf Switch、Spine Switch，再到对端的 Leaf Switch 和目标 GPU。因此在 GPU 集群中，任意两个 GPU 理论上都能够互相通信，区别只在于它们是否位于同一个 NVLink 域、是否跨节点、是否跨机柜、是否跨更大的 SuperPod，而这些因素会直接影响通信路径上的跳数以及可用带宽。
-![GPU组网示意图]({{ '/assets/images/notes/GPU-network.png' | relative_url }})
+![GPU组网示意图]({{ '/assets/images/notes/gpu-tpu-lpu-architecture/GPU-network.png' | relative_url }})
 *图 4：GPU组网示意图*
 这种交换网络最大的优势是灵活。网络中的任何 GPU 都可以直接向任何 GPU 发送数据，因此对于 MoE、AllToAll、Parameter Server 等通信模式十分友好，但代价同样明显。随着集群规模扩大，交换机数量会迅速增长，尤其是在追求全二分带宽的情况下，高端 InfiniBand 交换机和光模块本身就会成为整个系统中极其昂贵的一部分。因此 GPU 的扩展本质上是在不断构建更大的交换网络。
 
 TPU 则走向了另一条几乎完全不同的路线。TPU 从设计之初就没有采用传统交换网络，而是选择了一种规则化的邻居互联结构，Google 将其称为 ICI（Inter-Chip Interconnect）。在 TPU v2、v3、v5e 以及 Trillium（v6e）中，每颗 TPU 通常只与四个方向上的邻居直接连接，形成二维 Torus 网络；而在 TPU v4 与 TPU v5p 中，则进一步扩展为三维 Torus，每颗 TPU 与六个方向上的邻居直接连接。这意味着每颗芯片只需要维护有限数量的物理链路，无论整个集群扩展到多大规模，单颗 TPU 所需的网络接口数量几乎保持不变。但这种设计也意味着 TPU 并不存在 GPU 那种通过交换机实现的“一跳直达”——如果两颗 TPU 并非邻居，那么数据必须经过中间 TPU 逐跳转发。从传统网络工程角度来看，这似乎是一种效率较低的设计，但 Google 的思考方式并不是让任意节点之间通信尽可能方便，而是让大规模张量通信尽可能高效。
-![TPU组网示意图]({{ '/assets/images/notes/TPU-network.png' | relative_url }})
+![TPU组网示意图]({{ '/assets/images/notes/gpu-tpu-lpu-architecture/TPU-network.png' | relative_url }})
 *图 5：TPU组网示意图*
 因为在 Transformer 训练过程中，大部分通信其实并不是随机流量，更多时候发生的是 AllReduce、ReduceScatter、AllGather 以及 Tensor Parallel 所需的 Collective 操作，这些通信模式高度规则化。对于这类通信而言，规则 Torus 网络反而具有非常高的带宽利用率。更重要的是，TPU 的链路数量不会随着集群规模增长而增加，因此理论上可以持续扩展到极大的规模，而不会像交换网络那样面临交换机端口数量和成本的指数增长问题。Google TPU v4 的一个完整 SuperPod 达到了 4096 颗 TPU 的规模，而 TPU v5p 则进一步扩展到超过 8000 颗 TPU。为了构建如此巨大的 Torus 网络，Google 引入了 OCS（Optical Circuit Switch，光路交换机）。需要指出的是，OCS 与传统 InfiniBand 交换机并不相同，它并不会像交换机那样实时转发数据包，而是在更高层级上重新配置 TPU Torus 的物理连接关系。因此 TPU 的通信本质上仍然是邻居通信，只不过这些邻居关系可以通过光交换网络重新组织。
 
