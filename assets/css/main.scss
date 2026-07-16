@@ -1504,7 +1504,7 @@ a {
   position: sticky;
   top: 90px;
   flex-shrink: 0;
-  width: 220px;
+  width: 250px;
   max-height: calc(100vh - 120px);
   overflow: hidden;
 
@@ -1573,11 +1573,42 @@ a {
 }
 
 .toc-link-h1 {
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .toc-link-h2 {
-  padding-left: 16px;
+  font-weight: 500;
+}
+
+// 嵌套子目录列表
+.toc-sublist {
+  list-style: none;
+  padding: 0;
+  margin: 2px 0 6px 0;
+}
+
+// h3 子标题：小字、不换行、省略号
+.toc-link-h3 {
+  padding-left: 24px;
+  font-size: 0.78rem;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-secondary);
+  border-left-color: transparent;
+
+  &:hover {
+    color: var(--color-text);
+    background: var(--color-bg-alt);
+  }
+
+  &.active {
+    color: var(--color-primary);
+    font-weight: 500;
+    background: var(--color-tag-bg);
+    border-left-color: var(--color-primary);
+  }
 }
 
 .note-body-main {

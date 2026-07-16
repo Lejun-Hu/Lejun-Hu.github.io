@@ -224,16 +224,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const noteContent = document.getElementById('note-content');
   if (!tocList || !noteContent) return;
 
-  // 提取 h1, h2 标题
-  const headings = noteContent.querySelectorAll('h1, h2');
+  // 提取 h1, h2, h3 标题，构建嵌套目录树
+  const headings = noteContent.querySelectorAll('h1, h2, h3');
   if (headings.length === 0) {
-    // 没有标题时隐藏目录栏
     const sidebar = document.querySelector('.toc-sidebar');
     if (sidebar) sidebar.style.display = 'none';
     return;
   }
 
   const tocItems = [];
+  let currentH2Li = null; // 跟踪当前 h2 的 li，用于嵌套 h3
 
   headings.forEach((heading, index) => {
     // 确保每个标题都有 id
@@ -241,7 +241,7 @@ document.addEventListener('DOMContentLoaded', () => {
       heading.id = 'toc-heading-' + index;
     }
 
-    const level = heading.tagName.toLowerCase(); // h1 或 h2
+    const tagName = heading.tagName.toLowerCase(); // h1, h2, h3
     const text = heading.textContent.trim();
     const id = heading.id;
 
@@ -250,9 +250,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const a = document.createElement('a');
     a.href = '#' + id;
-    a.className = 'toc-link toc-link-' + level;
+    a.className = 'toc-link toc-link-' + tagName;
     a.textContent = text;
     a.dataset.target = id;
+    // h3 长标题用 title 属性展示完整文字
+    if (tagName === 'h3') {
+      a.title = text;
+    }
 
     // 点击平滑滚动
     a.addEventListener('click', function(e) {
@@ -273,10 +277,28 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
-    li.appendChild(a);
-    tocList.appendChild(li);
-
-    tocItems.push({ link: a, heading: heading });
+    if (tagName === 'h3' && currentH2Li) {
+      // h3 嵌套在当前 h2 下方
+      li.classList.add('toc-item-sub');
+      let subList = currentH2Li.querySelector('.toc-sublist');
+      if (!subList) {
+        subList = document.createElement('ul');
+        subList.className = 'toc-sublist';
+        currentH2Li.appendChild(subList);
+      }
+      li.appendChild(a);
+      subList.appendChild(li);
+      tocItems.push({ link: a, heading: heading });
+    } else {
+      // h1 或 h2：直接加入主列表
+      li.appendChild(a);
+      tocList.appendChild(li);
+      tocItems.push({ link: a, heading: heading });
+      // h2 作为下一个 h3 序列的父节点
+      if (tagName === 'h2') {
+        currentH2Li = li;
+      }
+    }
   });
 
   // 滚动高亮当前章节（使用 IntersectionObserver）
