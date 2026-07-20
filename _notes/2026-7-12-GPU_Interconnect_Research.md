@@ -39,7 +39,7 @@ NVLink是一种**自研的专有高速串行互联协议**，用于GPU到GPU以�
 | NVLink 3 | Ampere A100 (2020) | 12 | 600 GB/s | sub-link改为4对差分信号线 |
 | NVLink 4 | Hopper H100 (2022) | 18 | 900 GB/s | NVSwitch支持256 GPU，引入SHARP网络内计算 |
 | NVLink 5 | Blackwell B200 (2024) | 18 | 1,800 GB/s | 224G PAM4 SerDes，NVL72支持72 GPU全互联 |
-| NVLink 6 | Rubin (预计2026-2027) | 36 | 3,600 GB/s | 链路数翻倍，聚合带宽260TB/s (NVL72) |
+| NVLink 6 | Vera Rubin (CES 2026发布，已全面量产) | 36 | 3,600 GB/s | 链路数翻倍，NVL144聚合带宽520TB/s |
 
 **第五代NVLink关键指标：** 每条链路100GB/s双向速率，Blackwell GPU配备18条链路，单GPU总带宽达到**1.8TB/s**，是PCIe 5.0 x16带宽（128GB/s）的**14倍**。GB200 NVL72系统在单个NVLink域内连接72个GPU，聚合带宽达**130TB/s**。
 
@@ -264,7 +264,7 @@ Google TPU是本文研究中最特殊的存在——它从芯片到框架全部�
 
 ## 五、总结与展望
 
-**1. 英伟达方案的本质：** NVLink+NVSwitch是一套从SerDes物理层到协议层全栈自研的封闭体系，不基于RDMA或以太网。其昂贵的根源在于全栈封闭的锁定效应。GB300 NVL72整柜BOM约$399万，VR200（Rubin）已达$780万，其中NVSwitch交换芯片+铜缆互联占机柜成本的10-12%。
+**1. 英伟达方案的本质：** NVLink+NVSwitch是一套从SerDes物理层到协议层全栈自研的封闭体系，不基于RDMA或以太网。其昂贵的根源在于全栈封闭的锁定效应。GB300 NVL72整柜BOM约$399万，VR200（Vera Rubin）已达$780万，其中NVSwitch交换芯片+铜缆互联占机柜成本的10-12%。
 
 **2. 替代协议竞争格局：** 目前形成了"三大开放阵营 + 两大云厂商自研"的格局。UALink联盟（100+成员）是挑战NVLink的最强开放力量；OISA是中国主导的国产开放标准；Google ICI和AWS NeuronLink是云厂商自研的封闭方案。AMD的Infinity Fabric在8 GPU规模上与NVLink 4处于同一量级。国产厂商中，摩尔线程MTLink（1314GB/s）和沐曦MetaXLink（~900GB/s）在带宽指标上已相当进取。
 
@@ -276,7 +276,7 @@ Google TPU是本文研究中最特殊的存在——它从芯片到框架全部�
 
 **6. 国产算力集群：** 已形成以华为昇腾为核心、OISA生态为开放补充的格局。供应链方面，在服务器组装、液冷、PCB、连接器、光模块等环节已有较强的国产替代能力，但GPU芯片本身和高端交换芯片仍有代差。超节点架构（384卡/1024卡）通过OISA等协议在规模上正在追赶，但在单卡算力密度和软件生态方面仍需时间沉淀。
 
-**7. 核心趋势：** 交换芯片层面的竞争正从"NVIDIA一家独大"转向"三阵营对垒"——NVIDIA的NVSwitch（封闭）+ NVLink Fusion（半开放），博通的Tomahawk Ultra/SUE（以太网开放路线），和UALink联盟的ULS（全新开放标准）。谁是赢家取决于一个关键问题：UALink交换机能否在2027年赶上NVSwitch 6（Rubin平台，预估3,600GB/s per GPU）的性能迭代速度。
+**7. 核心趋势：** 交换芯片层面的竞争正从"NVIDIA一家独大"转向"三阵营对垒"——NVIDIA的NVSwitch（封闭）+ NVLink Fusion（半开放），博通的Tomahawk Ultra/SUE（以太网开放路线），和UALink联盟的ULS（全新开放标准）。谁是赢家取决于一个关键问题：UALink交换机能否在2027年赶上NVSwitch 6（Vera Rubin平台，3,600GB/s per GPU）的性能迭代速度。
 
 ---
 
