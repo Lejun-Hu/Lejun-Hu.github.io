@@ -28,7 +28,7 @@ published: true
 
 > 一个容易混淆的点：**NVSwitch通过第二层交换可以实现跨节点互联（如Hopper时代的256 GPU NVLink域），但这仍然是scale-up，不是scale-out。** 因为所有GPU在一个NVLink域内共享统一地址空间，走的是内存语义。真正的scale-out始于NVLink域的边界——当你需要用InfiniBand或Spectrum-X以太网连接不同的NVLink域时，才进入scale-out的领地。
 
-### 1.1 NVLink技术演进
+### 1.1 NVLink技术演进简述
 
 NVLink是一种**自研的专有高速串行互联协议**，用于GPU到GPU以及GPU到CPU之间的直接通信。自2014年第一代推出以来，经历了六代演进：
 
