@@ -43,7 +43,29 @@ NVLink是一种**自研的专有高速串行互联协议**，用于GPU到GPU以�
 
 **第五代NVLink关键指标：** 每条链路100GB/s双向速率，Blackwell GPU配备18条链路，单GPU总带宽达到**1.8TB/s**，是PCIe 5.0 x16带宽（128GB/s）的**14倍**。GB200 NVL72系统在单个NVLink域内连接72个GPU，聚合带宽达**130TB/s**。
 
-### 1.2 NVLink与NVSwitch的分工
+### 1.2 英伟达产品命名规则简述
+
+在深入技术细节之前，有必要先厘清英伟达的产品命名体系，因为类似"GB200""NVL72""VR200"这样的代号贯穿本文。
+
+**GPU 架构命名：致敬科学巨匠。** 英伟达每代 GPU 架构以著名科学家命名：Ampere（A）、Hopper（H）、Blackwell（B）、Rubin（R），下一代为 Feynman。数据中心 GPU 通常以"架构首字母 + 性能层级"命名，如 A100、H100、B200。
+
+**"G+B" 组合：从 GPU 到超级芯片。** 从 GH200（Grace Hopper）开始，英伟达推出整合 CPU 与 GPU 的"超级芯片"。GB200 即 **G**race CPU + **B**lackwell GPU 的组合，由一个 Grace CPU 与两个 Blackwell GPU 封装而成。下一代 Vera Rubin 平台延续此逻辑——**V**era CPU + **R**ubin GPU，VR200 为其代表型号。
+
+**NVL + 数字：NVLink 域规模。** "NVL72"指通过 NVSwitch 将 **72** 颗 GPU 全互联的机柜系统，NVL144 则为 144 颗。此前 Hopper 时代的 256 GPU NVLink 域同理，只是未以 NVL 命名。
+
+| 代号 | 含义 |
+|---|---|
+| **G** | Grace CPU（ARM 架构自研数据中心 CPU） |
+| **B** | Blackwell GPU |
+| **H** | Hopper GPU |
+| **V** | Vera CPU（下一代自研 CPU） |
+| **R** | Rubin GPU |
+| **NVL72** | 72 GPU 通过 NVLink 全互联的机柜系统 |
+| **GH200** | Grace + Hopper 超级芯片 |
+| **GB200** | Grace + Blackwell 超级芯片 |
+| **VR200** | Vera + Rubin 超级芯片 |
+
+### 1.3 NVLink与NVSwitch的分工
 
 > **NVLink = 点对点直连协议**：定义了两颗GPU之间"用什么格式、以什么速度"传输数据。每GPU可同时维持多条NVLink连接（Blackwell为18条），工作在**服务器内**，解决的是相邻GPU之间的通信带宽问题。
 >
@@ -53,7 +75,7 @@ NVLink是一种**自研的专有高速串行互联协议**，用于GPU到GPU以�
 
 当前最具代表性的应用是**GB200 NVL72**：18个计算托盘（72颗Blackwell GPU）通过9个NVSwitch托盘实现全部互联，**任意两颗GPU之间都是1.8TB/s全速通信**。
 
-### 1.3 为什么NVSwitch不能直接扩展到万卡？
+### 1.4 为什么NVSwitch不能直接扩展到万卡？
 
 核心原因可以归结为**物理极限、拓扑约束和语义差异**三个层面：
 
@@ -67,14 +89,14 @@ NVLink是一种**自研的专有高速串行互联协议**，用于GPU到GPU以�
 
 > **总结：这是一个"分工不同"的设计，不是性能优劣的问题。** NVSwitch/NVLink负责的是**在一个NVLink域内实现GPU间极致带宽和内存语义通信**。InfiniBand/Spectrum-X负责的是**将多个NVLink域连接为大规模集群**——追求可扩展性、容错性、标准化管理。两者在架构上是互补关系，而非竞争关系。
 
-### 1.4 NVLink底层协议栈
+### 1.5 NVLink底层协议栈
 
 - **物理层**：采用自研224G PAM4 SerDes技术。从Ampere的56Gbps → Hopper的112Gbps → Blackwell的224Gbps，SerDes速率持续翻倍。
 - **信令协议**：使用PAM4（四电平脉冲幅度调制），通过4对差分信号线构成一个"sub-link"作为基本物理单元。信号通过铜缆Twinax介质传输。
 - **数据链路层**：使用FLIT（Flow Control Unit）固定大小包格式，包含FEC前向纠错。
 - **协议层**：专有协议，支持GPU间直接内存访问（P2P RDMA-like操作），但与标准RDMA（如RoCEv2）不同。NVLink 3.0起采用分组交换架构，通过NVSwitch芯片实现all-to-all全互联。
 
-### 1.5 成本拆解
+### 1.6 成本拆解
 
 以GB300 NVL72机架（Blackwell Ultra）为例（数据来源：摩根士丹利、SemiAnalysis）：
 
