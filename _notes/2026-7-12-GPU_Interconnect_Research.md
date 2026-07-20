@@ -1,7 +1,7 @@
 ---
 title: "GPU卡间互联协议深度调研：NVLink/NVSwitch及其替代方案全景分析（未完成）"
 permalink: /notes/GPU_Interconnect_Research/
-date: 2026-07-12
+date: 2026-08-15
 category: "AI 硬件"
 tags: ["GPU互联", "NVLink", "NVSwitch", "UALink", "InfiniBand", "Scale-up", "Scale-out", "交换芯片"]
 description: "从NVLink/NVSwitch出发，全景拆解GPU卡间互联协议与交换芯片技术栈——涵盖scale-up与scale-out两个层次的主流方案对比、国产替代进展、CUDA生态兼容性与软件栈适配分析。"
