@@ -39,6 +39,9 @@ plugins:
   - jekyll-sitemap   # 生成站点地图（利于 SEO）
   - jekyll-seo-tag   # 自动生成 SEO 标签
 
+# 允许发布未来日期的文档
+future: true
+
 # 排除文件（这些文件不会被构建到最终网站）
 exclude:
   - README.md
