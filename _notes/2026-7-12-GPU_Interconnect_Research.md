@@ -24,7 +24,7 @@ published: true
 
 **Scale-up（纵向扩展/超节点互联）：** 在**单个NVLink域**内工作——从一台8卡服务器内部的GPU直连，到通过NVSwitch将跨节点GPU编织成全互联的统一计算域。英伟达最新的NVL72机柜将72颗Blackwell GPU置于同一NVLink域中，任意两卡之间1.8TB/s带宽，通过NVSwitch实现all-to-all无阻塞全互联。这一层的特点是**TB/s级带宽、纳秒级延迟、内存语义通信**——大模型的张量并行（TP）和专家并行（EP）重度依赖它。代表技术：**NVLink（GPU直连协议）+ NVSwitch（交换芯片，可扩展到跨节点全互联）**。
 
-**Scale-out（横向扩展/跨Pod互联）：** 当一个NVLink域内的GPU数量达到上限（如NVL72的72颗），仍需要更多算力时，就需要将多个NVLink域连接起来。这就是scale-out的领域——不同机柜、不同Pod甚至不同数据中心之间的网络。这一层使用**InfiniBand或以太网（RoCEv2/UEC）**协议，带宽在几百Gb/s量级，主要承载数据并行（DP）和流水线并行（PP）等对延迟相对宽容的通信模式。英伟达在这层使用的Quantum InfiniBand交换机和Spectrum以太网交换机均采用**自研Mellanox ASIC芯片**，并非外购博通或Marvell的商用芯片。
+**Scale-out（横向扩展/跨Pod互联）：** 当一个NVLink域内的GPU数量达到上限（如NVL72的72颗），仍需要更多算力时，就需要将多个NVLink域连接起来。这就是scale-out的领域——不同机柜、不同Pod甚至不同数据中心之间的网络。这一层使用**InfiniBand或以太网（RoCEv2/UEC）**协议，带宽在几百Gb/s量级，主要承载数据并行（DP）和流水线并行（PP）等对延迟相对宽容的通信模式。InfiniBand本质上是基于**RDMA**的一种私有化协议，由IBTA（InfiniBand Trade Association）定义标准，但实际实现和生态高度集中于英伟达手中。英伟达在这层使用的Quantum InfiniBand交换机和Spectrum以太网交换机均采用**自研Mellanox ASIC芯片**。
 
 > 一个容易混淆的点：**NVSwitch通过第二层交换可以实现跨节点互联（如Hopper时代的256 GPU NVLink域），但这仍然是scale-up，不是scale-out。** 因为所有GPU在一个NVLink域内共享统一地址空间，走的是内存语义。真正的scale-out始于NVLink域的边界——当你需要用InfiniBand或Spectrum-X以太网连接不同的NVLink域时，才进入scale-out的领地。
 
