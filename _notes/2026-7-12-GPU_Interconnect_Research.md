@@ -65,15 +65,28 @@ NVLink是一种**自研的专有高速串行互联协议**，用于GPU到GPU以�
 | **GB200** | Grace + Blackwell 超级芯片 |
 | **VR200** | Vera + Rubin 超级芯片 |
 
-### 1.3 NVLink与NVSwitch的分工
+### 1.3 NVLink、NVSwitch 与 Scale-out 交换网络的分工
 
-> **NVLink = 点对点直连协议**：定义了两颗GPU之间"用什么格式、以什么速度"传输数据。每GPU可同时维持多条NVLink连接（Blackwell为18条），工作在**服务器内**，解决的是相邻GPU之间的通信带宽问题。
->
-> **NVSwitch = 交换芯片**：将多颗GPU的多条NVLink连接汇聚成一个**全互联（all-to-all）交换网络**。单个服务器内的NVSwitch（第一层）让8颗GPU彼此全速通信；外部NVSwitch（第二层）则跨节点扩展，将一个NVLink域扩展到最多256颗（Hopper）乃至576颗（Blackwell理论值）GPU，使它们处于同一NVLink域中共享统一地址空间。
->
-> **两者的关系**：NVLink是物理直连协议，NVSwitch是基于该协议的交换芯片。NVLink定义了单条链路的带宽（例如100GB/s），NVSwitch定义了多链路之间的无阻塞交换能力（例如72×72全互联）。两者共同构成了英伟达的**scale-up体系**。
+在讨论 GPU 互联时，一个常见的混淆是把 NVLink、NVSwitch、InfiniBand、Spectrum-X 这些名词混为一谈。它们实际上分属**三个不同层次**，各自承担不同的角色，共同构成了英伟达从单机到万卡集群的完整互联体系。
 
-当前最具代表性的应用是**GB200 NVL72**：18个计算托盘（72颗Blackwell GPU）通过9个NVSwitch托盘实现全部互联，**任意两颗GPU之间都是1.8TB/s全速通信**。
+**第一层：NVLink — GPU 之间的点对点直连协议。**
+
+NVLink 定义了相邻两颗 GPU 之间以什么格式、以什么速度传输数据。它是纯粹的物理链路层协议：每颗 Blackwell GPU 配备 18 条 NVLink 链路，每条 100GB/s 双向，单 GPU 总带宽 1.8TB/s。NVLink 工作在服务器机箱内部，解决的是"两颗紧挨着的 GPU 如何高效通信"的问题。它的核心特征是**内存语义**（load/store）——GPU A 可以直接用一条访存指令读写 GPU B 的 HBM，延迟在纳秒级。
+
+**第二层：NVSwitch — 将多颗 GPU 编织成全互联域。**
+
+NVLink 只能做点对点连接，而 NVSwitch 是交换芯片，将多颗 GPU 的多条 NVLink 链路汇聚成一个 **all-to-all 全互联交换网络**。单个服务器内的 NVSwitch 让 8 颗 GPU 彼此全速通信；外部 NVSwitch 则跨节点扩展，将一个 NVLink 域扩展到最多 576 颗 GPU（Blackwell 理论值），域内所有 GPU 共享统一地址空间。NVSwitch 定义了多链路之间的无阻塞交换能力（例如 72×72 全互联），它和 NVLink 共同构成了英伟达的 **scale-up 体系**——追求极致带宽、纳秒延迟和内存语义通信。
+
+**第三层：Scale-out 交换网络 — InfiniBand 与 Spectrum 以太网两条产品线。**
+
+当一个 NVLink 域内的 GPU 数量达到物理上限，仍需更多算力时，就需要将多个 NVLink 域连接起来，进入 scale-out 的领域。英伟达在这一层布局了**两条技术产品线**：
+
+- **InfiniBand（Quantum 系列交换机）：** 基于 RDMA 的私有化协议。英伟达 2019 年收购 Mellanox 后掌握了这条产品线，Quantum NDR/XDR 交换机以 400G/800G 端口连接各 GPU 的 ConnectX 网卡，通过 Fat-Tree 拓扑将数百个 NVLink 域组成万卡集群。InfiniBand 走的是**消息传递语义**（send/recv + RDMA），与 NVLink 的内存语义不同，但天然适合大规模分布式系统。
+- **以太网（Spectrum 系列交换机）：** 英伟达自研的 Spectrum-X 以太网交换 ASIC，支持 RoCEv2 和 UEC 超以太网协议，为不想绑定 InfiniBand 的云厂商提供基于标准以太网的 scale-out 替代方案。
+
+三者之间的关系可以这样理解：**NVLink 定义了单条链路的带宽**（例如 100GB/s），**NVSwitch 决定了多条链路如何无阻塞交换**（例如 72×72 全互联），而 **InfiniBand/Spectrum-X 负责将不同的 NVLink 域连接为大规模集群**。NVLink + NVSwitch 属于 scale-up，追求最高带宽和最低延迟；InfiniBand/Spectrum-X 属于 scale-out，追求可扩展性和标准化管理。两者在架构上是互补关系，而非竞争关系。
+
+当前最具代表性的应用是 **GB200 NVL72**：18 个计算托盘（72 颗 Blackwell GPU）通过 9 个 NVSwitch 托盘实现全部互联，任意两颗 GPU 之间均为 1.8TB/s 全速通信。如果要将多个 NVL72 机柜连接起来组成更大的集群，则需要通过每颗 GPU 配备的 ConnectX-7 InfiniBand 网卡接入 Quantum 交换机，进入 scale-out 网络。
 
 ### 1.4 为什么NVSwitch不能直接扩展到万卡？
 
