@@ -67,24 +67,27 @@ NVLink是一种**自研的专有高速串行互联协议**，用于GPU到GPU以�
 
 ### 1.3 NVLink、NVSwitch 与 Scale-out 交换网络的分工
 
-在讨论 GPU 互联时，一个常见的混淆是把 NVLink、NVSwitch、InfiniBand、Spectrum-X 这些名词混为一谈。它们实际上分属**三个不同层次**，各自承担不同的角色，共同构成了英伟达从单机到万卡集群的完整互联体系。
+在讨论 GPU 互联时，一个常见的混淆是把 NVLink、NVSwitch、InfiniBand、Spectrum-X 这些名词混为一谈。它们实际上分属**三个不同层次**，各自承担不同的角色，共同构成了英伟达从单机到万卡集群的完整互联体系。下面自底向上逐一梳理。
 
 **第一层：NVLink — GPU 之间的点对点直连协议。**
 
-NVLink 定义了相邻两颗 GPU 之间以什么格式、以什么速度传输数据。它是纯粹的物理链路层协议：每颗 Blackwell GPU 配备 18 条 NVLink 链路，每条 100GB/s 双向，单 GPU 总带宽 1.8TB/s。NVLink 工作在服务器机箱内部，解决的是"两颗紧挨着的 GPU 如何高效通信"的问题。它的核心特征是**内存语义**（load/store）——GPU A 可以直接用一条访存指令读写 GPU B 的 HBM，延迟在纳秒级。
+NVLink 定义了相邻两颗 GPU 之间以什么格式、以什么速度传输数据。它是纯粹的物理链路层协议：每颗 Blackwell GPU 配备 18 条 NVLink 链路，每条 100GB/s 双向，单 GPU 总带宽 1.8TB/s。NVLink 工作在服务器机箱内部，解决的是"两颗紧挨着的 GPU 如何高效通信"的问题。它的核心特征是**内存语义**（load/store）——GPU A 可以直接用一条访存指令 `ld.global [addr_on_B]` 读写 GPU B 的 HBM，NVLink 硬件自动完成地址翻译，全程不需要软件介入，延迟在纳秒级。
 
 **第二层：NVSwitch — 将多颗 GPU 编织成全互联域。**
 
-NVLink 只能做点对点连接，而 NVSwitch 是交换芯片，将多颗 GPU 的多条 NVLink 链路汇聚成一个 **all-to-all 全互联交换网络**。单个服务器内的 NVSwitch 让 8 颗 GPU 彼此全速通信；外部 NVSwitch 则跨节点扩展，将一个 NVLink 域扩展到最多 576 颗 GPU（Blackwell 理论值），域内所有 GPU 共享统一地址空间。NVSwitch 定义了多链路之间的无阻塞交换能力（例如 72×72 全互联），它和 NVLink 共同构成了英伟达的 **scale-up 体系**——追求极致带宽、纳秒延迟和内存语义通信。
+NVLink 只能做点对点连接，而 NVSwitch 是交换芯片，将多颗 GPU 的多条 NVLink 链路汇聚成一个 **all-to-all 全互联交换网络**。单个服务器内的 NVSwitch 让 8 颗 GPU 彼此全速通信；外部 NVSwitch 则跨节点扩展，将一个 NVLink 域扩展到最多 576 颗 GPU（Blackwell 理论值）。NVSwitch 定义了多链路之间的无阻塞交换能力（例如 72×72 全互联），它和 NVLink 共同构成了英伟达的 **scale-up 体系**——追求极致带宽、纳秒延迟和内存语义通信。在同一个 NVLink 域内，所有 GPU 共享由硬件维护的统一地址空间和缓存一致性协议，任何一张卡都可以像访问本地显存一样直接 load/store 远端数据。
 
 **第三层：Scale-out 交换网络 — InfiniBand 与 Spectrum 以太网两条产品线。**
 
-当一个 NVLink 域内的 GPU 数量达到物理上限，仍需更多算力时，就需要将多个 NVLink 域连接起来，进入 scale-out 的领域。英伟达在这一层布局了**两条技术产品线**：
+当一个 NVLink 域内的 GPU 数量达到物理上限、仍需更多算力时，就需要将多个 NVLink 域连接起来，进入 scale-out 的领域。这一层与 NVLink 域有本质区别：**不同 NVLink 域之间没有共享地址空间，GPU 不能像域内那样直接用 load/store 跨域读写。** 取而代之的是消息传递模型——数据被显式地打包、寻址，通过网卡和交换机在域间路由。英伟达在这一层布局了两条产品线，面向不同的客户场景和生态策略。
 
-- **InfiniBand（Quantum 系列交换机）：** 基于 RDMA 的私有化协议。英伟达 2019 年收购 Mellanox 后掌握了这条产品线，Quantum NDR/XDR 交换机以 400G/800G 端口连接各 GPU 的 ConnectX 网卡，通过 Fat-Tree 拓扑将数百个 NVLink 域组成万卡集群。InfiniBand 走的是**消息传递语义**（send/recv + RDMA），与 NVLink 的内存语义不同，但天然适合大规模分布式系统。
-- **以太网（Spectrum 系列交换机）：** 英伟达自研的 Spectrum-X 以太网交换 ASIC，支持 RoCEv2 和 UEC 超以太网协议，为不想绑定 InfiniBand 的云厂商提供基于标准以太网的 scale-out 替代方案。
+**InfiniBand** 是英伟达 2019 年以 69 亿美元收购 Mellanox 后获得的核心资产。它是一种基于 RDMA 的私有化协议，Quantum 系列交换机（NDR 400Gbps / XDR 800Gbps）通过 ConnectX 网卡连接各 GPU，采用 Fat-Tree 胖树拓扑将数百个 NVLink 域组成万卡集群。跨域通信的具体流程是：发送端 GPU 提前向自己的 ConnectX 网卡注册一块本地显存区域并获得 rkey，然后发起 RDMA Write 请求，网卡通过 IB 网络直接将数据推送到远端 GPU 已注册的显存区域——全程不经过远端 CPU，接收端 GPU 甚至不参与数据传输。InfiniBand 的核心优势在于极低的端到端延迟和成熟的在网计算 INC（In-Network Computing，以 SHARP 为代表）：交换机在转发数据时可执行随路归约（网侧 Reduction），梯度聚合在交换芯片内完成，数据无需返回 GPU 再转发，对大规模训练的梯度同步至关重要。
 
-三者之间的关系可以这样理解：**NVLink 定义了单条链路的带宽**（例如 100GB/s），**NVSwitch 决定了多条链路如何无阻塞交换**（例如 72×72 全互联），而 **InfiniBand/Spectrum-X 负责将不同的 NVLink 域连接为大规模集群**。NVLink + NVSwitch 属于 scale-up，追求最高带宽和最低延迟；InfiniBand/Spectrum-X 属于 scale-out，追求可扩展性和标准化管理。两者在架构上是互补关系，而非竞争关系。
+**Spectrum-X 以太网** 则是英伟达的另一条产品线，采用自研 Spectrum ASIC 交换芯片，支持 RoCEv2（RDMA over Converged Ethernet）和 UEC 超以太网协议。它的战略定位是为不想绑定 InfiniBand 私有生态的云厂商提供基于标准以太网的 scale-out 替代方案。与 InfiniBand 相比，Spectrum-X 的延迟稍高但生态更开放——可以利用已有的以太网运维工具和人才储备，成本更低、供应链更灵活。这一层也正是英伟达与博通、Marvell 等外部交换芯片厂商**直接竞争**的主战场：博通的 Tomahawk/Jericho 系列和 Marvell 的 Teralynx 系列都是以太网交换芯片，与 Spectrum-X 争夺同一批云数据中心客户。
+
+**那么 NVLink 域内的 load/store 和跨域的 RDMA 之间是如何协作的？** 答案是 NCCL 通信库在中间做了抽象。NCCL 会自动感知集群的物理拓扑：同一个 NVLink 域内的 GPU 之间使用 NVLink transport，走高效的内存语义通道；跨域通信则走 IB/RoCE transport，把数据传输封装为 RDMA 消息。对上层 PyTorch 用户来说，一行 `all_reduce(gradients)` 在 8 卡 NVLink 域内和在 8192 卡的 IB 网络上都能正确执行，底层通信方式的切换是透明的——只是后者的延迟和带宽会不可避免地受域间物理链路的限制。
+
+三条线的关系可以概括为：**NVLink 定义了单条链路的带宽，NVSwitch 决定了多条链路如何无阻塞交换，而 InfiniBand / Spectrum-X 负责将不同的 NVLink 域连接为万卡集群。** NVLink + NVSwitch 属于 scale-up，域内共享地址空间、走内存语义；InfiniBand / Spectrum-X 属于 scale-out，域间走消息语义，通过 RDMA 和 NCCL 抽象层无缝衔接。
 
 当前最具代表性的应用是 **GB200 NVL72**：18 个计算托盘（72 颗 Blackwell GPU）通过 9 个 NVSwitch 托盘实现全部互联，任意两颗 GPU 之间均为 1.8TB/s 全速通信。如果要将多个 NVL72 机柜连接起来组成更大的集群，则需要通过每颗 GPU 配备的 ConnectX-7 InfiniBand 网卡接入 Quantum 交换机，进入 scale-out 网络。
 
