@@ -91,8 +91,8 @@ NVLink是一种**自研的专有高速串行互联协议**，用于GPU到GPU以�
 
 ### 1.5 NVLink底层协议栈
 
-- **物理层**：采用自研224G PAM4 SerDes技术。从Ampere的56Gbps → Hopper的112Gbps → Blackwell的224Gbps，SerDes速率持续翻倍。
-- **信令协议**：使用PAM4（四电平脉冲幅度调制），通过4对差分信号线构成一个"sub-link"作为基本物理单元。信号通过铜缆Twinax介质传输。
+- **物理层**：采用自研224G PAM4 SerDes技术。PAM4（4-Level Pulse Amplitude Modulation，四电平脉冲幅度调制）是一种通过 4 个不同电压电平（00/01/10/11）在单个符号周期内传输 2 比特数据的高阶调制方式——相比传统的 NRZ（Non-Return-to-Zero，不归零编码）每个符号仅传输 1 比特，PAM4 在同等频率下带宽翻倍，但代价是信噪比容限降低、对信号完整性要求更高。从 Ampere 的 56Gbps → Hopper 的 112Gbps → Blackwell 的 224Gbps，SerDes 速率持续翻倍。
+- **信令协议**：通过 4 对差分信号线构成一个"sub-link"作为基本物理单元。信号通过铜缆 Twinax 介质传输，在接收端使用 ADC + 高级 DSP 进行信号均衡和时钟恢复。
 - **数据链路层**：使用FLIT（Flow Control Unit）固定大小包格式，包含FEC前向纠错。
 - **协议层**：专有协议，支持GPU间直接内存访问（P2P RDMA-like操作），但与标准RDMA（如RoCEv2）不同。NVLink 3.0起采用分组交换架构，通过NVSwitch芯片实现all-to-all全互联。
 
