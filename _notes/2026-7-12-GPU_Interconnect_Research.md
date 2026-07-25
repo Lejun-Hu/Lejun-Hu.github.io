@@ -4,7 +4,7 @@ permalink: /notes/GPU_Interconnect_Research/
 date: 2026-08-15
 category: "AI 硬件"
 tags: ["GPU互联", "NVLink", "NVSwitch", "UALink", "InfiniBand", "Scale-up", "Scale-out", "交换芯片"]
-description: "从NVLink/NVSwitch出发，全景拆解GPU卡间互联协议与交换芯片技术栈——涵盖scale-up与scale-out两个层次的主流方案对比、国产替代进展、CUDA生态兼容性与软件栈适配分析。"
+description: "从NVLink/NVSwitch出发，全景拆解GPU卡间互联协议与交换芯片技术栈——涵盖英伟达scale-up/scale-out体系、国内外替代协议竞争格局、交换芯片市场格局与成本拆解。"
 published: true
 ---
 
@@ -350,46 +350,7 @@ OISA 1.0 于 2025 年 8 月发布，2.0 进一步将规格提升至单点 **896 
 
 ---
 
-## 四、各家CUDA生态兼容性与软件栈适配分析
-
-替代协议与CUDA生态的兼容性并非简单的"是/否"，而是一个从硬件到框架的**多层适配问题**：
-
-> **全栈层次：** 硬件互联层 → 驱动/运行时层 → 集合通信库层（NCCL等效）→ 算子库层 → 深度学习框架层（PyTorch等）
-
-| 方案 | 硬件互联层 | 通信库层 | 算子库层 | PyTorch兼容 | 迁移成本 |
-|---|---|---|---|---|---|
-| **NVIDIA NVLink** | 原生CUDA | NCCL（原生） | cuBLAS/cuDNN | 原生支持 | 零 |
-| **AMD Infinity Fabric** | ROCm | RCCL（NCCL兼容API） | rocBLAS/MIOpen | 需ROCm版PyTorch | 中等 |
-| **UALink** | 开放标准 | 需各厂商实现 | 取决于加速器厂商 | 取决于上层加速器 | 高（初期）→ 低（成熟后） |
-| **华为昇腾 HCCS/UB** | CANN | HCCL（自研） | CANN算子库 | 需PyTorch-Ascend版 | 中高 |
-| **摩尔线程 MTLink** | MUSA | MUSA通信库 | MUSA算子库 | MUSIFY自动转换90%+ CUDA代码 | 低（API级CUDA兼容） |
-| **沐曦 MetaXLink** | MXMACA | MCCL | MXMACA算子库 | 需MXMACA版PyTorch | 中 |
-| **寒武纪 MLU-Link** | NeuWare | CNCL | NeuWare算子库 | PyTorch层无感迁移工具 | 中 |
-| **Google TPU ICI** | XLA编译器 | ICI协议 | JAX/XLA编译优化 | PyTorch/XLA（有性能差距） | 极高 |
-
-### 4.1 Google TPU：全栈重构的"异类"
-
-Google TPU是本文研究中最特殊的存在——它从芯片到框架全部自研，与CUDA生态**完全不兼容**。
-
-| 层级 | NVIDIA 生态 | Google TPU 生态 |
-|---|---|---|
-| 芯片 | GPU (通用并行计算+Systolic Array Tensor Core) | TPU (纯脉动阵列ASIC，无图形单元) |
-| 互联 | NVLink + NVSwitch (专有SerDes，交换式) | ICI (3D Torus + OCS光交换) |
-| 编译器 | NVCC/NVRTC (CUDA C++) | XLA (全图编译，静态优化) |
-| 底层库 | cuBLAS, cuDNN, NCCL, TensorRT | JAX primitives, XLA HLO |
-| 框架 | PyTorch (原生)、TensorFlow、JAX | JAX (原生)、PyTorch/XLA |
-| 部署 | 自有/40+云厂商 | 仅Google Cloud |
-
-关键差异：
-- **脉动阵列 vs 通用张量核：** TPU的矩阵乘法单元是硬连线的脉动阵列，对规则的Transformer计算效率极高。Ironwood (v7)单芯片FP8达到4,614 TFLOPS，是同代H100（3,958 TFLOPS）的1.17倍。
-- **能效优势：** TPU v7由于剔除了图形渲染等冗余单元，AI负载下能效比约为Blackwell的**1.5倍**。
-- **PyTorch支持的代价：** Google近年来大力优化PyTorch/XLA，TPU v7已宣称PyTorch达到"First Class"级别，但涉及**自定义CUDA kernel**的项目仍然无法迁移。
-
-> **实践建议：** 如果团队以PyTorch为主、有大量自定义CUDA算子，选择NVIDIA生态是最安全、迁移成本最低的路径。如果从头构建新项目且使用标准Transformer架构，且对成本敏感、已深度绑定GCP，可考虑TPU+JAX方案。国产GPU厂商中，摩尔线程的MUSA通过API级兼容CUDA，对于存量代码（特别是XCCL级别的通信库开发）是迁移成本最低的选择。
-
----
-
-## 五、总结与展望
+## 四、总结与展望
 
 **1. 英伟达方案的本质：** NVLink+NVSwitch是一套从SerDes物理层到协议层全栈自研的封闭体系，不基于RDMA或以太网。其昂贵的根源在于全栈封闭的锁定效应。GB300 NVL72整柜BOM约$399万，VR200（Vera Rubin）已达$780万，其中NVSwitch交换芯片+铜缆互联占机柜成本的10-12%。
 
