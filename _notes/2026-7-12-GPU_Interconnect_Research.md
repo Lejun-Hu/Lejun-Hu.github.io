@@ -176,7 +176,7 @@ XGMI 的设计思路与 NVLink 类似，都是专有的 GPU 直连协议，但�
 
 UALink 诞生于一个清晰的行业共识：超大规模云厂商（AWS、Google、Meta、Microsoft）不希望被 NVLink 单一供应商锁定。如果每部署一个 AI 集群都要连带采购整套 NVLink + NVSwitch + InfiniBand，议价权和供应链灵活性将完全丧失。于是 2024 年，AMD、Intel、Google、Meta、Microsoft、AWS、Cisco、HPE 八家联合发起 UALink 联盟，目标是定义一个**开放的、多供应商的 scale-up 互联标准**，让任何加速器厂商都可以使用同一套协议和交换芯片。截至 2026 年 1 月，联盟成员已超过 100 家。
 
-UALink 1.0 规范于 2025 年 4 月发布，核心技术规格如下：每通道 200 GT/s（Giga Transfers per second，十亿次传输/秒，注意此处为传输速率单位而非存储容量 TB），4 通道聚合 **800 GB/s** 每 GPU，支持最多 **1,024 个加速器**在单一网络架构中互联——这一数字超过了 NVLink 5 的 576 GPU。协议支持加速器之间直接读写内存（内存语义），在物理层复用了成熟以太网 SerDes 技术以降低实现成本，但上层协议栈完全重新设计以适配 GPU 的数据流特征。更重要的是，UALink 同时定义了开放的交换芯片标准 **ULS（UALink Switch）**，允许博通、Marvell、Astera Labs 等第三方厂商生产兼容芯片，从而创建一个类似以太网交换芯片的多供应商市场。
+UALink 1.0 规范于 2025 年 4 月发布，核心技术规格如下：每通道 200 GT/s（Giga Transfers per second，此处 1 Transfer = 1 Byte 有效数据，即每通道 200 GB/s），4 通道聚合 **800 GB/s** 每 GPU，支持最多 **1,024 个加速器**在单一网络架构中互联——这一数字超过了 NVLink 5 的 576 GPU。协议支持加速器之间直接读写内存（内存语义），在物理层复用了成熟以太网 SerDes 技术以降低实现成本，但上层协议栈完全重新设计以适配 GPU 的数据流特征。更重要的是，UALink 同时定义了开放的交换芯片标准 **ULS（UALink Switch）**，允许博通、Marvell、Astera Labs 等第三方厂商生产兼容芯片，从而创建一个类似以太网交换芯片的多供应商市场。
 
 UALink 2.0 于 2026 年 4 月发布，新增了在网计算、芯粒定义和可管理性等企业级特性。商用进度方面：AMD 的 MI400 系列将是首批原生支持 UALink 的 GPU，预计 2026 年下半年出货；原生 UALink 交换 ASIC 则要等到 2027 年左右面世。这意味着当前存在一个"协议先行、硬件跟进"的窗口期——早期系统可能通过博通 Tomahawk 等以太网交换芯片隧道承载 UALink 流量。
 
