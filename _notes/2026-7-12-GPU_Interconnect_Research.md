@@ -210,9 +210,7 @@ Trainium3 将进一步升级为交换式拓扑结构（不再依赖纯 Ring）�
 
 **CXL（Compute Express Link）** 则是在 PCIe 物理层之上构建的高层协议。CXL 4.0 于 2025 年 11 月发布，基于 PCIe 6.0 物理层，速率 128 GT/s，双向带宽约 **512 GB/s**。CXL 对 PCIe 的依赖关系非常明确：CXL 复用 PCIe 的 SerDes 和电气规范作为物理传输介质，但在协议层额外增加了缓存一致性（CXL.cache）、内存语义（CXL.mem）等能力。它的核心价值在于**跨机架内存池化**——让多台服务器通过 CXL 交换机共享同一块海量内存池，按需分配、弹性伸缩。这是 PCIe 本身做不到的。
 
-**NVLink-C2C** 则是英伟达在最新 Vera Rubin 平台中引入的自研 CPU-GPU 直连技术。在上一代 Grace Hopper（GH200）中，Grace CPU 与 Hopper GPU 之间同样通过 NVLink-C2C 连接，但 Vera Rubin 将这一通道的带宽推向了一个新高度——双向 **1.8 TB/s**，延迟在纳秒级。它是 NVLink 协议在 Chiplet 片间互联层面的延伸，让 Vera CPU 能像访问本地内存一样直接读写 Rubin GPU 的 HBM。NVLink-C2C 是英伟达的私有技术，仅用于自家芯片之间的互联。[^1]
-
-[^1]: NVIDIA 官方微信公众号，《NVIDIA Vera Rubin 提升每瓦性能，为全球合作伙伴实现最低 Token 成本》，2026-07-24，[链接](https://mp.weixin.qq.com/s/G88gqBIF8reG1WMp4cVTiw)。
+**NVLink-C2C** 则是英伟达在最新 Vera Rubin 平台中引入的自研 CPU-GPU 直连技术。在上一代 Grace Hopper（GH200）中，Grace CPU 与 Hopper GPU 之间同样通过 NVLink-C2C 连接，但 Vera Rubin 将这一通道的带宽推向了一个新高度——双向 **1.8 TB/s**，延迟在纳秒级。它是 NVLink 协议在 Chiplet 片间互联层面的延伸，让 Vera CPU 能像访问本地内存一样直接读写 Rubin GPU 的 HBM。NVLink-C2C 是英伟达的私有技术，仅用于自家芯片之间的互联。根据英伟达官方 2026 年 7 月发布的 [Vera Rubin 平台部署进展](https://mp.weixin.qq.com/s/G88gqBIF8reG1WMp4cVTiw) 披露，全球已有超过 300 家合作伙伴开始部署该平台，每兆瓦 Token 吞吐量达到 Grace Blackwell 的 10 倍。
 
 表面上看，NVLink-C2C 的 1.8 TB/s 远超 CXL 4.0 的 512 GB/s，似乎 CXL 被"碾压"了。但实际上两者解决的是**完全不同的问题**。NVLink-C2C 追求的是单节点内 CPU 和 GPU 之间**最快的点到点通道**——它的物理范围仅限于同一芯片封装或基板内部，距离极短、性能极致，但不可扩展。CXL 追求的是**跨机架的海量内存共享**——几十台服务器可以按需接入同一个 CXL 内存池，在数百 TB 级别弹性分配资源，速度和距离的权衡截然不同。
 
