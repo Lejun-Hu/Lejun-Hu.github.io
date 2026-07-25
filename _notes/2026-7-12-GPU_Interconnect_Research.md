@@ -157,34 +157,58 @@ NVLink 只能做点对点连接，而 NVSwitch 是交换芯片，将多颗 GPU �
 | **PCIe 6.0** | PCI-SIG | 256 GB/s (x16双向) | 点对点，需 Switch 扩展 | 完全开放标准 | 已商用 |
 | **CXL 4.0** | CXL联盟 | 128 GT/s | 跨机架内存池化 | 开放标准 | 规范已发布(2025.11) |
 
-#### AMD Infinity Fabric (XGMI)
+**1. AMD Infinity Fabric (XGMI)**
 
-AMD给Instinct系列加速器打造的自研互联，思路与NVLink类似。MI300X每颗芯片配备**7条Infinity Fabric链路**，每条提供约128GB/s双向带宽，点对点带宽约1.075TB/s。支持8颗GPU以环形或网格拓扑全互联。软件栈为**ROCm + RCCL**（对标CUDA + NCCL）。超过8个GPU需要以太网扩展，AMD的解法是加入UALink联盟。
+AMD 的 Infinity Fabric 最初是为 CPU 与 GPU 之间以及 Chiplet 芯粒之间的高速通信而设计的内部互联总线，后来被扩展为 XGMI（External Global Memory Interconnect），专门用于 Instinct 系列 GPU 之间的卡间直连。这一需求源于 AMD 在数据中心 GPU 市场对 NVIDIA 的追赶——如果不能在多卡互联带宽上与 NVLink 抗衡，即使单卡算力追平，集群扩展效率也会严重受限。
 
-#### UALink（Ultra Accelerator Link）—— 最具威胁的开放替代方案
+XGMI 的设计思路与 NVLink 类似，都是专有的 GPU 直连协议，但两者在规模上有明显差距。以 MI300X 为例，每颗芯片配备 7 条第四代 Infinity Fabric 链路，每条 128 GB/s 双向，总带宽约 **1.075 TB/s**，与 H100 的 NVLink 4（900 GB/s）基本处于同一量级。但 XGMI 目前仅支持 **8 颗 GPU** 以环形或网格拓扑互联，超出 8 卡就需要切换到以太网，这在实际大模型训练中是一个明显的规模瓶颈。
 
-**联盟构成：** 创始成员包括AMD、AWS、Astera Labs、Cisco、Google、HPE、Intel、Meta、Microsoft。截至2026年1月，成员已超**100家**。
+软件栈方面，AMD 的 **ROCm + RCCL** 对标 CUDA + NCCL，且 ROCm 完全开源，对部分云厂商有较强吸引力。AMD 也意识到专用协议的局限：下一代 MI400 系列（2026 年下半年）将放弃纯自研路线，转而支持开放的 **UALink** 协议，XGMI 则退居为 Chiplet 片内互联的角色。从量产状态来看，MI300X 和 MI355X 均已大规模出货，MI355X 采用 3nm 工艺和 CDNA 4 架构，配备 288 GB HBM3e，互联规格与 MI300X 相近但制程明显领先。
 
-**技术参数（1.0规范）：**
-- 每通道200 GT/s速率，4通道聚合800 GB/s每GPU
-- 支持最多**1,024个加速器**在单一网络架构中互联（NVLink 5最多576 GPU）
-- 支持加速器之间直接读写内存（内存语义）
-- 复用部分以太网物理层技术，但重新设计了上层协议
-- 定义开放的交换芯片标准（ULS），博通、Marvell、Astera Labs等可生产
+| 对比维度 | AMD XGMI (MI300X) | NVIDIA NVLink 4 (H100) | NVIDIA NVLink 5 (B200) |
+|---|---|---|---|
+| 单 GPU 总带宽 | ~1.075 TB/s (7 链路) | 900 GB/s (18 链路) | 1,800 GB/s (18 链路) |
+| 最大互联规模 | 8 GPU | 256 GPU | 576 GPU |
+| 拓扑 | 环形 / 网格 | Switch 全互联 | Switch 全互联 |
+| 开放程度 | AMD 专有 | NVIDIA 专有 | NVIDIA 专有 |
 
-**商用进展：** UALink 2.0已于2026年4月发布（新增网内计算、芯粒定义、可管理性）。AMD的MI400系列GPU（2026年下半年）将支持UALink。原生UALink交换ASIC预计**2027年左右**面世。
+**2. UALink（Ultra Accelerator Link）**
 
-#### Google ICI（Inter-Chip Interconnect）
+UALink 诞生于一个清晰的行业共识：超大规模云厂商（AWS、Google、Meta、Microsoft）不希望被 NVLink 单一供应商锁定。如果每部署一个 AI 集群都要连带采购整套 NVLink + NVSwitch + InfiniBand，议价权和供应链灵活性将完全丧失。于是 2024 年，AMD、Intel、Google、Meta、Microsoft、AWS、Cisco、HPE 八家联合发起 UALink 联盟，目标是定义一个**开放的、多供应商的 scale-up 互联标准**，让任何加速器厂商都可以使用同一套协议和交换芯片。截至 2026 年 1 月，联盟成员已超过 100 家。
 
-Google TPU的专有芯片间互联协议，设计思路与NVLink有本质不同：
-- **拓扑：4×4×4 3D Torus**（三维环面），每个TPU有6个逻辑"邻居"
-- **铜光混合：** 立方体内部用铜缆，立方体之间通过光收发器+OCS（光电路交换机）连接
-- **OCS技术：** 基于3D MEMS反射镜阵列的纯光学交换，直接重定向光束，无需光电转换
-- 最新的Ironwood（TPU v7）：单Pod支持**9,216颗芯片**，最大7跳延迟
+UALink 1.0 规范于 2025 年 4 月发布，核心技术规格如下：每通道 200 GT/s，4 通道聚合 **800 GB/s** 每 GPU，支持最多 **1,024 个加速器**在单一网络架构中互联——这一数字超过了 NVLink 5 的 576 GPU。协议支持加速器之间直接读写内存（内存语义），在物理层复用了成熟以太网 SerDes 技术以降低实现成本，但上层协议栈完全重新设计以适配 GPU 的数据流特征。更重要的是，UALink 同时定义了开放的交换芯片标准 **ULS（UALink Switch）**，允许博通、Marvell、Astera Labs 等第三方厂商生产兼容芯片，从而创建一个类似以太网交换芯片的多供应商市场。
 
-#### AWS NeuronLink
+UALink 2.0 于 2026 年 4 月发布，新增了在网计算、芯粒定义和可管理性等企业级特性。商用进度方面：AMD 的 MI400 系列将是首批原生支持 UALink 的 GPU，预计 2026 年下半年出货；原生 UALink 交换 ASIC 则要等到 2027 年左右面世。这意味着当前存在一个"协议先行、硬件跟进"的窗口期——早期系统可能通过博通 Tomahawk 等以太网交换芯片隧道承载 UALink 流量。
 
-AWS Trainium2芯片的互联方案。采用**NeuronLink-v3**，每芯片1,024 GB/s带宽，16芯片组成Trn2实例（4×4 2D Torus），4个实例组成Trn2 UltraServer（64芯片Ring拓扑）。Trainium3将升级至交换式拓扑结构。
+与 NVLink 5 的 1,800 GB/s 相比，UALink 1.0 的 800 GB/s 在单卡带宽上仍有差距，但其开放性和 1,024 卡的扩展上限构成了差异化竞争力。超大规模云厂商更看重的是"不被锁定"而非"绝对性能"。
+
+**3. Google ICI（Inter-Chip Interconnect）**
+
+Google 的 ICI 是本文所有方案中最"异类"的一个——它不属于任何开放标准，也不对标 NVLink 的设计范式，而是一套面向 TPU 脉动阵列架构**从零开始全栈自研**的芯片间互联体系。
+
+Google 开发 TPU 的初衷非常直接：搜索排序、广告推荐、Gemini 大模型等内部 AI 工作负载规模巨大，完全依赖外购 GPU 既不经济也无法针对自身业务做深度优化。ICI 作为 TPU 的专用互联协议，从第一代 TPU（2015 年）就开始内部部署，至今已经过七代演进。最新的 Ironwood（TPU v7）代表了当前 ICI 的工程极限：单个 Pod 可连接 **9,216 颗芯片**，最大通信跳数仅 7 跳。
+
+ICI 的设计与 NVLink 几乎走的是完全相反的路线。NVLink 依赖 NVSwitch 构建 all-to-all 全互联交换网络，而 ICI 采用 **4×4×4 三维环面拓扑（3D Torus）**——每颗 TPU 只与六个方向上的邻居直接相连，数据经过中间节点逐跳转发。这种规则的邻居结构表面上不如交换机灵活，但对于 Transformer 训练中高度规整的 AllReduce 和 AllGather 通信模式，Torus 网络反而能获得极高的带宽利用率，且链路数量不随规模增长。
+
+更关键的区别在物理层。TPU Pod 内部的基本构建块是 64 颗芯片组成的 4×4×4 立方体，立方体内部用铜缆互联。立方体之间则通过 **OCS（Optical Circuit Switch，光电路交换机）** 连接——这是一种基于 3D MEMS 反射镜阵列的纯光学交换设备，直接重定向光束而无需光电转换，可在约 10 秒内重新配置网络拓扑。这种铜光混合设计使 Google 能构建超大规模的单一逻辑计算域，而不会陷入 NVSwitch 那种全互联带来的平方级布线复杂度。
+
+ICI 完全专有、仅通过 Google Cloud 对外提供，不向第三方出售芯片或授权协议。因此在开放性和生态兼容性上，ICI 几乎为零。但从纯粹的技术角度看，它证明了一条独立于 NVLink 的架构路线是可行的。
+
+**4. AWS NeuronLink**
+
+AWS 对自研 AI 芯片的投入逻辑与 Google 相似，但动机更偏向成本优化——作为全球最大的云计算厂商，AWS 需要为内部 AI 工作负载和对外推理服务提供比采购 NVIDIA GPU 更经济的方案。NeuronLink 是 AWS 为 Trainium 和 Inferentia 系列自研芯片定制的卡间互联协议。
+
+Trainium2 搭载的 **NeuronLink-v3** 每芯片提供 **1,024 GB/s** 双向带宽，这一数字介于 NVLink 4（900 GB/s）和 NVLink 5（1,800 GB/s）之间。在拓扑上，16 颗 Trainium2 芯片通过 4×4 二维 Torus 组成一个 Trn2 计算实例；4 个 Trn2 实例再通过 NeuronLink 串联成 **Trn2 UltraServer**——一个包含 **64 颗芯片**的 Ring 拓扑计算集群。
+
+Trainium3 将进一步升级为交换式拓扑结构（不再依赖纯 Ring），带宽和规模预计有明显提升。更长远的路线图中，AWS 已加入 UALink 联盟，Trainium4 将转向 UALink 开放标准，不再使用自研 NeuronLink。目前 Trainium2 已大规模量产并对外提供服务，Trn2 实例成为 AWS 上 AI 训练的主力产品之一。
+
+**5. PCIe 6.0 与 CXL 4.0**
+
+PCIe 和 CXL 是两种基于通用标准的互联技术，虽然并非专为 AI 集群设计，但在某些中低端场景中仍被部分加速器用作卡间通信通道。
+
+PCIe 6.0 由 PCI-SIG 组织于 2022 年发布，采用 PAM4 信令和 FLIT 包格式，x16 双向带宽 **256 GB/s**。它的优势是完全开放的行业标准、生态极度成熟，但带宽远低于 NVLink，且不支持 GPU 间内存语义访问，更适合作为 CPU 到 GPU 的数据通道而非 GPU 间互联的主力。
+
+CXL（Compute Express Link）4.0 于 2025 年 11 月发布，基于 PCIe 6.0 物理层，速率 **128 GT/s**。CXL 的核心价值在于**跨机架内存池化与缓存一致性**——它允许多台服务器共享同一块 CXL 内存池，而非 GPU 间高速通信。在 AI 场景中，CXL 更多是 NVLink 的补充而非替代：NVLink 负责 GPU 间高带宽互联，CXL 负责 CPU 到 GPU 的数据通路和内存扩展。
 
 ### 2.2 国产GPU互联方案
 
