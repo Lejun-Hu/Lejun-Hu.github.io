@@ -140,15 +140,21 @@ NVLink 只能做点对点连接，而 NVSwitch 是交换芯片，将多颗 GPU �
 
 ## 二、替代互联协议全景：Scale-up 层
 
+上一节我们拆解了英伟达以 NVLink + NVSwitch 为核心的 scale-up 体系。但英伟达并非这一层的唯一玩家——随着大模型训练对 GPU 间带宽的需求持续攀升，越来越多的厂商开始推出自己的 scale-up 互联方案，试图在 GPU 直连这一核心环节打破 NVLink 的垄断。这些方案既有 AMD、Google、AWS 等国际巨头的自研协议，也有 UALink 这样的开放标准联盟，还有华为昇腾、寒武纪、壁仞等国产力量在紧追。
+
+下文将依次对各家方案进行简要分析和对比，重点关注每项技术的核心设计思路、关键带宽指标、扩展规模上限以及商用成熟度，帮助读者快速建立 scale-up 层的竞争全景。
+
 ### 2.1 国外厂商方案
+
+下表汇总了当前海外主要 scale-up 互联协议的关键参数。除了 NVLink 之外，各家的方案在开放程度和生态策略上差异明显——有的走专有封闭路线（Google ICI、AWS NeuronLink），有的试图建立开放标准联盟（UALink），还有的基于既有通用标准做延伸（PCIe 6.0、CXL 4.0）。
 
 | 互联协议 | 提出方 | 每GPU/芯片带宽 | 最大扩展规模 | 开放程度 | 商用状态 |
 |---|---|---|---|---|---|
 | **AMD Infinity Fabric** | AMD | ~1.075 TB/s (MI300X, 7链路) | 8 GPU (OAM Mesh) | AMD专有，软件开源(ROCm) | 已量产 (MI300X/MI355X) |
-| **UALink 1.0** | UALink联盟 (AMD/Intel/Google/Meta/MS等) | 800 GB/s (4通道) | 1,024加速器 | 开放标准 | 规范已发布(2025.4)，首批硬件预计2026-2027 |
-| **Google ICI** | Google | 数百GB/s (TPU v5p/v7) | 9,216芯片 (Ironwood) | Google专有，不对外 | 已量产多代，仅限GCP |
+| **UALink 1.0** | UALink联盟 (AMD/Intel/Google/Meta/Microsoft等) | 800 GB/s (4通道) | 1,024加速器 | 开放标准 | 规范已发布(2025.4)，首批硬件预计2026-2027 |
+| **Google ICI** | Google | 数百GB/s (TPU v5p/v7) | 9,216芯片 (Ironwood) | Google专有，不对外 | 已量产多代，仅限 Google Cloud |
 | **AWS NeuronLink** | Amazon (AWS) | 1,024 GB/s (Trainium2) | 64芯片 (UltraServer) | AWS专有，不对外 | 已量产 (Trainium2) |
-| **PCIe 6.0** | PCI-SIG | 256 GB/s (x16双向) | 点对点，需Switch扩展 | 完全开放标准 | 已商用 |
+| **PCIe 6.0** | PCI-SIG | 256 GB/s (x16双向) | 点对点，需 Switch 扩展 | 完全开放标准 | 已商用 |
 | **CXL 4.0** | CXL联盟 | 128 GT/s | 跨机架内存池化 | 开放标准 | 规范已发布(2025.11) |
 
 #### AMD Infinity Fabric (XGMI)
