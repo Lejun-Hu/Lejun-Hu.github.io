@@ -7,10 +7,12 @@ title: "Egan's Personal Page"
 
 # 副标题/一句话介绍
 description: |
-  Dedicated to learning and designing full-stack AI compute systems including :<br>
-  • Hardware drivers & low-level protocol interaction<br>
-  • Collective communication primitives<br>
-  • LLM training & inference optimization
+  Software Engineer with 1+ year of industry experience in collective communication libraries for custom AI accelerators. Currently expanding expertise across the full AI infra stack:<br>
+  • RDMA/verbs-level transport and low‑latency network programming — NCCL internals, IB/verbs integration, and in‑network compute (INC) enablement<br>
+  • GPU kernel development (CUDA) and performance profiling for compute‑intensive workloads, with working knowledge of accelerator architecture distinctions (GPU/TPU/LPU) in compute/memory hierarchy and software stack<br>
+  • LLM distributed inference/training optimization — from collective communication patterns and system‑level dataflow orchestration to inference engine internals (e.g., vLLM)<br>
+  <br>
+  Passionate about bridging hardware capabilities with production‑grade distributed AI performance.
 
 # 你的邮箱
 email: 443462147@qq.com

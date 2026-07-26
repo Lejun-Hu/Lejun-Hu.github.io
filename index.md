@@ -28,15 +28,7 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
 
       <div class="profile-summary">
         <p>
-          Software Engineer with 1+ year of industry experience in collective communication libraries for custom AI accelerators. Currently expanding expertise across the full AI infra stack:
-        </p>
-        <ul>
-          <li>RDMA/verbs-level transport and low‑latency network programming — NCCL internals, IB/verbs integration, and in‑network compute (INC) enablement</li>
-          <li>GPU kernel development (CUDA) and performance profiling for compute‑intensive workloads, with working knowledge of accelerator architecture distinctions (GPU/TPU/LPU) in compute/memory hierarchy and software stack</li>
-          <li>LLM distributed inference/training optimization — from collective communication patterns and system‑level dataflow orchestration to inference engine internals (e.g., vLLM)</li>
-        </ul>
-        <p>
-          Passionate about bridging hardware capabilities with production‑grade distributed AI performance.
+          通信工程->嵌入式工程->AI Infra ，目前主要是在学习和了解集合通信以及相关的AI芯片软件栈，这是一个记录和介绍我自己的非正式网页，希望能在这个空间展示分享自己的经历和思考的同时，找到潜在的合作伙伴。
         </p>
       </div>
 
