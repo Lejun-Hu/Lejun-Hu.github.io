@@ -371,32 +371,6 @@ OISA 2.0 规范定义的开放 scale-up 交换标准，配套交换芯片由盛�
 
 **5. 核心趋势：从一家独大到多维竞争。** 互联领域的竞争不再是英伟达一家独大，而是进入了一个多维度博弈的阶段：性能层面比拼带宽、延迟和规模上限；生态层面比拼开放程度和供应商多样性；成本层面比拼采购灵活性和供应链安全。对于从业者而言，理解这套多层互联体系的结构和各方力量的分野，比记住某个具体参数更重要。
 
-- [NVIDIA NVLink 和 NVLink 交换机 官方页面](https://www.nvidia.com/zh-cn/data-center/nvlink)
-- [NVLink与纵向扩展网络：当800G以太网不够用时 - Introl](https://introl.com/zh/blog/nvlink-scale-up-networking-gpu-interconnect-infrastructure-2025)
-- [NVIDIA GB200 NVL72官方技术博客](https://developer.nvidia.com/zh-cn/blog/nvidia-gb200-nvl72-delivers-trillion-parameter-llm-training-and-real-time-inference)
-- [PCIe、NVLink、CXL……谁才是芯片互联界的"真·海王"? - 与非网](https://m.eefocus.com/article/1992270.html)
-- [UALink与CXL 4.0：重塑GPU集群架构的开放标准 - Introl](https://introl.com/zh/blog/ualink-cxl-4-gpu-interconnect-memory-pooling-guide-2025)
-- [GPU Interconnects and Rack-Scale Topology: The Complete Guide - Prompt20](https://blog.prompt20.com/posts/nvlink-and-rack-scale-topology/)
-- [Confusion Grows With More Interconnect Options And Tradeoffs - SemiEngineering](https://semiengineering.com/confusion-grows-with-more-interconnect-options-and-tradeoffs/)
-- [GB200 Hardware Architecture - Component Supply Chain & BOM - SemiAnalysis](https://newsletter.semianalysis.com/p/gb200-hardware-architecture-and-component)
-- [TPUv7: Google Takes a Swing at the King - SemiAnalysis](https://newsletter.semianalysis.com/p/tpuv7-google-takes-a-swing-at-the)
-- [深度解析谷歌第八代TPU架构 - ICViews](https://www.icviews.cn/news/30613/7)
-- [UALink vs NVLink vs InfiniBand comparison - MassAPI Blog](https://blog.massapi.com/categories/interconnects/)
-- [UALink and the Battle for Rack-Scale GPU Interconnect - Bitsilica](https://bitsilica.com/ualink-and-the-battle-for-rack-scale-gpu-interconnect/)
-- [OISA全向智感互联 官方网站](https://www.oisa.org.cn/)
-- [Marvell Teralynx 数据中心交换机 官方页面](https://cn.marvell.com/products/data-center-switches.html)
-- [Broadcom Tomahawk 6 官方页面](https://www.broadcom.com/products/ethernet-connectivity/switching/strataxgs/bcm78910-series)
-- [盛科通信 官方网站](https://www.centec.com/)
-- [AWS Trainium2 Trn2 Architecture - AWS Neuron Docs](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.26.1/about-neuron/arch/neuron-hardware/trn2-arch.html)
-- [沐曦 MetaXLink 开发者文档](https://developer.metax-tech.com/doc/101)
-- [AI算力的隐形高速公路：PCIe芯片与互联技术全景解析 - 与非网](https://m.eefocus.com/article/2027960.html)
-- [国产交换芯片大盘点 - 与非网](https://m.eefocus.com/article/2024370.html)
-- [交换芯片：AI超节点驱动二次成长 - 华泰证券](https://finance.sina.com.cn/wm/2026-05-24/doc-inhyyaqq6875917.shtml)
-- [PCIe、NVLink、CXL互联技术对比 - EET-China](https://www.eet-china.com/mp/a488295.html)
-- [大模型基础设施工程04：互联与网络 - 掘金](https://juejin.cn/post/7632354324076757046)
-- [CUDA围墙之下，国产GPU软件栈的绝地反击 - CSDN](https://blog.csdn.net/qq_42255328/article/details/160241953)
-- [2025年全球以太网交换IC市场规模 - 格隆汇](https://m.gelonghui.com/p/3381807)
-
 ---
 
 *声明：本文基于公开资料整理，数据来源包括英伟达官网、SemiAnalysis、QYResearch、摩根士丹利研报、各公司官方文档及技术媒体分析。所有价格数据均为估算值。技术参数截至2026年7月。本文尚在编写中，内容将持续完善与修订。*
