@@ -6,11 +6,14 @@ jobs:
     start_date: 2025 Aug
     end_date: now
     current: true
-    description: 
-     • 从事公司自研硬件的集合通信库（类NCCL）的开发，包括在网计算INC和RDMA相关的功能接入 <br>
-     • 从事公司自研的交换芯片IP的verbs接口与GPU IP的功能联调以及性能评估和优化 <br>
-     • 从事公司自研硬件在集合通信级别的Palladium仿真环境下硬件性能测试的功能代码开发和性能测试评估，包括MLA和MLP等经典前向传播场景下的数据流和硬件资源的调度 <br>
-     • 深度参与P到A阶段芯片级集合通信资源调度方案设计，覆盖多级缓存复用策略与DMA数据流编排，输出硅后Device侧数据流与Buffer复用方案的工程代码
+    description: |
+      Software Engineer with 1+ year of industry experience in collective communication libraries for custom AI accelerators. Currently expanding expertise across the full AI infra stack:
+
+      • RDMA/verbs-level transport and low‑latency network programming — NCCL internals, IB/verbs integration, and in‑network compute (INC) enablement
+      • GPU kernel development (CUDA) and performance profiling for compute‑intensive workloads, with working knowledge of accelerator architecture distinctions (GPU/TPU/LPU) in compute/memory hierarchy and software stack
+      • LLM distributed inference/training optimization — from collective communication patterns and system‑level dataflow orchestration to inference engine internals (e.g., vLLM)
+
+      Passionate about bridging hardware capabilities with production‑grade distributed AI performance.
 #     highlights:
 #          - to be added
 
