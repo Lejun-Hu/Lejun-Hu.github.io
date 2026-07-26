@@ -2,7 +2,7 @@
 title: "【未完成】CUDA软件栈全路径拆解与国产AI芯片生态兼容深度分析"
 permalink: /notes/cuda-ecosystem-compatibility/
 date: 2026-08-15
-category: "AI 硬件"
+category: "AI芯片软件栈"
 tags: ["CUDA", "GPU软件栈", "PTX", "算子编译器", "DSA", "GPGPU", "华为CANN", "昇腾", "Google TPU", "摩尔线程MUSA", "国产AI芯片", "PyTorch", "cuBLAS", "NCCL", "Triton"]
 description: "从PyTorch框架调用到GPU硬件执行，逐层拆解CUDA软件栈的完整编译与执行链路；分析GPGPU与DSA两种架构路线在兼容CUDA生态时的工作量差异与技术权衡；以华为昇腾CANN（DSA）、Google TPU（DSA自主生态）和摩尔线程MUSA（GPGPU）为案例，详解各厂商的软件栈实现与开发者迁移路径。"
 published: true
