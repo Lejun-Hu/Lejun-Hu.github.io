@@ -372,10 +372,21 @@ a {
 }
 
 .profile-title {
-  font-size: 1.25rem;
+  font-size: 0.95rem;
   color: var(--color-primary);
-  font-weight: 500;
+  font-weight: 400;
+  line-height: 1.7;
   margin-bottom: var(--space-md);
+  opacity: 0.92;
+
+  br {
+    display: block;
+    content: "";
+    margin-top: 0.4em;
+  }
+
+  // 当内含 bullet 列表（以"•"开头）时，单独成段并稍微缩进
+  text-align: left;
 }
 
 .profile-summary {
