@@ -35,7 +35,17 @@ y = torch.randn(1024, 1024, device="cuda")
 z = torch.matmul(x, y)
 ```
 
-在这三行 Python 背后，PyTorch 内部发生了什么？首先，`torch.matmul` 并不是一个"普通的 Python 函数"——它是 PyTorch 的 ATen 张量运算库中上千个算子之一。当 Python 解释器执行到 `torch.matmul(x, y)` 时，PyTorch 的 dispatcher（调度器）会根据输入张量的设备类型（`device="cuda"`）和数据类型，动态路由到对应的后端实现。对于 CUDA 设备，这个调度会落到 **cuBLAS** 库的 `cublasGemmEx` 函数调用上。
+在这三行 Python 背后，PyTorch 内部发生了什么？首先，`torch.matmul` 并不是一个"普通的 Python 函数"——它是 PyTorch 的 ATen 张量运算库中上千个算子之一。当 Python 解释器执行到 `torch.matmul(x, y)` 时，PyTorch 的 dispatcher（调度器）会根据输入张量的设备类型（`device="cuda"`）和数据类型，动态路由到对应的后端实现。以默认 eager 模式下 CUDA 设备上的矩阵乘法为例，dispatcher 通常会命中 **cuBLAS** 库的 `cublasGemmEx` 函数；但在 `torch.compile` 图编译模式下，Inductor 后端可能改用 CUTLASS 或 Triton 生成的 kernel，不同的矩阵尺寸和精度组合也可能触发不同的底层实现路径。
+
+> **阅读提示**：上面这段出现了几个可能不太熟悉的名词——eager 模式、图编译、Inductor、CUTLASS、Triton。不用担心，本文后续章节会逐一深入介绍它们。这里先给一个速览表，方便你快速建立印象：
+>
+> | 名词 | 简要含义 | 本文详细位置 |
+> |------|---------|------------|
+> | **eager 模式** | PyTorch 的默认执行方式：每写一行 Python，框架就立即调用底层算子执行，不做全局优化。类似于"解释执行"。 | §1.1 本节 |
+> | **图编译模式** | 先将整个计算过程记录为一幅计算图，再对整图做优化（如算子融合），最后一次性生成并执行高效代码。 | §1.8 |
+> | **Inductor** | PyTorch 2.0 `torch.compile` 的默认后端编译器，负责将计算图转化为 Triton/C++ kernel。 | §1.8 |
+> | **CUTLASS** | NVIDIA 开源的 CUDA C++ 模板库，提供了高度可定制的 GEMM/Conv 等算子模板，适合作为自定义 kernel 的性能参照。 | §1.1 表格 |
+> | **Triton** | OpenAI 开源的 GPU kernel 编程语言与编译器，用 tile 级抽象替代 CUDA 的线程级编程，也是 Inductor 默认的 kernel 生成后端。 | §1.7, §3.2 |
 
 这里的第一个关键概念是 **算子（Operator）**。在深度学习框架中，"算子"指代对一个或多个张量执行的特定数学运算——矩阵乘法（matmul）、卷积（conv2d）、逐元素加法（add）、归一化（layernorm）等均属于算子。PyTorch 中有超过 2,000 个 ATen 算子，每个算子需要针对不同设备的多个后端（CPU / CUDA / MPS / XPU 等）提供独立的实现。对于 CUDA 后端，绝大多数算子的实现并不是手写的 CUDA C++ kernel——PyTorch 团队会优先调用 NVIDIA 提供的**闭源高性能算子库**，因为经过二十年代代优化的闭源库性能远超通用 kernel 实现。具体来说：
 
