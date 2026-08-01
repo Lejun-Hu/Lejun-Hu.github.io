@@ -48,7 +48,11 @@ z = torch.matmul(x, y)
 > | **CUTLASS** | NVIDIA 开源的 CUDA C++ 模板库，提供了高度可定制的 GEMM/Conv 等算子模板，适合作为自定义 kernel 的性能参照。 | §1.1 表格 |
 > | **Triton** | OpenAI 开源的 GPU kernel 编程语言与编译器，用 tile 级抽象替代 CUDA 的线程级编程，也是 Inductor 默认的 kernel 生成后端。（注：NVIDIA 另有一个同名产品 Triton Inference Server，是推理部署工具，与本文讨论的 Triton 语言/编译器无关。） | §1.7, §3.2 |
 
-这里的第一个关键概念是 **算子（Operator）**。在深度学习框架中，"算子"指代对一个或多个张量执行的特定数学运算——矩阵乘法（matmul）、卷积（conv2d）、逐元素加法（add）、归一化（layernorm）等均属于算子。PyTorch 中有超过 2,000 个 ATen 算子，每个算子需要针对不同设备的多个后端（CPU / CUDA / MPS / XPU 等）提供独立的实现。对于 CUDA 后端，绝大多数算子的实现并不是手写的 CUDA C++ kernel——PyTorch 团队会优先调用 NVIDIA 提供的**闭源高性能算子库**，因为经过二十年代代优化的闭源库性能远超通用 kernel 实现。具体来说：
+这里的第一个关键概念是 **算子（Operator）**。在深度学习框架中，"算子"指代对一个或多个张量执行的特定数学运算——矩阵乘法（matmul）、卷积（conv2d）、逐元素加法（add）、归一化（layernorm）等均属于算子。PyTorch 中有超过 2,000 个 ATen 算子，每个算子需要针对不同设备的多个后端（CPU / CUDA / MPS / XPU 等）提供独立的实现[^1]。对于 CUDA 后端，绝大多数算子的实现并不是手写的 CUDA C++ kernel——PyTorch 团队会优先调用 NVIDIA 提供的**闭源高性能算子库**，因为经过二十年代代优化的闭源库性能远超通用 kernel 实现。
+
+[^1]: **MPS**（Metal Performance Shaders）是 Apple 为 M 系列芯片提供的 GPU 加速后端，在 PyTorch 中通过 `device="mps"` 调用，使 Mac 也能进行 GPU 训练/推理。**XPU** 是 Intel GPU 的后端标识，通过 Intel Extension for PyTorch（IPEX）支持 Intel 数据中心 GPU 和集显。
+
+在继续介绍具体算子库之前，有必要先厘清"开源"与"闭源"这两个概念。在软件工程中，**开源**意味着源代码公开，任何人都可以阅读、修改和重新分发；**闭源**则只提供编译后的二进制文件（如 `.so` 动态库），源码不公开。闭源库之所以仍然能被 PyTorch 调用，是因为 NVIDIA 公开了这些库的**头文件**（`.h`）——头文件中声明了所有函数的名称、参数类型和返回值类型，PyTorch 在编译时只需 `#include` 这些头文件，链接时再连接到 NVIDIA 提供的闭源 `.so` 文件即可。打个比方：你知道一台自动售货机的按钮标签和投币口位置（头文件/API），也知道它能吐出什么饮料（函数签名），但你无法打开机器看到内部齿轮和电路是如何运作的（源码）。那么能否通过**反汇编**（将二进制机器码逆向为汇编代码）来窥探闭源库的内部实现呢？技术上可以——`cuBLAS`、`cuDNN` 的 `.so` 文件可以通过 `objdump`、`Ghidra` 等工具反汇编为 SASS 指令。但这样做的实际价值非常有限：一方面，cuBLAS 内部包含数千个针对不同矩阵尺寸和 GPU 架构高度手工调优的 kernel 变体，反汇编出的 SASS 代码量极其庞大且缺乏符号信息，几乎无法还原为可理解的算法逻辑；另一方面，即便还原了部分实现，这些代码也深度绑定了 NVIDIA GPU 的特定硬件特性（如 Tensor Core 的 wmma 指令编码、Shared Memory 的 bank 布局），无法直接移植到其他硬件上。因此，对于国产 AI 芯片厂商而言，"兼容 cuBLAS"的策略并不是去逆向工程它的内部实现，而是在 API 层做**干净室重实现**（clean-room reimplementation）——对照 NVIDIA 公开的头文件，用自研 kernel 实现完全相同的数学语义。这个概念在 §2.1 中会有更详细的讨论。具体来说：
 
 | 算子类型 | 调用的 NVIDIA 库 | 库是否开源 | 说明 |
 |---------|-----------------|-----------|------|
