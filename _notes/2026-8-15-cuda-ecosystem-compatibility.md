@@ -46,7 +46,7 @@ z = torch.matmul(x, y)
 > | **cuBLAS** | NVIDIA 提供的闭源 GPU 线性代数加速库，是 PyTorch 在 CUDA 设备上执行矩阵乘法的默认后端，内部包含针对不同 GPU 架构高度手工调优的 kernel。 | §1.1 本节 |
 > | **Inductor** | PyTorch 2.0 `torch.compile` 的默认后端编译器，负责将计算图转化为 Triton/C++ kernel。 | §1.8 |
 > | **CUTLASS** | NVIDIA 开源的 CUDA C++ 模板库，提供了高度可定制的 GEMM/Conv 等算子模板，适合作为自定义 kernel 的性能参照。 | §1.1 表格 |
-> | **Triton** | OpenAI 开源的 GPU kernel 编程语言与编译器，用 tile 级抽象替代 CUDA 的线程级编程，也是 Inductor 默认的 kernel 生成后端。 | §1.7, §3.2 |
+> | **Triton** | OpenAI 开源的 GPU kernel 编程语言与编译器，用 tile 级抽象替代 CUDA 的线程级编程，也是 Inductor 默认的 kernel 生成后端。（注：NVIDIA 另有一个同名产品 Triton Inference Server，是推理部署工具，与本文讨论的 Triton 语言/编译器无关。） | §1.7, §3.2 |
 
 这里的第一个关键概念是 **算子（Operator）**。在深度学习框架中，"算子"指代对一个或多个张量执行的特定数学运算——矩阵乘法（matmul）、卷积（conv2d）、逐元素加法（add）、归一化（layernorm）等均属于算子。PyTorch 中有超过 2,000 个 ATen 算子，每个算子需要针对不同设备的多个后端（CPU / CUDA / MPS / XPU 等）提供独立的实现。对于 CUDA 后端，绝大多数算子的实现并不是手写的 CUDA C++ kernel——PyTorch 团队会优先调用 NVIDIA 提供的**闭源高性能算子库**，因为经过二十年代代优化的闭源库性能远超通用 kernel 实现。具体来说：
 
