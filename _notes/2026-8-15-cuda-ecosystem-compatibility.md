@@ -43,6 +43,7 @@ z = torch.matmul(x, y)
 > |------|---------|------------|
 > | **eager 模式** | PyTorch 的默认执行方式：每写一行 Python，框架就立即调用底层算子执行，不做全局优化。类似于"解释执行"。 | §1.1 本节 |
 > | **图编译模式** | 先将整个计算过程记录为一幅计算图，再对整图做优化（如算子融合），最后一次性生成并执行高效代码。 | §1.8 |
+> | **cuBLAS** | NVIDIA 提供的闭源 GPU 线性代数加速库，是 PyTorch 在 CUDA 设备上执行矩阵乘法的默认后端，内部包含针对不同 GPU 架构高度手工调优的 kernel。 | §1.1 本节 |
 > | **Inductor** | PyTorch 2.0 `torch.compile` 的默认后端编译器，负责将计算图转化为 Triton/C++ kernel。 | §1.8 |
 > | **CUTLASS** | NVIDIA 开源的 CUDA C++ 模板库，提供了高度可定制的 GEMM/Conv 等算子模板，适合作为自定义 kernel 的性能参照。 | §1.1 表格 |
 > | **Triton** | OpenAI 开源的 GPU kernel 编程语言与编译器，用 tile 级抽象替代 CUDA 的线程级编程，也是 Inductor 默认的 kernel 生成后端。 | §1.7, §3.2 |
