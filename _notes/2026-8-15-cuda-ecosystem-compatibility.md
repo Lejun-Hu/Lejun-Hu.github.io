@@ -68,7 +68,7 @@ z = torch.matmul(x, y)
 
 cuDNN 的情况类似：它提供了 `cudnnConvolutionForward`、`cudnnBatchNormalizationForwardInference` 等深度神经网络原语，闭源且内部包含针对 Tensor Core 等硬件特性的精细优化。它通过内置的 heuristics 引擎在运行时根据输入尺寸、卷积核大小、可用显存等参数自动选择最优 kernel 实现——这种自动调优能力是 cuDNN 的核心壁垒之一，要在一个自有硬件上达到同样的自动调优覆盖率，工作量极其巨大。
 
-NCCL 则是唯一在此层面开源的关键库（BSD 许可）。它提供了 `ncclAllReduce`、`ncclBroadcast`、`ncclAllGather` 等集合通信原语，支持 ring、tree、collnet 等多种算法变体。虽然 NCCL 源码公开，但其传输层深度绑定了 NVLink（GPU 间直连协议）、NVSwitch（交换芯片，将多颗 GPU 编织成全互联域）和 InfiniBand（跨节点 RDMA 网络协议）等 NVIDIA 自有互联硬件，要在不同硬件上移植必须重写整个传输层。
+NCCL 和 CUTLASS 是上述表格中仅有的两个开源库。NCCL 采用 BSD 许可（Berkeley Software Distribution，一种非常宽松的开源协议，允许商用和闭源再发布，仅要求保留版权声明）。它提供了 `ncclAllReduce`、`ncclBroadcast`、`ncclAllGather` 等集合通信原语，支持 ring、tree、collnet 等多种算法变体。虽然 NCCL 源码公开，但其传输层深度绑定了 NVLink（GPU 间直连协议）、NVSwitch（交换芯片，将多颗 GPU 编织成全互联域）和 InfiniBand（跨节点 RDMA 网络协议）等 NVIDIA 自有互联硬件，要在不同硬件上移植必须重写整个传输层。
 
 ### 1.2 自定义 Kernel：当框架算子不够用时
 
