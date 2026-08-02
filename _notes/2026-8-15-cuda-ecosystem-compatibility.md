@@ -163,7 +163,7 @@ nvcc 的第一步是将 `.cu` 文件中的**设备代码**（`__global__`、`__d
 
     // 边界检查: if (index >= n) return
     ld.param.u32 %r5, [_Z9vectorAddPfS_S_i_param_3];  // 加载参数 n
-    setp.ge.s32  %p1, %r4, %r5;  // p1 = (r4 >= r5)，设置条件谓词
+    setp.ge.s32  %p1, %r4, %r5;  // p1 = (r4 >= r5)，设置条件谓词（谓词是一种布尔寄存器，只有"真/假"两个值，用来控制后续指令是否生效）
     @%p1 bra     L_END;           // 如果 p1 为真，跳转到 L_END
 
     // 加载 a[index] 和 b[index]
