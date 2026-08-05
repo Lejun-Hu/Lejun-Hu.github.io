@@ -296,7 +296,47 @@ FATBIN 在运行时的选择逻辑如下：如果存在与当前 GPU 架构**完
 
 所有离线编译的产物（FATBIN/CUBIN/PTX）最终需要在程序运行时被加载到 GPU 上执行。CUDA 提供两套 API 来完成这一过程，它们之间存在明确的分层关系。
 
-**CUDA Runtime API**（`libcudart.so`）是高层封装，提供了 `cudaMalloc`、`cudaMemcpy`、`cudaLaunchKernel` 等开发者最常用的接口。它自动管理 CUDA context（设备的"进程"抽象）和 module（设备的"动态库"抽象）的创建与加载，使 GPU 编程的代码量大幅减少。
+**CUDA Runtime API**（`libcudart.so`）是高层封装，提供了 `cudaMalloc`、`cudaMemcpy`、`cudaLaunchKernel` 等开发者最常用的接口。它自动管理 CUDA context（设备的"进程"抽象）和 module（设备的"动态库"抽象）的创建与加载，使 GPU 编程的代码量大幅减少。以下是用 Runtime API 完成同样任务的代码，与下方的 Driver API 版本对比可直观感受到封装层带来的简化：
+
+```cpp
+// 使用 CUDA Runtime API 加载和执行 kernel
+// 对比 Driver API 版本：无需手动管理 context、module、kernel 句柄
+#include <cuda_runtime.h>
+#include <cuda.h>
+
+int main() {
+    // Step 1: 加载模块——相比 Driver API，省去了 cuInit/cuCtxCreate
+    CUmodule module;
+    cuModuleLoad(&module, "vectorAdd.ptx");
+
+    // Step 2: 查找 kernel 函数
+    CUfunction kernel;
+    cuModuleGetFunction(&kernel, module, "vectorAdd");
+
+    // Step 3: 分配设备内存——Runtime API 更简洁
+    float *d_a, *d_b, *d_c;
+    size_t n = 1024;
+    cudaMalloc(&d_a, n * sizeof(float));  // vs Driver API: cuMemAlloc(&d_a, ...)
+    cudaMalloc(&d_b, n * sizeof(float));
+    cudaMalloc(&d_c, n * sizeof(float));
+
+    // ... 通过 cudaMemcpy 将初始化数据拷贝到设备 ...
+
+    // Step 4: 设置参数并启动 kernel
+    void* args[] = { &d_a, &d_b, &d_c, &n };
+    cuLaunchKernel(kernel,
+        (n+255)/256, 1, 1,
+        256, 1, 1,
+        0, NULL, args, NULL);
+
+    cudaDeviceSynchronize();  // vs Driver API: cuCtxSynchronize()
+
+    // Step 5: 清理——Runtime API 自动管理 context，无需手动销毁
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+    cuModuleUnload(module);
+    return 0;
+}
+```
 
 **CUDA Driver API**（`libcuda.so`）是底层接口，Runtime API 内部实际上就是通过调用 Driver API 来完成所有实际操作的。Driver API 暴露了 `cuInit`、`cuCtxCreate`、`cuModuleLoadData`、`cuLaunchKernel` 等更细粒度的控制接口，允许应用程序手动管理 context 和 module 的生命周期。以下代码展示了通过 Driver API 手动加载并执行一个 kernel 的完整流程：
 
