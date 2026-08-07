@@ -37,6 +37,8 @@ z = torch.matmul(x, y)
 
 在这三行 Python 背后，PyTorch 内部发生了什么？首先，`torch.matmul` 并不是一个"普通的 Python 函数"——它是 PyTorch 的 ATen 张量运算库中上千个算子之一。当 Python 解释器执行到 `torch.matmul(x, y)` 时，PyTorch 的 dispatcher（调度器）会根据输入张量的设备类型（`device="cuda"`）和数据类型，动态路由到对应的后端实现。以默认 eager 模式下 CUDA 设备上的矩阵乘法为例，dispatcher 通常会命中 **cuBLAS** 库的 `cublasGemmEx` 函数；但在 `torch.compile` 图编译模式下，Inductor 后端可能改用 CUTLASS 或 Triton 生成的 kernel，不同的矩阵尺寸和精度组合也可能触发不同的底层实现路径。
 
+再举一个更贴近日常训练的例子——开篇提到的 `loss.backward()` 中的"自动梯度同步"。当你在 PyTorch 中调用 `loss.backward()` 时，框架并非简单地"在 GPU 上把梯度算完就完了"。实际的执行序列是：PyTorch 的 autograd 引擎遍历计算图，为每个算子调用其反向传播 kernel——这些 kernel 在 GPU 上以**异步**方式提交到 CUDA stream 中执行。也就是说，`backward()` 返回时，GPU 可能还没算完任何梯度。真正保证"梯度已经就绪"的是 PyTorch 在读取梯度数据（如 `param.grad`）之前自动插入的隐式同步点——底层调用的是 `cudaDeviceSynchronize` 或 stream 级的同步 API。这个同步开销是 GPU 编程中常见的"隐形成本"之一，在后续 §1.6 和 §1.8 讨论异步执行与 CUDA Graphs 优化时还会再次涉及。
+
 > **阅读提示**：上面这段出现了几个可能不太熟悉的名词——eager 模式、图编译、Inductor、CUTLASS、Triton。不用担心，本文后续章节会逐一深入介绍它们。这里先给一个速览表，方便你快速建立印象：
 >
 > | 名词 | 简要含义 | 本文详细位置 |
@@ -116,9 +118,9 @@ int main() {
 
 - **`__global__` 函数**：声明在 GPU 设备端执行的函数，由 CPU 主机端通过 `<<< >>>` 语法调用。
 - **线程层次**：CUDA 使用 `threadIdx`（线程在 block 内的索引）、`blockIdx`（block 在 grid 中的索引）和 `blockDim`（每个 block 的线程数）来组织大规模并行计算。GPU 以 **warp（32 线程）** 为最小调度单位，同一 warp 内所有线程锁步执行相同指令。这是整个 CUDA 编程模型的基础，也是后续所有编译优化的起点——编译器需要知道哪些线程共享数据、哪些操作需要同步。
-- **`cudaMalloc` / `cudaMemcpy` / `cudaFree`**：CUDA Runtime API，管理 GPU 显存的分配、主机-设备数据传输和释放。这些是 `libcudart.so` 动态库提供的高层封装。
-- **`<<<grid, block>>>` 语法糖**：CUDA 特有的 kernel 启动语法，它会在编译时被 nvcc 展开为实际的 `cudaLaunchKernel` Runtime API 调用。
-- **`cudaDeviceSynchronize`**：阻塞主机端直到 GPU 所有已提交任务完成，是最基本的同步原语。
+- **`cudaMalloc` / `cudaMemcpy` / `cudaFree`**：CUDA Runtime API，管理 GPU 显存的分配、主机-设备数据传输和释放。这些是 `libcudart.so` 动态库提供的高层封装。回顾开篇的问题——`cudaMalloc` 并不是一个"魔法函数"，它内部实际上是通过 Driver API 的 `cuMemAlloc` 完成的，而 `cuMemAlloc` 再进一步通过内核驱动向 GPU 硬件请求显存地址空间。这一层层调用的详细路径将在 §1.6 中展开。
+- **`<<<grid, block>>>` 语法糖**：CUDA 特有的 kernel 启动语法，它会在编译时被 nvcc 展开为实际的 `cudaLaunchKernel` Runtime API 调用。具体展开过程是：nvcc 前端在解析 `.cu` 文件时，将 `kernel<<<grid, block>>>(args)` 替换为一系列设置 kernel 参数和 grid/block 维度的 Runtime API 调用，最终调用 `cudaLaunchKernel`。这个编译期替换过程将在 §1.3 的 nvcc 编译链路中详细展示。
+- **`cudaDeviceSynchronize`**：阻塞主机端直到 GPU 所有已提交任务完成，是最基本的同步原语。这也是开篇提到的"自动梯度同步"的底层依赖之一——`loss.backward()` 中的梯度计算在 GPU 上是异步的，PyTorch 会在读取梯度前自动插入同步点，确保 GPU 计算完成后再将梯度数据传回 CPU。
 
 ### 1.3 编译链路第一站：nvcc 前端 —— CUDA C++ → PTX（Parallel Thread Execution，并行线程执行）
 
@@ -135,7 +137,9 @@ nvcc -cubin vector_add.cu -arch=sm_80 -o vector_add.cubin
 nvcc vector_add.cu -o vector_add -arch=sm_80
 ```
 
-nvcc 的第一步是将 `.cu` 文件中的**设备代码**（`__global__`、`__device__` 标记的函数）与**主机代码**（普通的 `main()` 函数等）分离。设备代码被送往 GPU 编译器前端，经过词法分析、语法分析、语义分析和优化后，生成 **PTX（Parallel Thread Execution，并行线程执行）**——这是一种文本格式的虚拟 ISA（指令集架构）汇编代码。
+nvcc 的第一步是将 `.cu` 文件中的**设备代码**（`__global__`、`__device__` 标记的函数）与**主机代码**（普通的 `main()` 函数等）分离。在此过程中，nvcc 还会处理一个重要的语法糖展开——`<<<grid, block>>>`。回顾 §1.2 中提到的 `vectorAdd<<<(n+255)/256, 256>>>(d_a, d_b, d_c, n)`，nvcc 会将其转换为一系列 Driver API 调用：首先根据 `<<<>>>` 中的参数计算 grid 和 block 维度，然后调用 `cudaConfigureCall` 设置执行配置，最后将 `vectorAdd` 的实际参数（`d_a, d_b, d_c, n`）打包并通过 `cudaSetupArgument` 逐个压入参数栈，最终通过 `cudaLaunch` 触发 kernel 执行。这一整套展开逻辑对开发者完全透明——你写的是简洁的三个尖括号，编译后变成了一组复杂的 Runtime/Driver API 调用。这便是开篇所谓"语法糖"的实质：nvcc 在编译期将友好的语法形式机械地替换为底层 API 调用序列，开发者无需手动管理这些繁琐的步骤。
+
+分离后，设备代码被送往 GPU 编译器前端。这里需要说明：nvcc 的 GPU 前端是 NVIDIA 自研的闭源编译器前端，基于 EDG（Edison Design Group）C++ 前端引擎构建，并在此基础上扩展了对 CUDA C++ 特有语法（`__global__`、`__device__`、`<<<>>>` 等）的解析支持。值得注意的是，LLVM/Clang 也提供了另一条 CUDA 编译路径（`clang++ -x cuda`），能够直接将 CUDA 代码编译为 NVPTX（LLVM 后端的 PTX 目标），但本文以主流的 nvcc 路径为准。设备代码经过词法分析、语法分析、语义分析和优化后，生成 **PTX（Parallel Thread Execution，并行线程执行）**——这是一种文本格式的虚拟 ISA（指令集架构）汇编代码。
 
 以下是对应的 `vectorAdd` kernel 生成的 PTX 代码（已简化以便阅读）：
 
@@ -296,44 +300,42 @@ FATBIN 在运行时的选择逻辑如下：如果存在与当前 GPU 架构**完
 
 所有离线编译的产物（FATBIN/CUBIN/PTX）最终需要在程序运行时被加载到 GPU 上执行。CUDA 提供两套 API 来完成这一过程，它们之间存在明确的分层关系。
 
-**CUDA Runtime API**（`libcudart.so`）是高层封装，提供了 `cudaMalloc`、`cudaMemcpy`、`cudaLaunchKernel` 等开发者最常用的接口。它自动管理 CUDA context（设备的"进程"抽象）和 module（设备的"动态库"抽象）的创建与加载，使 GPU 编程的代码量大幅减少。以下是用 Runtime API 完成同样任务的代码，与下方的 Driver API 版本对比可直观感受到封装层带来的简化：
+**CUDA Runtime API**（`libcudart.so`）是高层封装，提供了 `cudaMalloc`、`cudaMemcpy`、`cudaLaunchKernel` 等开发者最常用的接口。它自动管理 CUDA context（设备的"进程"抽象）和 module（设备的"动态库"抽象）的创建与加载，使 GPU 编程的代码量大幅减少。以下是使用纯 Runtime API 完成向量加法的代码——注意这里不需要手动加载 PTX 文件，因为 kernel 在编译时就已经嵌入到了可执行文件中（FATBIN 机制），且 kernel 启动直接使用 `<<<>>>` 语法糖：
 
 ```cpp
-// 使用 CUDA Runtime API 加载和执行 kernel
-// 对比 Driver API 版本：无需手动管理 context、module、kernel 句柄
+// 使用 CUDA Runtime API —— 99% CUDA 开发者的日常写法
+// 对比 Driver API：无需 cuInit/cuCtxCreate/cuModuleLoad/cuLaunchKernel
 #include <cuda_runtime.h>
-#include <cuda.h>
+#include <stdio.h>
+
+__global__ void vectorAdd(float* a, float* b, float* c, int n) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i < n) c[i] = a[i] + b[i];
+}
 
 int main() {
-    // Step 1: 加载模块——相比 Driver API，省去了 cuInit/cuCtxCreate
-    CUmodule module;
-    cuModuleLoad(&module, "vectorAdd.ptx");
-
-    // Step 2: 查找 kernel 函数
-    CUfunction kernel;
-    cuModuleGetFunction(&kernel, module, "vectorAdd");
-
-    // Step 3: 分配设备内存——Runtime API 更简洁
+    int n = 1024;
     float *d_a, *d_b, *d_c;
-    size_t n = 1024;
-    cudaMalloc(&d_a, n * sizeof(float));  // vs Driver API: cuMemAlloc(&d_a, ...)
+    float *h_a, *h_b, *h_c;  // 主机端数组
+
+    // Step 1: 分配设备内存——简洁的函数名，无需 CUdeviceptr 类型
+    cudaMalloc(&d_a, n * sizeof(float));
     cudaMalloc(&d_b, n * sizeof(float));
     cudaMalloc(&d_c, n * sizeof(float));
 
-    // ... 通过 cudaMemcpy 将初始化数据拷贝到设备 ...
+    // Step 2: 将数据从主机拷贝到设备
+    cudaMemcpy(d_a, h_a, n * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_b, n * sizeof(float), cudaMemcpyHostToDevice);
 
-    // Step 4: 设置参数并启动 kernel
-    void* args[] = { &d_a, &d_b, &d_c, &n };
-    cuLaunchKernel(kernel,
-        (n+255)/256, 1, 1,
-        256, 1, 1,
-        0, NULL, args, NULL);
+    // Step 3: 启动 kernel——<<<>>> 语法糖，nvcc 自动展开为 cudaLaunchKernel
+    vectorAdd<<<(n+255)/256, 256>>>(d_a, d_b, d_c, n);
 
-    cudaDeviceSynchronize();  // vs Driver API: cuCtxSynchronize()
+    // Step 4: 同步并取回结果
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_c, d_c, n * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Step 5: 清理——Runtime API 自动管理 context，无需手动销毁
+    // Step 5: 清理——无需手动销毁 context
     cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
-    cuModuleUnload(module);
     return 0;
 }
 ```
