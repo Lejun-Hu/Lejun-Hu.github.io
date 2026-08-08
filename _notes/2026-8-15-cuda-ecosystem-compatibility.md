@@ -504,7 +504,9 @@ cudaGraphLaunch(instance, stream);
 
 #### 1.8.4 CUDA Graphs 在 DSA 与 GPGPU 上的差异
 
-CUDA Graphs 有一个反直觉的特征：在 DSA 架构中这一机制是天然契合的——DSA 编译器天生就是将整个计算图静态编译为执行计划，图捕获对其而言几乎不需要额外工作。而在 GPGPU 的动态 warp 调度模型下，图捕获反而需要额外的运行时机制来拦截和记录 kernel 提交、管理静态内存地址的复用。
+CUDA Graphs 有一个反直觉的特征：在 **DSA（Domain-Specific Architecture，领域专用架构）** 中这一机制是天然契合的——DSA 编译器天生就是将整个计算图静态编译为执行计划，图捕获对其而言几乎不需要额外工作。而在 **GPGPU（General-Purpose GPU，通用 GPU）** 的动态 warp 调度模型下，图捕获反而需要额外的运行时机制来拦截和记录 kernel 提交、管理静态内存地址的复用。
+
+> 如果你对 DSA 和 GPGPU 这两个概念还不熟悉，没关系，请接着往下看——本文第二章会专门从兼容 CUDA 生态的角度，详细对比这两种架构路线的本质差异。
 
 ### 1.9 全链路总览
 
