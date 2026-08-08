@@ -532,12 +532,12 @@ CUDA Graphs 有一个反直觉的特征：在 **DSA（Domain-Specific Architectu
 
 #### 1.10.1 NCCL 是如何编译的？和 nvcc 是什么关系？
 
-NCCL 本身是用 C/C++ 编写的，使用标准的 **GCC/Clang**（而非 nvcc）编译为 `libnccl.so` 动态库。这与 cuBLAS/cuDNN 的编译方式是一致的——它们都是 CPU 端的宿主代码 + 内嵌的 GPU kernel 代码的组合体。具体来说：
+NCCL 的编译同时使用了两种编译器，最终产物是单一的 `libnccl.so` 动态库：
 
-- **CPU 端代码**（如 NCCL 的拓扑探测、通信算法选择、channel 管理）：用标准 C/C++ 编写，由 GCC/Clang 编译为 x86-64 机器码。
-- **GPU 端 kernel 代码**（如 NCCL 的 Reduce、Copy、AllReduce 等 GPU kernel）：用 CUDA C++ 编写，由 **nvcc** 编译为 CUBIN/PTX，然后嵌入到 `libnccl.so` 中（类似于 FATBIN 嵌入宿主可执行文件的机制）。
+- **CPU 端代码**（如 NCCL 的拓扑探测、通信算法选择、channel 管理）：用标准 C/C++ 编写，由 **GCC/Clang** 编译为 x86-64 机器码（`.o` 文件）。
+- **GPU 端 kernel 代码**（如 NCCL 的 Reduce、Copy、AllReduce 等 GPU kernel）：用 CUDA C++ 编写，由 **nvcc** 编译为 CUBIN/PTX，以 FATBIN 格式嵌入。
 
-因此，NCCL 并不需要特殊的编译工具——它同时依赖 GCC/Clang（编译 CPU 端）和 nvcc（编译 GPU kernel）。最终产物是一个 `.so` 文件，PyTorch 在运行时通过动态链接加载它。
+两者通过链接器（ld）合并为一个 `libnccl.so` 文件，PyTorch 在运行时通过动态链接加载。加载后，CPU 端代码直接在 Host 上执行，GPU 端 kernel 则由 CUDA 驱动从 `.so` 中提取 CUBIN/PTX 并加载到 GPU 上执行——与 §1.5-1.6 描述的 FATBIN 加载机制完全一致。cuBLAS 和 cuDNN 的编译方式与此相同，区别仅在于它们是闭源的，用户看不到源码和编译过程。
 
 #### 1.10.2 NCCL 与计算算子库（cuBLAS/cuDNN）是如何协作的？
 
