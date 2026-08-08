@@ -450,8 +450,6 @@ NVRTC 以库的形式（`libnvrtc.so`）工作，不需要启动外部 `nvcc` �
 
 算子融合由框架编译器在离线或 JIT 阶段完成。以 `Conv2d → BatchNorm → ReLU` 这一常见组合为例，在 eager 模式下，这三个操作会产生三次 HBM 读写（每个操作的结果都要写回 HBM 再由下一个操作读取）。而融合后，编译器将其合并为一个 kernel——输入数据从 HBM 读取一次，在片上完成卷积、归一化和激活函数的全部计算，最终结果写回一次。在现代 GPU 上，HBM 带宽是主要瓶颈（H100 为 3.35 TB/s），而非计算吞吐（H100 的 BF16 算力达 1,979 TFLOPS），这种融合能带来数倍的性能提升。
 
-打个比方：算子融合相当于把三个包裹打包成一个箱子——省了两次运费（HBM 读写）。但箱子里的东西（kernel 逻辑）本身没变，只是合并了。
-
 #### 1.8.2 CUDA Graphs —— 消除 CPU-GPU 交互延迟
 
 CUDA Graphs 解决的是完全不同的开销：kernel 提交延迟（launch overhead）。在 eager 模式下，每启动一个 kernel，都需要 CPU 准备参数、通过 Runtime/Driver API 提交给 GPU、GPU 调度器接受并排队。对于一个包含数百个小 kernel 的模型，每个 kernel 可能只跑几微秒，但提交开销就要 5-10 微秒——**提交开销比计算本身还大**。
