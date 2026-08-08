@@ -72,6 +72,8 @@ cuDNN 的情况类似：它提供了 `cudnnConvolutionForward`、`cudnnBatchNorm
 
 NCCL 和 CUTLASS 是上述表格中仅有的两个开源库。NCCL 采用 BSD 许可（Berkeley Software Distribution，一种非常宽松的开源协议，允许商用和闭源再发布，仅要求保留版权声明）。它提供了 `ncclAllReduce`、`ncclBroadcast`、`ncclAllGather` 等集合通信原语，支持 ring、tree、collnet 等多种算法变体。虽然 NCCL 源码公开，但其传输层深度绑定了 NVLink（GPU 间直连协议）、NVSwitch（交换芯片，将多颗 GPU 编织成全互联域）和 InfiniBand（跨节点 RDMA 网络协议）等 NVIDIA 自有互联硬件，要在不同硬件上移植必须重写整个传输层。
 
+与 cuBLAS/cuDNN 这类"单卡计算库"不同，NCCL 是**跨卡通信库**——它解决的是多 GPU 之间如何高效交换数据的问题。在一个典型的分布式训练步骤中，计算库和通信库是协作关系：cuBLAS 负责在前向/反向传播中完成每张卡上的矩阵乘法（计算），NCCL 负责在反向传播后将各卡的梯度做 AllReduce 求和（通信），使得每张卡都拿到全局平均梯度。两者的交互发生在 PyTorch 的分布式框架层——`torch.distributed` 会在反向传播完成后自动触发 AllReduce，而 `torch.distributed` 内部正是通过 NCCL 的 API 来完成数据传输的。关于 NCCL 的编译方式以及在 CUDA 编译链路中的位置，将在 §1.9 全链路总览之后专门讨论。
+
 ### 1.2 自定义 Kernel：当框架算子不够用时
 
 以上是 PyTorch 框架自动调用的标准算子路径。但在实际工程中，内置算子并不能覆盖所有需求——新的激活函数（如 SwiGLU）、融合算子（将 Scale + Add + Activation 合并为一个 kernel）、自定义量化方案等场景需要开发者手写 kernel。在 CUDA 生态中，这通过 CUDA C++ 实现：
@@ -523,6 +525,40 @@ CUDA Graphs 有一个反直觉的特征：在 **DSA（Domain-Specific Architectu
 | ⑦ Runtime 加载 | FATBIN / CUBIN / PTX | 已加载到 GPU 上下文的 CUmodule | libcudart, libcuda (+ Dark API) | 闭源 |
 | ⑧ 图优化/算子融合 | 计算图 (FX/HLO) | 融合后的图 + 优化 kernel | torch.compile, TensorRT, CUDA Graphs | 部分闭源 |
 | ⑨ GPU 硬件执行 | SASS 指令流 | 计算结果 | SM, Tensor Core, HBM, NVLink | 硬件 |
+
+### 1.10 补充：NCCL 在编译链路中的位置与通算融合
+
+前面的讨论主要聚焦于"单卡计算"的编译链路，但实际的大模型训练/推理场景中，多卡通信同样占据关键地位。这里对 NCCL 相关的三个问题进行集中说明。
+
+#### 1.10.1 NCCL 是如何编译的？和 nvcc 是什么关系？
+
+NCCL 本身是用 C/C++ 编写的，使用标准的 **GCC/Clang**（而非 nvcc）编译为 `libnccl.so` 动态库。这与 cuBLAS/cuDNN 的编译方式是一致的——它们都是 CPU 端的宿主代码 + 内嵌的 GPU kernel 代码的组合体。具体来说：
+
+- **CPU 端代码**（如 NCCL 的拓扑探测、通信算法选择、channel 管理）：用标准 C/C++ 编写，由 GCC/Clang 编译为 x86-64 机器码。
+- **GPU 端 kernel 代码**（如 NCCL 的 Reduce、Copy、AllReduce 等 GPU kernel）：用 CUDA C++ 编写，由 **nvcc** 编译为 CUBIN/PTX，然后嵌入到 `libnccl.so` 中（类似于 FATBIN 嵌入宿主可执行文件的机制）。
+
+因此，NCCL 并不需要特殊的编译工具——它同时依赖 GCC/Clang（编译 CPU 端）和 nvcc（编译 GPU kernel）。最终产物是一个 `.so` 文件，PyTorch 在运行时通过动态链接加载它。
+
+#### 1.10.2 NCCL 与计算算子库（cuBLAS/cuDNN）是如何协作的？
+
+两者的关系是"独立运作、框架协调"。在一个典型的分布式训练步骤中：
+
+1. **前向传播**：PyTorch 调用 cuBLAS/cuDNN 在每张 GPU 上独立完成矩阵乘法、卷积等计算。此时 NCCL 不参与。
+2. **反向传播**：同上，每张 GPU 独立计算局部梯度。
+3. **梯度同步**：`loss.backward()` 完成后，PyTorch 的 autograd 引擎触发 `torch.distributed.all_reduce`，此时 NCCL 接管——它通过 NVLink/InfiniBand 等互联硬件，在所有 GPU 之间高效完成梯度的求和与广播。这个过程涉及 GPU kernel（NCCL 的 Reduce kernel 在每张卡上做局部规约）和网络传输（通过 RDMA 在节点间搬运数据）。
+4. **优化器更新**：每张 GPU 拿到全局平均梯度后，PyTorch 再次调用计算库执行优化器步骤（如 Adam 的动量更新）。
+
+NCCL 和 cuBLAS 之间没有直接的 API 调用关系——它们都是被 PyTorch 的分布式框架层按顺序调度的独立组件。类比来说，cuBLAS 是"车间里的机床"，NCCL 是"车间之间的传送带"，两者各司其职，由工厂调度系统（PyTorch）统一编排。
+
+#### 1.10.3 什么是通算融合？通信算子又是什么？
+
+**通信算子**是指将集合通信操作（如 AllReduce、AllGather）本身抽象为一个"算子"，与计算算子（如 matmul、conv2d）在同一个计算图中统一表示和调度。例如，在 PyTorch 的计算图中，`all_reduce` 和 `matmul` 都是图中的节点，编译器可以对它们一视同仁地做优化。
+
+**通算融合（Communication-Computation Overlap / Fusion）** 则是在此基础上的进一步优化，主要有两种形式：
+
+- **通信与计算重叠（Overlap）**：将通信和计算放入不同的 CUDA stream，使它们在 GPU 上并行执行。例如，在反向传播中，当第 N 层的梯度还在做 AllReduce 通信时，第 N-1 层的反向计算可以同时进行。这种重叠能将通信延迟"隐藏"在计算时间之下，是分布式训练中最重要的性能优化手段之一。
+
+- **通信与计算融合（Fusion）**：将通信操作和计算操作合并为一个 kernel。例如，NCCL 的 AllReduce 可以分解为 ReduceScatter + AllGather 两个阶段。如果在 ReduceScatter 阶段就将规约结果直接送入下一个计算 kernel（而不是先写回 HBM），就可以省去一次显存读写。这种深度融合需要 NCCL 与框架编译器（如 `torch.compile` 的 Inductor 后端）紧密配合——编译器需要理解通信算子的数据依赖关系，才能安全地将计算 kernel 与通信 kernel 融合。目前这一领域仍处于活跃研究阶段，是 AI 系统性能优化的前沿方向。
 
 ---
 
