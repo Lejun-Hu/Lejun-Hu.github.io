@@ -444,29 +444,71 @@ NVRTC 以库的形式（`libnvrtc.so`）工作，不需要启动外部 `nvcc` �
 
 ### 1.8 CUDA Graph 与算子融合：超越逐 Kernel 执行的优化
 
-前面的讨论都建立在"逐 kernel 启动执行"的 eager 模式之上。但在现代 GPU 计算中，逐个 kernel 启动的开销常常超过实际计算本身——尤其是对于大量小规模 kernel 组成的模型（例如含有大量逐元素操作的 Transformer），CPU 端每次 kernel launch 的提交延迟、GPU 侧的线程块调度开销和中间张量的 HBM 读写构成了巨大的隐性浪费。这一矛盾催生了两个层面的优化技术：**算子融合** 和 **CUDA Graphs**。
+前面的讨论都建立在"逐 kernel 启动执行"的 eager 模式之上。但在现代 GPU 计算中，逐个 kernel 启动的开销常常超过实际计算本身——尤其是对于大量小规模 kernel 组成的模型（例如含有大量逐元素操作的 Transformer），CPU 端每次 kernel launch 的提交延迟、GPU 侧的线程块调度开销和中间张量的 HBM 读写构成了巨大的隐性浪费。这一矛盾催生了两个层面的优化技术：**算子融合** 和 **CUDA Graphs**。两者解决的是不同层面的问题，可以叠加使用。
 
-**算子融合（Operator Fusion）** 由框架编译器在离线或 JIT 阶段完成。以 `Conv2d → BatchNorm → ReLU` 这一常见组合为例，在 eager 模式下，这三个操作会产生三次 HBM 读写（每个操作的结果都要写回 HBM 再由下一个操作读取）。而融合后，编译器将其合并为一个 kernel——输入数据从 HBM 读取一次，在片上完成卷积、归一化和激活函数的全部计算，最终结果写回一次。在现代 GPU 上，HBM 带宽是主要瓶颈（H100 为 3.35 TB/s），而非计算吞吐（H100 的 BF16 算力达 1,979 TFLOPS），这种融合能带来数倍的性能提升。
+#### 1.8.1 算子融合（Operator Fusion）—— 减少 HBM 读写
 
-**CUDA Graphs** 则从另一个角度解决开销问题：它将一系列 CUDA 操作（kernel 启动、memcpy、event 等）捕获为一个有向无环图，之后通过一次 API 调用重放整个图。这消除了逐 kernel 启动的 CPU 端提交延迟，且允许 GPU 驱动提前规划整个执行序列的资源分配。
+算子融合由框架编译器在离线或 JIT 阶段完成。以 `Conv2d → BatchNorm → ReLU` 这一常见组合为例，在 eager 模式下，这三个操作会产生三次 HBM 读写（每个操作的结果都要写回 HBM 再由下一个操作读取）。而融合后，编译器将其合并为一个 kernel——输入数据从 HBM 读取一次，在片上完成卷积、归一化和激活函数的全部计算，最终结果写回一次。在现代 GPU 上，HBM 带宽是主要瓶颈（H100 为 3.35 TB/s），而非计算吞吐（H100 的 BF16 算力达 1,979 TFLOPS），这种融合能带来数倍的性能提升。
+
+打个比方：算子融合相当于把三个包裹打包成一个箱子——省了两次运费（HBM 读写）。但箱子里的东西（kernel 逻辑）本身没变，只是合并了。
+
+#### 1.8.2 CUDA Graphs —— 消除 CPU-GPU 交互延迟
+
+CUDA Graphs 解决的是完全不同的开销：kernel 提交延迟（launch overhead）。在 eager 模式下，每启动一个 kernel，都需要 CPU 准备参数、通过 Runtime/Driver API 提交给 GPU、GPU 调度器接受并排队。对于一个包含数百个小 kernel 的模型，每个 kernel 可能只跑几微秒，但提交开销就要 5-10 微秒——**提交开销比计算本身还大**。
+
+CUDA Graphs 的思路是：把这些 kernel 之间的"CPU→GPU 提交往返"全部砍掉。它的使用分为三个步骤——**捕获、实例化、重放**：
 
 ```cpp
 // CUDA Graph 的基本用法：捕获 → 实例化 → 重放
+
+// Step 1: 开始捕获。stream 是 CUDA 的命令队列，所有提交到这个 stream 的操作
+//         都会被"录下来"而非立即执行。（之前的示例中 <<<>>> 未指定 stream，
+//         使用的是默认流 stream 0，这里为了图捕获需要显式传入 stream 参数）
 cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
 
-// 在此之间提交的所有 CUDA 操作都会被记录到图中
+// Step 2: 提交操作——这些操作不会被立即执行，而是记录到图结构中
 kernel_A<<<grid, block, 0, stream>>>(...);
 cudaMemcpyAsync(..., stream);
 kernel_B<<<grid, block, 0, stream>>>(...);
 
 cudaStreamEndCapture(stream, &graph);          // 结束捕获，获得图句柄
-cudaGraphInstantiate(&instance, graph, 0);     // 实例化（编译优化图结构）
-cudaGraphLaunch(instance, stream);             // 一次调用重放全部操作
+
+// Step 3: 实例化——对图做预分析：提前分配临时内存、消除冗余同步点、
+//         确定最优执行顺序。这个步骤只做一次，结果可以重复使用。
+cudaGraphInstantiate(&instance, graph, 0);
+
+// Step 4: 重放——之后每次调用，GPU 自己按图一口气跑完所有 kernel，
+//         CPU 不需要逐个启动，只需要在最后等结果。
+cudaGraphLaunch(instance, stream);
 ```
 
-CUDA Graphs 的反直觉之处在于，在 DSA 架构中这一机制是天然契合的——DSA 编译器天生就是将整个计算图静态编译为执行计划，图捕获对其而言几乎不需要额外工作。而在 GPGPU 的动态 warp 调度模型下，图捕获反而需要额外的运行时机制来拦截和记录 kernel 提交、管理静态内存地址的复用。
+这里需要解释几个关键概念：
 
-从 PyTorch 2.0 开始，`torch.compile` 默认启用图模式编译，Inductor 后端结合 Triton 做 kernel 生成和 CUDA Graph 做图重放，将上述两个优化统一到一个编译流水线中。对于国产芯片的兼容方案而言，最关键的战场因此不在于逐 kernel 的 API 映射，而在能否在 Inductor 后端上提供自有硬件的代码生成能力。
+- **Stream（流）**：CUDA 中的命令队列。同一个 stream 里的操作严格按顺序执行，不同 stream 之间的操作可以并行。之前的示例代码中 `<<<>>>` 没有指定 stream 参数，实际走的是默认流（stream 0）。CUDA Graphs 依赖 stream 来"监听"你提交了哪些操作，所以这里必须显式传入。
+
+- **实例化（Instantiate）**：把捕获到的图做一次预分析和优化——类似于编译器对代码做优化 pass。具体包括：提前分配好所有临时内存、确定 kernel 的执行顺序、消除不必要的同步点。实例化只需做一次，结果可以被反复重放。
+
+- **重放（Replay / Launch）**：之后每次调用 `cudaGraphLaunch`，GPU 直接按优化好的计划一口气执行整张图。kernel A 算完自动触发 kernel B，不需要 CPU 介入说"该启动 B 了"。
+
+打个比方：捕获 = 用摄像机录一遍你的烹饪步骤；实例化 = 分析录像，提前把调料瓶摆到最顺手的位置、合并重复步骤；重放 = 以后每次做这道菜直接按优化后的流程走，不用再停下来想"下一步该干什么"。
+
+#### 1.8.3 算子融合 vs CUDA Graphs：一张表说清区别
+
+两者解决的是不同层面的瓶颈，可以叠加使用：
+
+| | 算子融合 | CUDA Graphs |
+|---|---|---|
+| **优化目标** | 减少 HBM 读写次数 | 减少 CPU-GPU 交互延迟 |
+| **怎么做** | 多个算子合并成一个 kernel | 多个 kernel 串成一张图，GPU 自主驱动 |
+| **kernel 数量** | 减少（N→1） | 不变（N 个还是 N 个） |
+| **CPU 参与** | 不变（每次仍需 CPU 启动） | 大幅减少（CPU 只启动一次图） |
+| **类比** | 三个包裹打包成一个箱子 | 一次性把所有包裹放到快递柜，快递员自己按顺序取 |
+
+两者叠加的典型场景是 PyTorch 2.0 的 `torch.compile`：Inductor 后端先用算子融合把可以合并的操作合成大 kernel，再把剩余无法融合的操作通过 CUDA Graphs 串起来一键重放。对于国产芯片的兼容方案而言，最关键的战场因此不在于逐 kernel 的 API 映射，而在于能否在 Inductor 后端上提供自有硬件的代码生成能力。
+
+#### 1.8.4 CUDA Graphs 在 DSA 与 GPGPU 上的差异
+
+CUDA Graphs 有一个反直觉的特征：在 DSA 架构中这一机制是天然契合的——DSA 编译器天生就是将整个计算图静态编译为执行计划，图捕获对其而言几乎不需要额外工作。而在 GPGPU 的动态 warp 调度模型下，图捕获反而需要额外的运行时机制来拦截和记录 kernel 提交、管理静态内存地址的复用。
 
 ### 1.9 全链路总览
 
