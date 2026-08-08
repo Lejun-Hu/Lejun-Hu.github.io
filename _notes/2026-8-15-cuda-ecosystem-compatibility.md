@@ -539,9 +539,7 @@ NCCL 的编译同时使用了两种编译器，最终产物是单一的 `libnccl
 
 两者通过链接器（ld）合并为一个 `libnccl.so` 文件。这里需要澄清一个技术细节：一个 `.so` 文件完全可以同时包含 CPU 机器码和 GPU 代码（CUBIN/PTX）。具体做法是将 CUBIN/PTX 以二进制数据的形式嵌入 `.so` 的数据段（`.rodata` 段），运行时 CUDA 驱动通过 `cuModuleLoadData` 从内存中的二进制数据直接加载，无需从磁盘读取单独的 `.cubin` 文件。这并非特殊机制——任何二进制数据都可以通过 `objcopy` 或链接器脚本嵌入 `.so`，关键只是加载方要知道如何解析嵌入的数据。
 
-PyTorch 在运行时通过动态链接加载 `libnccl.so`。加载后，CPU 端代码直接在 Host 上执行，GPU 端 kernel 则由 CUDA 驱动从 `.so` 中提取 CUBIN/PTX 并加载到 GPU 上执行——与 §1.5-1.6 描述的 FATBIN 加载机制完全一致。cuBLAS 和 cuDNN 的编译方式与此相同，区别仅在于它们是闭源的，用户看不到源码和编译过程。
-
-对于闭源库（cuBLAS、cuDNN 等），还存在一个额外的依赖链路：以 cuBLAS 为例，PyTorch 调用 `cublasGemmEx` → `libcublas.so` 内部会调用 `libcudart.so`（Runtime API）来加载其嵌入的 GPU kernel、创建内部 CUDA stream 和 event → Runtime API 再调用 `libcuda.so`（Driver API）→ 最终进入 GPU 内核驱动。这意味着如果你要替换 cuBLAS（例如做 §2.1 提到的干净室重实现），不仅要复刻 API 签名，还需要正确实现它内部的 context 管理、stream 同步和内存分配行为——这些内部行为没有公开文档，只能通过观察外部效果和逆向工程来推断。这也是为什么 GPU 闭源算子库构成了 CUDA 生态中最难逾越的技术壁垒之一。
+PyTorch 在运行时通过动态链接加载 `libnccl.so`。加载后，CPU 端代码直接在 Host 上执行，GPU 端 kernel 则由 CUDA 驱动从 `.so` 中提取 CUBIN/PTX 并加载到 GPU 上执行——与 §1.5-1.6 描述的 FATBIN 加载机制完全一致。cuBLAS 和 cuDNN 的编译方式与此相同，区别仅在于它们是闭源的，用户看不到源码和编译过程。以 cuBLAS 为例，PyTorch 调用 `cublasGemmEx` → `libcublas.so` 内部会调用 `libcudart.so`（Runtime API）来加载其嵌入的 GPU kernel、创建内部 CUDA stream 和 event → Runtime API 再调用 `libcuda.so`（Driver API）→ 最终进入 GPU 内核驱动。
 
 #### 1.10.2 NCCL 与计算算子库（cuBLAS/cuDNN）是如何协作的？
 
