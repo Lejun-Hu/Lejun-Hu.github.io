@@ -526,9 +526,9 @@ CUDA Graphs 有一个反直觉的特征：在 **DSA（Domain-Specific Architectu
 | ⑧ 图优化/算子融合 | 计算图 (FX/HLO) | 融合后的图 + 优化 kernel | torch.compile, TensorRT, CUDA Graphs | 部分闭源 |
 | ⑨ GPU 硬件执行 | SASS 指令流 | 计算结果 | SM, Tensor Core, HBM, NVLink | 硬件 |
 
-### 1.10 补充：NCCL 在编译链路中的位置与通算融合
+### 1.10 NCCL 在编译链路中的位置
 
-前面的讨论主要聚焦于"单卡计算"的编译链路，但实际的大模型训练/推理场景中，多卡通信同样占据关键地位。这里对 NCCL 相关的三个问题进行集中说明。
+前面的讨论主要聚焦于"单卡计算"的编译链路，但实际的大模型训练/推理场景中，多卡通信同样占据关键地位。这里集中说明 NCCL 的编译方式以及它与计算算子库的协作关系。关于通算融合的讨论将在 §1.11 中展开。
 
 #### 1.10.1 NCCL 是如何编译的？和 nvcc 是什么关系？
 
@@ -547,13 +547,15 @@ PyTorch 在运行时通过动态链接加载 `libnccl.so`。加载后，CPU 端�
 
 PyTorch 框架对两者的调用可以分为两类场景：
 
-**场景一：框架自动触发的通信。** 最常见的是数据并行（DDP, Distributed Data Parallel）中的梯度同步。AllReduce 是反向传播的必要步骤——每张卡必须拿到所有卡的梯度平均值，优化器才能正确更新参数。关键优化在于**执行时序**：PyTorch 在构建 DDP 模型时，会在计算图中为每个参数注册一个 hook——当某个参数的局部梯度计算完成时，框架立即对该参数的梯度启动 NCCL AllReduce，而不等待所有层的梯度都算完。这意味着：当参数 N 的梯度正在网络上做 AllReduce 通信时，参数 N-1 的反向计算可以同时在 GPU 上执行。两者在不同的 CUDA stream 上运行，互不阻塞，从而将通信延迟"隐藏"在计算时间之下（§1.10.3 会详细讨论这种重叠机制）。AllReduce 本身仍然是必须完成的——它只是被提前启动、与后续计算并行执行，以减少整体训练时间。这种自动插入对用户透明——你只需写标准的训练循环，PyTorch 在背后完成了所有 NCCL 调用。
+**场景一：框架自动触发的通信。** 最常见的是数据并行（DDP, Distributed Data Parallel）中的梯度同步。AllReduce 是反向传播的必要步骤——每张卡必须拿到所有卡的梯度平均值，优化器才能正确更新参数。关键优化在于**执行时序**：PyTorch 在构建 DDP 模型时，会在计算图中为每个参数注册一个 hook——当某个参数的局部梯度计算完成时，框架立即对该参数的梯度启动 NCCL AllReduce，而不等待所有层的梯度都算完。这意味着：当参数 N 的梯度正在网络上做 AllReduce 通信时，参数 N-1 的反向计算可以同时在 GPU 上执行。两者在不同的 CUDA stream 上运行，互不阻塞，从而将通信延迟"隐藏"在计算时间之下（§1.11 会详细讨论这种重叠机制）。AllReduce 本身仍然是必须完成的——它只是被提前启动、与后续计算并行执行，以减少整体训练时间。这种自动插入对用户透明——你只需写标准的训练循环，PyTorch 在背后完成了所有 NCCL 调用。
 
 **场景二：用户显式调用的通信。** 在张量并行（TP, Tensor Parallelism）或 MoE（Mixture of Experts）架构中，单次前向/反向传播本身就依赖集合通信。例如，TP 中的 `all_reduce` 用于在每层计算后将各 GPU 的部分结果求和；MoE 中的 `all_to_all` 用于将 token 路由到对应的 expert GPU。这些 NCCL 调用不是梯度同步的附属品，而是计算图的核心组成部分——如果 NCCL 不可用，这些模型的单次前向传播都无法完成。用户通常通过 `torch.distributed.all_reduce`、`torch.distributed.all_gather` 等 API 显式调用，PyTorch 内部将这些调用转发给 NCCL。
 
 **两者的调度关系。** 无论是自动触发还是显式调用，最终都是由 PyTorch 的 distributed backend 模块将请求发给 NCCL。NCCL 和 cuBLAS 在 PyTorch 进程内部共享同一个 CUDA context，但使用不同的 CUDA stream——cuBLAS 的计算在计算 stream 上执行，NCCL 的通信在通信 stream 上执行。两个 stream 之间通过 CUDA event 进行同步：PyTorch 在需要确保通信完成后再继续计算的节点插入 `cudaStreamWaitEvent`，保证数据依赖关系不被破坏。这种多 stream 架构是实现通信-计算重叠的基础。
 
-#### 1.10.3 什么是通算融合？通信算子又是什么？
+### 1.11 通算融合：通信算子与计算算子的融合优化
+
+#### 1.11.1 通信算子是什么？
 
 **通信算子**是指将集合通信操作（如 AllReduce、AllGather）本身抽象为一个"算子"，与计算算子（如 matmul、conv2d）在同一个计算图中统一表示和调度。例如，在 PyTorch 的计算图中，`all_reduce` 和 `matmul` 都是图中的节点，编译器可以对它们一视同仁地做优化。
 
