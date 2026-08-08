@@ -436,7 +436,11 @@ int main() {
 }
 ```
 
-NVRTC 以库的形式（`libnvrtc.so`）工作，不需要启动外部 `nvcc` 进程，避免了进程创建、磁盘 I/O 等开销。输入端接受 CUDA C++ 字符串和编译选项，输出端提供 PTX 字符串（也可以直接输出 CUBIN）。从 CUDA 12.0 开始，NVRTC 还能生成 **LTO-IR（Link-Time Optimization Intermediate Representation，链接时优化中间表示）** 以配合 **nvJitLink** 运行时链接器，实现跨 kernel 模块的链接时优化——这一机制对 Triton 等 AI kernel 编译器至关重要，因为它允许在运行时将多个独立编译的 kernel 模块链接为一个高度优化的统一 kernel。
+NVRTC 以库的形式（`libnvrtc.so`）工作，不需要启动外部 `nvcc` 进程，避免了进程创建、磁盘 I/O 等开销。输入端接受 CUDA C++ 字符串和编译选项，输出端提供 PTX 字符串（也可以直接输出 CUBIN）。
+
+你可能会问：为什么要用字符串的形式写 kernel，然后运行时编译，而不是像 §1.2 那样正常写一个 `.cu` 文件离线编译？关键区别在于**编译时间点**。离线编译（nvcc）适用于 kernel 代码在构建时已经确定的场景；而 NVRTC 面向的是 kernel 代码**在运行时才知道长什么样**的场景。一个典型例子是 Triton 编译器：它根据运行时输入张量的形状（如 `(128, 256) @ (256, 512)` vs `(4096, 4096) @ (4096, 1024)`）和数据类型，动态生成不同的 CUDA C++ kernel 字符串——小矩阵用小 tile、少共享内存，大矩阵用大 tile、多级分块。这些优化决策无法在编译期预先做完，只能在运行时根据实际输入来"写代码"并即时编译。因此，NVRTC 的"字符串输入 → 即时编译"模式并不是一种退而求其次的用法，而是 JIT 编译器链中的标准工作方式。
+
+从 CUDA 12.0 开始，NVRTC 还能生成 **LTO-IR（Link-Time Optimization Intermediate Representation，链接时优化中间表示）** 以配合 **nvJitLink** 运行时链接器，实现跨 kernel 模块的链接时优化——这一机制对 Triton 等 AI kernel 编译器至关重要，因为它允许在运行时将多个独立编译的 kernel 模块链接为一个高度优化的统一 kernel。
 
 ### 1.8 CUDA Graph 与算子融合：超越逐 Kernel 执行的优化
 
