@@ -561,7 +561,11 @@ PyTorch 框架对两者的调用可以分为两类场景：
 
 - **通信与计算重叠（Overlap）**：将通信和计算放入不同的 CUDA stream，使它们在 GPU 上并行执行。例如，在反向传播中，当第 N 层的梯度还在做 AllReduce 通信时，第 N-1 层的反向计算可以同时进行。这种重叠能将通信延迟"隐藏"在计算时间之下，是分布式训练中最重要的性能优化手段之一。
 
-- **通信与计算融合（Fusion）**：将通信操作和计算操作合并为一个 kernel。例如，NCCL 的 AllReduce 可以分解为 ReduceScatter + AllGather 两个阶段。如果在 ReduceScatter 阶段就将规约结果直接送入下一个计算 kernel（而不是先写回 HBM），就可以省去一次显存读写。这种深度融合需要 NCCL 与框架编译器（如 `torch.compile` 的 Inductor 后端）紧密配合——编译器需要理解通信算子的数据依赖关系，才能安全地将计算 kernel 与通信 kernel 融合。目前这一领域仍处于活跃研究阶段，是 AI 系统性能优化的前沿方向。
+- **通信与计算融合（Fusion）**：将通信操作和计算操作合并为一个 kernel，或者将通信算子拆解后与计算交错编排。NCCL 的 AllReduce 可以分解为 ReduceScatter + AllGather 两个阶段，但并非所有计算都强依赖于 AllReduce 完全结束。在很多场景中，后续计算只需要部分规约结果即可开始——可以先执行 ReduceScatter 获得分片规约结果，立即开始计算，在计算完成后的某个更晚的时刻再补上 AllGather 恢复完整数据。
+
+  一个实际例子是 FSDP（Fully Sharded Data Parallel）中的优化器步骤。在 FSDP 的前向传播中，每张卡只持有模型参数的一个分片（shard），需要时通过 AllGather 收集完整参数；反向传播后，通过 ReduceScatter 将梯度规约并重新分片回各卡。此时每张卡持有的是完整梯度的一部分（ReduceScatter 的结果），但优化器更新只需要这部分数据——因为参数本身就是分片的，优化器更新也是逐分片独立进行的。因此可以**省略 AllGather 阶段**，直接在当前分片上执行优化器步骤，无需先恢复完整梯度再分片回去。这本质上是利用了 FSDP 的分片特性，将 AllReduce 拆解为 ReduceScatter（必须）和 AllGather（不需要），从而省去了 AllGather 的通信开销和对应的 HBM 读写。
+
+  这种深度融合需要 NCCL 与框架编译器（如 `torch.compile` 的 Inductor 后端）紧密配合——编译器需要理解通信算子的数据依赖关系，识别哪些计算只需要部分通信结果即可开始，从而安全地重新编排通信与计算的执行顺序。目前这一领域仍处于活跃研究阶段，是 AI 系统性能优化的前沿方向。
 
 ---
 
