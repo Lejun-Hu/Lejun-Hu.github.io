@@ -547,7 +547,7 @@ PyTorch 在运行时通过动态链接加载 `libnccl.so`。加载后，CPU 端�
 
 PyTorch 框架对两者的调用可以分为两类场景：
 
-**场景一：框架自动触发的通信。** 最常见的是数据并行（DDP, Distributed Data Parallel）中的梯度同步。PyTorch 在构建 DDP 模型时，会在反向传播的计算图中自动插入 AllReduce hook——每个参数的梯度计算完成后，框架不等 `loss.backward()` 完全结束，就立即触发该参数的 NCCL AllReduce。这意味着通信可以与后续层的反向计算重叠执行（§1.10.3 会详细讨论重叠机制）。这种自动插入对用户透明——你只需写标准的训练循环，PyTorch 在背后完成了所有 NCCL 调用。
+**场景一：框架自动触发的通信。** 最常见的是数据并行（DDP, Distributed Data Parallel）中的梯度同步。AllReduce 是反向传播的必要步骤——每张卡必须拿到所有卡的梯度平均值，优化器才能正确更新参数。关键优化在于**执行时序**：PyTorch 在构建 DDP 模型时，会在计算图中为每个参数注册一个 hook——当某个参数的局部梯度计算完成时，框架立即对该参数的梯度启动 NCCL AllReduce，而不等待所有层的梯度都算完。这意味着：当参数 N 的梯度正在网络上做 AllReduce 通信时，参数 N-1 的反向计算可以同时在 GPU 上执行。两者在不同的 CUDA stream 上运行，互不阻塞，从而将通信延迟"隐藏"在计算时间之下（§1.10.3 会详细讨论这种重叠机制）。AllReduce 本身仍然是必须完成的——它只是被提前启动、与后续计算并行执行，以减少整体训练时间。这种自动插入对用户透明——你只需写标准的训练循环，PyTorch 在背后完成了所有 NCCL 调用。
 
 **场景二：用户显式调用的通信。** 在张量并行（TP, Tensor Parallelism）或 MoE（Mixture of Experts）架构中，单次前向/反向传播本身就依赖集合通信。例如，TP 中的 `all_reduce` 用于在每层计算后将各 GPU 的部分结果求和；MoE 中的 `all_to_all` 用于将 token 路由到对应的 expert GPU。这些 NCCL 调用不是梯度同步的附属品，而是计算图的核心组成部分——如果 NCCL 不可用，这些模型的单次前向传播都无法完成。用户通常通过 `torch.distributed.all_reduce`、`torch.distributed.all_gather` 等 API 显式调用，PyTorch 内部将这些调用转发给 NCCL。
 
