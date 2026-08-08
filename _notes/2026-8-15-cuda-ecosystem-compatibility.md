@@ -537,18 +537,23 @@ NCCL 的编译同时使用了两种编译器，最终产物是单一的 `libnccl
 - **CPU 端代码**（如 NCCL 的拓扑探测、通信算法选择、channel 管理）：用标准 C/C++ 编写，由 **GCC/Clang** 编译为 x86-64 机器码（`.o` 文件）。
 - **GPU 端 kernel 代码**（如 NCCL 的 Reduce、Copy、AllReduce 等 GPU kernel）：用 CUDA C++ 编写，由 **nvcc** 编译为 CUBIN/PTX，以 FATBIN 格式嵌入。
 
-两者通过链接器（ld）合并为一个 `libnccl.so` 文件，PyTorch 在运行时通过动态链接加载。加载后，CPU 端代码直接在 Host 上执行，GPU 端 kernel 则由 CUDA 驱动从 `.so` 中提取 CUBIN/PTX 并加载到 GPU 上执行——与 §1.5-1.6 描述的 FATBIN 加载机制完全一致。cuBLAS 和 cuDNN 的编译方式与此相同，区别仅在于它们是闭源的，用户看不到源码和编译过程。
+两者通过链接器（ld）合并为一个 `libnccl.so` 文件。这里需要澄清一个技术细节：一个 `.so` 文件完全可以同时包含 CPU 机器码和 GPU 代码（CUBIN/PTX）。具体做法是将 CUBIN/PTX 以二进制数据的形式嵌入 `.so` 的数据段（`.rodata` 段），运行时 CUDA 驱动通过 `cuModuleLoadData` 从内存中的二进制数据直接加载，无需从磁盘读取单独的 `.cubin` 文件。这并非特殊机制——任何二进制数据都可以通过 `objcopy` 或链接器脚本嵌入 `.so`，关键只是加载方要知道如何解析嵌入的数据。
+
+PyTorch 在运行时通过动态链接加载 `libnccl.so`。加载后，CPU 端代码直接在 Host 上执行，GPU 端 kernel 则由 CUDA 驱动从 `.so` 中提取 CUBIN/PTX 并加载到 GPU 上执行——与 §1.5-1.6 描述的 FATBIN 加载机制完全一致。cuBLAS 和 cuDNN 的编译方式与此相同，区别仅在于它们是闭源的，用户看不到源码和编译过程。
+
+对于闭源库（cuBLAS、cuDNN 等），还存在一个额外的依赖链路：以 cuBLAS 为例，PyTorch 调用 `cublasGemmEx` → `libcublas.so` 内部会调用 `libcudart.so`（Runtime API）来加载其嵌入的 GPU kernel、创建内部 CUDA stream 和 event → Runtime API 再调用 `libcuda.so`（Driver API）→ 最终进入 GPU 内核驱动。这意味着如果你要替换 cuBLAS（例如做 §2.1 提到的干净室重实现），不仅要复刻 API 签名，还需要正确实现它内部的 context 管理、stream 同步和内存分配行为——这些内部行为没有公开文档，只能通过观察外部效果和逆向工程来推断。这也是为什么 GPU 闭源算子库构成了 CUDA 生态中最难逾越的技术壁垒之一。
 
 #### 1.10.2 NCCL 与计算算子库（cuBLAS/cuDNN）是如何协作的？
 
-两者的关系是"独立运作、框架协调"。在一个典型的分布式训练步骤中：
+两者的关系是"独立运作、框架协调"——NCCL 和 cuBLAS/cuDNN 之间没有直接的 API 调用关系，它们都是由 PyTorch 的分布式框架层（`torch.distributed`）统一调度和编排的独立组件。
 
-1. **前向传播**：PyTorch 调用 cuBLAS/cuDNN 在每张 GPU 上独立完成矩阵乘法、卷积等计算。此时 NCCL 不参与。
-2. **反向传播**：同上，每张 GPU 独立计算局部梯度。
-3. **梯度同步**：`loss.backward()` 完成后，PyTorch 的 autograd 引擎触发 `torch.distributed.all_reduce`，此时 NCCL 接管——它通过 NVLink/InfiniBand 等互联硬件，在所有 GPU 之间高效完成梯度的求和与广播。这个过程涉及 GPU kernel（NCCL 的 Reduce kernel 在每张卡上做局部规约）和网络传输（通过 RDMA 在节点间搬运数据）。
-4. **优化器更新**：每张 GPU 拿到全局平均梯度后，PyTorch 再次调用计算库执行优化器步骤（如 Adam 的动量更新）。
+PyTorch 框架对两者的调用可以分为两类场景：
 
-NCCL 和 cuBLAS 之间没有直接的 API 调用关系——它们都是被 PyTorch 的分布式框架层按顺序调度的独立组件。类比来说，cuBLAS 是"车间里的机床"，NCCL 是"车间之间的传送带"，两者各司其职，由工厂调度系统（PyTorch）统一编排。
+**场景一：框架自动触发的通信。** 最常见的是数据并行（DDP, Distributed Data Parallel）中的梯度同步。PyTorch 在构建 DDP 模型时，会在反向传播的计算图中自动插入 AllReduce hook——每个参数的梯度计算完成后，框架不等 `loss.backward()` 完全结束，就立即触发该参数的 NCCL AllReduce。这意味着通信可以与后续层的反向计算重叠执行（§1.10.3 会详细讨论重叠机制）。这种自动插入对用户透明——你只需写标准的训练循环，PyTorch 在背后完成了所有 NCCL 调用。
+
+**场景二：用户显式调用的通信。** 在张量并行（TP, Tensor Parallelism）或 MoE（Mixture of Experts）架构中，单次前向/反向传播本身就依赖集合通信。例如，TP 中的 `all_reduce` 用于在每层计算后将各 GPU 的部分结果求和；MoE 中的 `all_to_all` 用于将 token 路由到对应的 expert GPU。这些 NCCL 调用不是梯度同步的附属品，而是计算图的核心组成部分——如果 NCCL 不可用，这些模型的单次前向传播都无法完成。用户通常通过 `torch.distributed.all_reduce`、`torch.distributed.all_gather` 等 API 显式调用，PyTorch 内部将这些调用转发给 NCCL。
+
+**两者的调度关系。** 无论是自动触发还是显式调用，最终都是由 PyTorch 的 distributed backend 模块将请求发给 NCCL。NCCL 和 cuBLAS 在 PyTorch 进程内部共享同一个 CUDA context，但使用不同的 CUDA stream——cuBLAS 的计算在计算 stream 上执行，NCCL 的通信在通信 stream 上执行。两个 stream 之间通过 CUDA event 进行同步：PyTorch 在需要确保通信完成后再继续计算的节点插入 `cudaStreamWaitEvent`，保证数据依赖关系不被破坏。这种多 stream 架构是实现通信-计算重叠的基础。
 
 #### 1.10.3 什么是通算融合？通信算子又是什么？
 
