@@ -577,13 +577,31 @@ PyTorch 框架对两者的调用可以分为两类场景：
 
 ## 二、从通用视角看兼容难度：DSA 与 GPGPU 的本质分歧
 
-在了解了 CUDA 软件栈的完整结构之后，一个自然的问题是：如果我们要造一颗全新的 AI 芯片并希望兼容这套生态，面临的核心障碍是什么？
+第一章以 CUDA 为主线，从 PyTorch 框架层一路拆解到了 GPU 硬件的 SASS 指令执行，覆盖了单卡计算、多卡通信以及编译优化的完整链路。但在实际产业中，"兼容 CUDA"并不是简单地把这套链路复制一份——不同的芯片架构，面临的障碍性质完全不同。要理解为什么，需要先厘清两种截然不同的硬件设计路线：**GPGPU** 和 **DSA**。
 
-这个问题没有简单的"难"或"不难"的回答——因为不同的硬件架构路线，面临的障碍性质完全不同。本文将国产 AI 芯片的技术路线分为两大阵营：**GPGPU**（通用 GPU 路线）和 **DSA**（领域专用架构路线），分别分析它们与 CUDA 生态兼容的根本性挑战。
+### 什么是 GPGPU？什么是 DSA？
+
+**GPGPU（General-Purpose Graphics Processing Unit，通用图形处理器）** 顾名思义，是从 GPU 演变而来的通用并行计算架构。它的核心设计理念是 **SIMT（Single Instruction, Multiple Threads，单指令多线程）**——硬件将大量线程组织为 warp（NVIDIA 为 32 线程），由硬件 warp scheduler 在运行时动态调度到计算单元上执行。开发者看到的是一个"无限线程"的抽象：你写一个 kernel 函数，描述单个线程的行为，硬件自动将这份逻辑复制到成千上万个线程上并行运行。这种设计的最大优势是**通用性**——同一个硬件可以高效运行图形渲染、科学计算、AI 训练/推理等截然不同的负载。代价是硬件必须维护复杂的运行时调度逻辑（线程分配、缓存替换、分支发散处理等），这部分功耗和面积不直接贡献计算吞吐。NVIDIA GPU（包括 A100、H100）、AMD GPU（MI300X 等）、以及国产的摩尔线程 MUSA 和壁仞 BR100 都属于 GPGPU 路线。
+
+**DSA（Domain-Specific Architecture，领域专用架构）** 则走向了完全相反的方向。这一概念由 2017 年图灵奖得主 John Hennessy 和 David Patterson 在《A New Golden Age for Computer Architecture》演讲中正式提出，核心理念是：放弃"一个架构通吃所有应用"的传统 CPU 设计思路，针对特定领域（如 AI 推理/训练）定制专用硬件，以换取更高的能效和确定性性能。DSA 的典型特征是将**复杂度从运行时转移到编译器**——没有动态线程调度器，没有运行时缓存替换策略，所有调度决策（数据放在哪块 SRAM、指令在哪个时钟周期发射、跨芯片通信在哪个拍发生）全部由编译器在离线阶段静态规划完成。硬件在运行时只负责按既定计划执行，几乎没有动态决策开销。华为昇腾的达芬奇架构（Ascend 910/950）、Google TPU（v1-v7）的脉动阵列、Groq LPU 的流水线结构，都是 DSA 路线的代表。
+
+下表总结了两者的核心差异：
+
+| | GPGPU | DSA |
+|---|---|---|
+| **全称** | General-Purpose GPU | Domain-Specific Architecture |
+| **调度方式** | 硬件 warp scheduler 动态调度 | 编译器静态规划，硬件按计划执行 |
+| **线程模型** | 有独立线程抽象（threadIdx/blockIdx） | 多数无线程概念，数据流静态编排 |
+| **通用性** | 高——同一硬件跑各种负载 | 低——针对特定领域（如 AI）深度优化 |
+| **能效比** | 中等（通用性开销大） | 高（专用化减少浪费） |
+| **代表产品** | NVIDIA GPU、AMD GPU、摩尔线程、壁仞 | Google TPU、华为昇腾、Groq LPU |
+| **对 CUDA 兼容性** | 可做 API 级兼容 | 存在语义级分歧，只能框架层兼容 |
+
+有了这个基础认知，接下来分别分析两种路线在兼容 CUDA 生态时面临的核心挑战。你会发现：GPGPU 的障碍主要在**软件栈的工程规模**——每一层都要重实现但不存在根本性语义错配；DSA 的障碍则在**编程模型的语义鸿沟**——CUDA 的线程/warp/block 抽象无法直接映射到 DSA 的数据流/脉动阵列硬件。
 
 ### 2.1 GPGPU 路线的兼容挑战：软件栈规模，而非语义鸿沟
 
-GPGPU 路线的硬件执行模型与 NVIDIA GPU 高度同构——都是 SIMT（单指令多线程）并行计算架构，以 warp/线程为基本调度单位，拥有类似的 L1/L2 缓存层级和 HBM 显存体系。因此，GPGPU 路线在与 CUDA 生态兼容时，面临的主要挑战集中在**软件栈的工程规模**而非编程模型的语义错配。我们可以将其问题分解为以下几个层级：
+GPGPU 路线的硬件执行模型与 NVIDIA GPU 高度同构——都是 SIMT 并行计算架构，以 warp/线程为基本调度单位，拥有类似的 L1/L2 缓存层级和 HBM 显存体系。因此，GPGPU 路线在与 CUDA 生态兼容时，面临的主要挑战集中在**软件栈的工程规模**而非编程模型的语义错配。我们可以将其问题分解为以下几个层级：
 
 **Runtime 和 Driver API 的完整复刻。** CUDA Runtime API（`libcudart.so`）提供了数百个函数（`cudaMalloc`、`cudaMemcpy`、`cudaStreamCreate`、`cudaEventRecord`、`cudaLaunchKernel`、`cudaGraphCreate`……），Driver API（`libcuda.so`）提供了更多底层函数（`cuInit`、`cuCtxCreate`、`cuModuleLoadData`……）。任何一个函数的行为偏差都可能导致现有程序运行错误。更棘手的是，`libcuda.so` 中还存在大量通过 `cuGetExportTable` 暴露的 Dark API——没有文档、没有签名、仅在特定 NVIDIA 库的内部运行时环境中被调用。一个可行的策略是"按需逆向"：追踪 PyTorch、vLLM 等主流框架实际触达的 Dark API 函数，逐函数通过反汇编和调试推测其语义并实现兼容版本，而不追求全量逆向。
 
