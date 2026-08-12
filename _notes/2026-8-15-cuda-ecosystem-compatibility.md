@@ -512,19 +512,21 @@ CUDA Graphs 有一个反直觉的特征：在 **DSA（Domain-Specific Architectu
 
 ### 1.9 全链路总览
 
-将以上八个节的内容串联起来，可以得到 CUDA 软件栈从框架到硬件的完整执行链路：
+将以上八个节的内容串联起来，可以得到 CUDA 软件栈从框架到硬件的完整执行链路。下面的表格按照**一次计算任务实际发生的先后顺序**排列。需要注意：实际执行有两条路径——**标准算子路径**（如 `torch.matmul`，框架直接调用现成的 cuBLAS，跳过编译阶段）和**自定义 kernel 路径**（如 `torch.compile` 或手写 `.cu` 文件，需要先经过图优化和编译）。下表的 ①→⑨ 覆盖了自定义 kernel 路径的完整流程；标准算子路径则直接从 ① 跳到 ⑧。
 
 | 阶段 | 输入 | 输出 | 关键工具/库 | 开源状态 |
 |------|------|------|-----------|---------|
-| ① 框架层调度 | Python 框架代码 | 对 cuBLAS/cuDNN/NCCL 等的函数调用 | PyTorch dispatcher | 开源 |
-| ② 算子库执行 | 矩阵乘/卷积/通信调用 | GPU 计算结果 | cuBLAS, cuDNN, cuFFT (闭源); NCCL, CUTLASS (开源) | 部分闭源 |
-| ③ CUDA kernel 编写 | `.cu` 源文件 | CUDA C++ AST | nvcc, NVRTC | 编译工具闭源 |
-| ④ 前端编译 | CUDA C++ AST | PTX 文本/字符串 | nvcc GPU 前端, NVRTC | 闭源 |
+| ① 框架层调度 | Python 框架代码 | 对算子库（cuBLAS/cuDNN/NCCL）的调用，或对自定义 kernel 的引用 | PyTorch dispatcher | 开源 |
+| ② 图优化/算子融合 | 计算图 (FX Graph) | 融合后的图 + 生成的 kernel 代码 | `torch.compile` + **Inductor**（生成 Triton/C++ kernel）、TensorRT | 部分闭源 |
+| ③ kernel 代码生成 | Inductor 生成的 Triton/C++ 或手写 `.cu` | CUDA C++ 源码（字符串或文件） | Inductor、Triton、手写 CUDA | 开源（手写）/闭源（工具） |
+| ④ 前端编译 | CUDA C++ 源码 | PTX 文本/字符串 | nvcc GPU 前端、NVRTC | 闭源 |
 | ⑤ 后端汇编 | PTX | SASS / CUBIN (ELF) | ptxas (离线) 或 驱动 JIT 编译器 | 闭源 |
-| ⑥ FATBIN 打包 | 多个 CUBIN + PTX | FATBIN (嵌入宿主可执行文件) | nvcc --fatbin | 闭源 |
+| ⑥ FATBIN 打包 | 多个 CUBIN + PTX | FATBIN (嵌入宿主可执行文件或 `.so`) | nvcc --fatbin | 闭源 |
 | ⑦ Runtime 加载 | FATBIN / CUBIN / PTX | 已加载到 GPU 上下文的 CUmodule | libcudart, libcuda (+ Dark API) | 闭源 |
-| ⑧ 图优化/算子融合 | 计算图 (FX/HLO) | 融合后的图 + 优化 kernel | torch.compile, TensorRT, CUDA Graphs | 部分闭源 |
+| ⑧ 算子库执行 | 矩阵乘/卷积/通信调用，或已加载的自定义 kernel | GPU 计算结果 | cuBLAS, cuDNN, cuFFT (闭源); NCCL, CUTLASS (开源) | 部分闭源 |
 | ⑨ GPU 硬件执行 | SASS 指令流 | 计算结果 | SM, Tensor Core, HBM, NVLink | 硬件 |
+
+需要特别说明 **Inductor 的位置**：Inductor 是 PyTorch 2.0 `torch.compile` 的默认后端，工作在 **② 图优化阶段**。它负责两件事——(1) 对 FX 计算图做算子融合、调度等优化；(2) 生成底层 kernel 代码（默认生成 Triton kernel，也可生成 C++/CUTLASS）。Inductor 本身不直接编译 kernel，它生成的代码会交给 ③ 的 Triton/NVRTC 或 ④ 的编译工具链来完成编译。因此 Inductor 是连接"高层计算图"和"底层编译"的桥梁——它的输出是 ③ 的输入。
 
 ### 1.10 NCCL 在编译链路中的位置
 
