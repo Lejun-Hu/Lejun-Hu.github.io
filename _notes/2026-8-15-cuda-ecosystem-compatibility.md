@@ -630,6 +630,122 @@ DSA 架构的核心特征是：**将复杂度从运行时转移到编译器**。
 
 这解释了为什么纯粹的 DSA 架构（Google TPU、Groq LPU）没有试图直接兼容 CUDA 的线程级编程模型——它们在硬件设计之初就决定放弃这一兼容性，转而建立自己的全栈生态。华为昇腾走的则是"有限兼容"路线——在框架层（PyTorch PrivateUse1）和算子库层（AscendCL）提供 CUDA-like 的 API 体验，但在 kernel 编程层（算子开发）提供完全不同的 Ascend C 语言，要求开发者接受 SPMD + 显式数据流编程而非 CUDA 的线程模型。
 
+#### 2.2.1 DSA 如何支持 PyTorch：哪些层次相同，哪些层次不同
+
+上面的语义分歧表可能给人一个印象——DSA 架构与 CUDA 生态似乎处处格格不入。但实际情况并非如此：DSA 架构在**框架层和图编译层**与 CUDA 生态高度兼容，分歧主要集中在**最底层的 kernel 编程层**。一个 PyTorch 用户从 NVIDIA GPU 迁移到 DSA 硬件（如昇腾 NPU）时，绝大部分代码是无需改动的。
+
+具体来说，DSA 的软件栈在以下层次与 CUDA 生态一致：
+
+| 层次 | 是否一致 | 说明 |
+|---|---|---|
+| **框架层（PyTorch API）** | ✅ 基本一致 | `torch.nn`、`torch.optim`、`torch.distributed` 等高层 API 完全一样，用户代码几乎不改 |
+| **图编译层（torch.compile）** | ✅ 一致 | 通过 `torch.compile` 的 Inductor 后端，DSA 厂商可以接管 PyTorch 的 FX 图，做自己的图优化 |
+| **分布式框架层** | ✅ 一致 | `torch.distributed` 的 `all_reduce`、`all_gather` 等 API 相同，只是底层通信库从 NCCL 换成厂商自研库（如华为 HCCL） |
+| **算子库层** | ⚠️ 需替换 | cuBLAS/cuDNN 这些闭源库不能直接用，需要厂商提供对标的算子库（如昇腾的 ATC 编译出的 .om 算子） |
+| **kernel 编程层** | ❌ 本质不同 | CUDA 的线程级编程模型无法映射到 DSA 硬件，厂商提供完全不同的编程语言（如华为 Ascend C） |
+
+**用户代码层面的对比**最能说明问题。以最典型的 PyTorch 使用场景为例——训练一个模型：
+
+```python
+# ===== NVIDIA GPU 上的代码 =====
+import torch
+
+model = MyModel()
+model.to("cuda")                 # 迁移到 GPU
+optimizer = torch.optim.Adam(model.parameters())
+
+for x, y in dataloader:
+    loss = criterion(model(x), y)
+    loss.backward()
+    optimizer.step()
+```
+
+```python
+# ===== 华为昇腾 NPU 上的代码 =====
+import torch
+import torch_npu                 # 唯一新增：昇腾的 PyTorch 适配包
+
+model = MyModel()
+model.to("npu")                  # 仅此一处不同：cuda → npu
+optimizer = torch.optim.Adam(model.parameters())
+
+for x, y in dataloader:
+    loss = criterion(model(x), y)
+    loss.backward()
+    optimizer.step()
+```
+
+两者的差异只有一行——`model.to("cuda")` 变成 `model.to("npu")`，外加 `import torch_npu`。所有上层 API（模型定义、损失函数、优化器、数据加载、训练循环）完全一致。这就是为什么"有限兼容"的 DSA 路线（华为昇腾）对绝大多数**应用开发者**是透明的——他们只使用框架 API，从不手写 kernel。
+
+#### 2.2.2 DSA 的计算核心与 CUDA kernel 在代码层面的对比
+
+差异真正体现在**手写算子**（自定义 kernel）的场景。当框架内置算子无法满足需求，需要开发者自己写底层计算逻辑时，CUDA 和 DSA 的编程模型就完全不同了。
+
+以最简单的向量加法为例，先看 CUDA 的写法：
+
+```cpp
+// ===== CUDA kernel：SIMT 线程模型 =====
+// 思维模式："每个线程处理一个元素，硬件自动分配线程"
+__global__ void vecAdd_cuda(float* a, float* b, float* c, int n) {
+    // threadIdx/blockIdx/blockDim 是 CUDA 的线程层次抽象
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i < n) {
+        c[i] = a[i] + b[i];
+    }
+}
+// 开发者只需描述"单个线程做什么"，并行度由 <<<grid, block>>> 指定
+```
+
+再看华为昇腾的 Ascend C 写法（DSA 的代表）：
+
+```cpp
+// ===== Ascend C kernel：SPMD + 显式数据流 =====
+// 思维模式："每个 AI Core 处理一块数据，显式管理数据搬运和计算"
+__global__ __aicore__ void vecAdd_ascendc(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c, int n)
+{
+    // 每个 AI Core 拿到自己的数据块范围
+    int block_size = n / GET_BLOCK_NUM();
+    int start = GET_BLOCK_IDX() * block_size;
+
+    // 在 Unified Buffer（片上 SRAM）中申请缓冲区
+    __local__ float local_a[256];
+    __local__ float local_b[256];
+    __local__ float local_c[256];
+
+    for (int i = start; i < start + block_size; i += 256) {
+        int chunk = min(256, start + block_size - i);
+
+        // CopyIn：全局内存（HBM）→ Unified Buffer
+        __memcpy(local_a, a + i, chunk * sizeof(float), MEMCPY_GM_TO_UB);
+        __memcpy(local_b, b + i, chunk * sizeof(float), MEMCPY_GM_TO_UB);
+
+        // Compute：在片上完成计算
+        for (int j = 0; j < chunk; j++)
+            local_c[j] = local_a[j] + local_b[j];
+
+        // CopyOut：Unified Buffer → 全局内存
+        __memcpy(c + i, local_c, chunk * sizeof(float), MEMCPY_UB_TO_GM);
+    }
+}
+```
+
+两者的核心差异可以总结为：
+
+| | CUDA kernel | Ascend C（DSA） |
+|---|---|---|
+| **并行抽象** | 线程（thread/warp/block） | AI Core（每个 core 处理一块数据） |
+| **数据搬运** | 隐式——编译器/硬件自动管理缓存 | 显式——开发者用 `__memcpy` 手动搬数据 |
+| **内存层次** | 透明（global/shared/register 由编译器分配） | 显式——Unified Buffer、L1/L0 缓存需开发者指定 |
+| **同步方式** | `__syncthreads()` 等运行时同步 | 编译器静态调度，多数无需显式同步 |
+| **编程范式** | SIMT（单线程视角） | SPMD + 三段式（CopyIn→Compute→CopyOut） |
+
+这一差异的本质根源，正是前面表格说的"将复杂度从运行时转移到编译器"：CUDA 让开发者写"单线程逻辑"，硬件在运行时负责把线程分配到 SM、管理缓存；DSA 让开发者写"数据块逻辑"，编译器在离线阶段规划好数据流向和计算时序，硬件按计划执行。两者无法通过简单的函数名替换来桥接——这也是为什么华为昇腾必须提供全新的 Ascend C 语言，而不是像摩尔线程 MUSA 那样用 `cudaMalloc → musaMalloc` 的 AST 级替换来兼容 CUDA。
+
+对于自研芯片而言，这一层是关键的战略分水岭：**如果目标用户群是海量的应用开发者（只写 PyTorch，不碰 kernel），DSA 路线的兼容成本几乎为零；但如果目标用户群包含大量的算子开发者或需要迁移存量 CUDA kernel 的团队，DSA 的编程模型差异就会成为显著的迁移障碍。**
+
 对于国产自研芯片而言，这是一个无法回避的战略抉择：**选择 GPGPU 路线，可以用 API 级兼容 + 库重写的工程规模换取对 CUDA 生态的最大覆盖（代价是硬件能效比不可能达到 DSA 的极致水平）；选择 DSA 路线，可以获得针对 AI 负载的确定性低延迟和极致能效，但必须接受与 CUDA 的线程级编程模型之间的语义不可兼容边界。**
 
 ---
