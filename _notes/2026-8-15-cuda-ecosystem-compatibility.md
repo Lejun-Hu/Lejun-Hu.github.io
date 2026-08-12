@@ -739,10 +739,12 @@ __global__ __aicore__ void vecAdd_ascendc(
 | | CUDA kernel | Ascend C（DSA） |
 |---|---|---|
 | **并行抽象** | 线程（thread/warp/block） | AI Core（每个 core 处理一块数据） |
-| **数据搬运** | 隐式——编译器/硬件自动管理缓存 | 显式——开发者用 `__memcpy` 手动搬数据 |
+| **片上数据搬运（HBM↔SRAM）** | 隐式——Shared Memory 的加载由编译器/硬件自动管理，开发者通常无需显式指定数据何时进出片上缓存 | 显式——开发者必须用 `__memcpy` 手动执行 CopyIn（HBM→UB）和 CopyOut（UB→HBM），硬件没有自动缓存，数据流完全由开发者规划 |
 | **内存层次** | 透明（global/shared/register 由编译器分配） | 显式——Unified Buffer、L1/L0 缓存需开发者指定 |
 | **同步方式** | `__syncthreads()` 等运行时同步 | 编译器静态调度，多数无需显式同步 |
 | **编程范式** | SIMT（单线程视角） | SPMD + 三段式（CopyIn→Compute→CopyOut） |
+
+这里需要特别澄清一个容易混淆的点：表格中"片上数据搬运"指的是 **device 内部** 的数据移动（GPU/NPU 芯片内的 HBM 显存 ↔ 片上 SRAM），它与 host 和 device 之间的大块数据搬运是**两个完全不同的层面**。后者在 CUDA 中对应 `cudaMemcpy`（CPU 内存 ↔ GPU 显存），在昇腾中对应 `aclrtMemcpy`（Host 内存 ↔ NPU 显存）——这一层**两个架构都有对应接口，语义完全一致**，不是差异所在。真正的差异在 device 内部：CUDA 的 Shared Memory 加载由编译器和硬件自动管理（数据什么时候从 HBM 进 shared memory、什么时候被换出，由硬件缓存策略决定，开发者大多无需关心）；而 DSA 架构（如昇腾）没有这种自动缓存，Unified Buffer 的数据进出必须由开发者用 `__memcpy` 显式地"搬进来（CopyIn）→ 算 → 搬出去（CopyOut）"。
 
 这一差异的本质根源，正是前面表格说的"将复杂度从运行时转移到编译器"：CUDA 让开发者写"单线程逻辑"，硬件在运行时负责把线程分配到 SM、管理缓存；DSA 让开发者写"数据块逻辑"，编译器在离线阶段规划好数据流向和计算时序，硬件按计划执行。两者无法通过简单的函数名替换来桥接——这也是为什么华为昇腾必须提供全新的 Ascend C 语言，而不是像摩尔线程 MUSA 那样用 `cudaMalloc → musaMalloc` 的 AST 级替换来兼容 CUDA。
 
