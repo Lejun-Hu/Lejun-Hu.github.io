@@ -814,15 +814,11 @@ __global__ __aicore__ void vecAdd_ascendc(
 
 下面两张图直观地展示了两种架构在硬件结构上的差异：
 
-<figure>
-  <img src="{{ '/assets/images/notes/cuda-ecosystem-compatibility/coupled-architecture.png' | relative_url }}" alt="耦合架构" style="max-width: 560px;">
-  <figcaption>图 1：耦合架构 —— Cube、Vector、Scalar 三种计算单元同核部署，共享同一个 Unified Buffer</figcaption>
-</figure>
+![耦合架构：Cube、Vector、Scalar 同核部署]({{ '/assets/images/notes/cuda-ecosystem-compatibility/coupled-architecture.png' | relative_url }})
+*图 1：耦合架构 —— Cube、Vector、Scalar 三种计算单元同核部署，共享同一个 Unified Buffer*
 
-<figure>
-  <img src="{{ '/assets/images/notes/cuda-ecosystem-compatibility/decoupled-architecture.png' | relative_url }}" alt="分离架构" style="max-width: 560px;">
-  <figcaption>图 2：分离架构 —— AI Cube（AIC）与 AI Vector（AIV）拆分为两个独立核心，通过 Global Memory 传递数据</figcaption>
-</figure>
+![分离架构：AI Cube 与 AI Vector 拆分为独立核心]({{ '/assets/images/notes/cuda-ecosystem-compatibility/decoupled-architecture.png' | relative_url }})
+*图 2：分离架构 —— AI Cube（AIC）与 AI Vector（AIV）拆分为两个独立核心，通过 Global Memory 传递数据*
 
 两者的核心差异可以总结为：
 
