@@ -1413,6 +1413,23 @@ a {
     box-shadow: var(--shadow-md);
   }
 
+  // 图片标题/图注
+  figure {
+    margin: var(--space-lg) 0;
+    text-align: center;
+
+    img {
+      margin: 0 auto var(--space-sm) auto;
+    }
+
+    figcaption {
+      font-size: 0.9rem;
+      color: var(--color-text-light);
+      text-align: center;
+      margin-top: var(--space-sm);
+    }
+  }
+
   // 图片标题/说明文字居中
   img + em,
   p > em:only-child {
