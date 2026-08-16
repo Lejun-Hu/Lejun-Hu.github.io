@@ -891,6 +891,16 @@ GE（Graph Engine）是 CANN 中最具特色的组件，它同时扮演了 CUDA 
 
 - **TensorRT 的图优化角色**：GE 内置数十种融合 pass（编译器优化遍历，对计算图做等价变换以提升效率），可将 Conv→BN→ReLU 融合为单算子（中间结果在片上 UB 内流转不写 HBM），自动做常量折叠、死代码消除和公共子表达式消除。
 - **torch.compile/Inductor 的角色**：GE 通过 `torch.compile` 直接对接 PyTorch——用户使用 `torch.compile(model, backend="inductor")` 后，昇腾后端自动接管 PyTorch 生成的 FX 图，转化为 AIR 中间表示，再执行全链路图优化。这使 PyTorch 用户从 eager 模式切换到图模式时几乎不需要代码改动。
+
+  这里有两个中间表示（IR, Intermediate Representation）概念需要说明。**FX 图**是 PyTorch 官方的计算图捕获机制：当调用 `torch.compile` 或 `torch.fx` 时，PyTorch 通过符号执行把模型的 Python 代码"记录"下来，生成一张由算子节点（`matmul`、`conv`、`relu` 等）组成的有向无环图——这张图就是 FX Graph。它本质上是把"模型代码"变成"可分析、可优化的图结构"，是编译器做图级优化（融合、重排、常量折叠）的基础。**AIR（Ascend Intermediate Representation）** 则是昇腾自家的中间表示：FX 图传给昇腾后端后，会被翻译成 AIR，GE 图引擎在 AIR 这一层做昇腾特有的图优化（例如针对 Cube/Vector 分离架构的算子拆分、片上内存分配等），最终再编译成可执行的 `.om`。两者的关系是 `PyTorch FX 图 →（昇腾后端翻译）→ AIR →（GE 优化）→ .om`——FX 是 PyTorch 侧的通用 IR，AIR 是昇腾侧的私有 IR，中间要经历一次"翻译"。
+
+这里需要具体说明：从 CUDA 迁移到昇腾，用户代码和底层库**分别要改什么**。分两层来看：
+
+**用户代码层面的改动（极少）**：对于只使用 PyTorch 高层 API 的应用开发者，迁移昇腾只需两处改动——(1) 增加一行 `import torch_npu`（昇腾的 PyTorch 适配插件）；(2) 把设备名从 `"cuda"` 改为 `"npu"`（`model.to("npu")`、`tensor.to("npu")`）。其余代码（模型定义、`torch.compile` 调用、训练循环、`torch.distributed` 通信）全部不变。原因在于昇腾通过 `torch_npu` 这个插件注册了一个 PyTorch 的 **PrivateUse1 后端**——它劫持了 PyTorch dispatcher 对 `"npu"` 设备的调度，把原本会发往 CUDA 后端的算子调用，全部路由到昇腾自己的算子实现上。
+
+**底层库层面的替换（大量，但对用户透明）**：虽然用户代码几乎不改，但底层发生了大规模的"库替换"——PyTorch 原本依赖的 cuBLAS/cuDNN/NCCL 等 CUDA 库，全部被昇腾对标库取代：矩阵乘/卷积走昇腾的算子库（ATC 编译出的 `.om` 算子），集合通信走 HCCL（对标 NCCL），图优化走 GE（对标 TensorRT/torch.compile 的 CUDA 后端）。这些替换由 `torch_npu` 在加载时自动完成，用户无需感知。
+
+所以准确地说，**"几乎不需要代码改动"指的是用户代码层**；而在库这一层，昇腾做了完整的一套 CUDA 生态替代，只是这套替代对上层完全透明。这也是昇腾"有限兼容"策略的精髓——把兼容工作放在框架适配层（`torch_npu`）和算子库层，从而让应用开发者的迁移成本趋近于零。
 - **CUDA Graphs 的角色**：GE 支持**图下沉（Graph Sinking）**——将整个优化后的计算图一次性下发到 NPU，NPU 侧自主完成所有执行，Host 仅等待最终结果。由于 NPU 的静态调度特性，图下沉能彻底消除 Host-Device 间的来回交互。
 
 **第三层：Ascend C → CUDA C++ Kernel 编程**
