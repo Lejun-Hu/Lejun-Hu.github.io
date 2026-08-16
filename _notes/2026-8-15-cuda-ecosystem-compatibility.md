@@ -528,6 +528,14 @@ CUDA Graphs 有一个反直觉的特征：在 **DSA（Domain-Specific Architectu
 
 需要特别说明 **Inductor 的位置**：Inductor 是 PyTorch 2.0 `torch.compile` 的默认后端，工作在 **② 图优化阶段**。它负责两件事——(1) 对 FX 计算图做算子融合、调度等优化；(2) 生成底层 kernel 代码（默认生成 Triton kernel，也可生成 C++/CUTLASS）。Inductor 本身不直接编译 kernel，它生成的代码会交给 ③ 的 Triton/NVRTC 或 ④ 的编译工具链来完成编译。因此 Inductor 是连接"高层计算图"和"底层编译"的桥梁——它的输出是 ③ 的输入。
 
+这里还需要厘清 `torch.compile`、Inductor 与 TensorRT 三者的关系，它们常被并列提及，但所处位置和定位各不相同：
+
+- **`torch.compile` 是"入口/机制"**：它是 PyTorch 提供的一行式编译 API，用户调用它之后，PyTorch 负责捕获 FX 图并交给某个后端做编译优化。它本身不做优化，只是"触发编译"这个动作的入口。
+- **Inductor 是"后端/执行者"**：它是 `torch.compile` 默认挂载的编译器后端，真正负责图优化和 kernel 代码生成。用户也可以把 `torch.compile` 的后端替换成别的（例如昇腾 GE、Triton 原生后端等），这正是国产芯片厂商"接管 PyTorch 图编译"的切入点。
+- **TensorRT 是"另一个独立产品"**：它是 NVIDIA 针对**推理**场景的独立优化编译器/运行时（不依赖 PyTorch，也服务于 TensorFlow、ONNX 等），定位与 `torch.compile` 是平行关系而非从属关系——两者都是"把模型/图编译成高效可执行代码"的工具，但 TensorRT 侧重推理部署、`torch.compile` 侧重 PyTorch 训练/推理的一体化。TensorRT 也可以作为 `torch.compile` 的另一个后端（`torch.compile(..., backend="tensorrt")`），此时它才进入 PyTorch 的编译流水线。
+
+三者的关系可以概括为：**`torch.compile` 是入口，Inductor 是默认后端，TensorRT 是平行于两者的推理优化器（也可作为可选后端接入）**。这一层关系在昇腾生态中有精确的对应物——GE 图引擎同时扮演了 Inductor（图优化后端）和 TensorRT（离线推理优化）两个角色，而 `torch.compile` 这个"入口"则被昇腾通过 `torch_npu` 插件接管，这将在第三章详细展开。
+
 ### 1.10 NCCL 在编译链路中的位置
 
 前面的讨论主要聚焦于"单卡计算"的编译链路，但实际的大模型训练/推理场景中，多卡通信同样占据关键地位。这里集中说明 NCCL 的编译方式以及它与计算算子库的协作关系。关于通算融合的讨论将在 §1.11 中展开。
