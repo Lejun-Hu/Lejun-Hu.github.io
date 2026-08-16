@@ -812,6 +812,12 @@ __global__ __aicore__ void vecAdd_ascendc(
 
 **分离架构**：将 AI Core 拆分为两个**独立的核心**——**AI Cube（AIC，矩阵计算核心）** 和 **AI Vector（AIV，向量计算核心）**。每个核都有自己的 Scalar 单元，能独立加载代码段，实现矩阵计算与向量计算的解耦，在系统软件的统一下配合完成计算。AIC 与 AIV 之间通过 **Global Memory（全局内存）** 传递数据，相比耦合架构增加了 BT Buffer（BiasTable Buffer，存放 Bias）和 FP Buffer（Fixpipe Buffer，存放量化参数、ReLU 参数等）两个缓冲区。
 
+下面两张图直观地展示了两种架构在硬件结构上的差异：
+
+![耦合架构：Cube + Vector + Scalar 同核部署]({{ '/assets/images/notes/cuda-ecosystem-compatibility/coupled-architecture.png' | relative_url }})
+
+![分离架构：AI Cube（AIC）与 AI Vector（AIV）分离为两个独立核心]({{ '/assets/images/notes/cuda-ecosystem-compatibility/decoupled-architecture.png' | relative_url }})
+
 两者的核心差异可以总结为：
 
 | 对比维度 | 耦合架构 | 分离架构 |
