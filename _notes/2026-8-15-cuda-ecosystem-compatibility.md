@@ -960,7 +960,9 @@ __global__ __aicore__ void vecAdd_ascendc(
 }
 ```
 
-Ascend C 的编程范式可以概括为 **CopyIn → Compute → CopyOut 三段式 + Tiling 多核拆分**。对于 CUDA 开发者而言，这是从"写线程逻辑"到"写显式数据流"的根本性编程习惯转换。不过对于绝大多数仅使用框架 API 而非手写 kernel 的应用开发者，这一差异被框架适配层（`torch_npu`）完全屏蔽。此外，Triton 编译器的 tile 级抽象（`tl.load`/`tl.dot`/`tl.store`）与 Ascend C 的三段式范式在逻辑上高度一致——Triton-昇腾后端移植后，大量现有 Triton kernel 可近零改写直接运行。
+Ascend C 的编程范式可以概括为 **CopyIn → Compute → CopyOut 三段式 + Tiling 多核拆分**。不过需要澄清的是，从 CUDA 到 Ascend C 的迁移，**核心的索引与计算逻辑其实并没有本质变化**——对比上面两段代码可以看到，CUDA 用 `i = threadIdx + blockIdx * blockDim` 定位元素，Ascend C 用 `i = start + j`（其中 `start` 由 block 编号算出）定位元素，两者都是"先算出当前要处理哪个数据位置，再对该位置做加法"，索引的思维完全一致。真正变化的只有两点：其一，**并行粒度从"线程"变成了"数据块"**（CUDA 让开发者想象"每个线程处理一个元素"，Ascend C 让开发者想象"每个 AI Core 处理一块数据"）；其二，**内存搬运从隐式变成了显式**（CUDA 里 `c[i]=a[i]+b[i]` 的 global→shared→register 数据移动由编译器/硬件自动完成，Ascend C 则需要开发者手动用 `__memcpy` 把 HBM 搬到 UB、算完再搬回）。所以准确地说，这不是"根本性的编程习惯转换"，而是**并行粒度与内存管理方式上的调整，计算与索引的核心逻辑是同构的**——对已有 CUDA 经验的开发者而言，学习曲线比想象中平缓得多。
+
+不过对于绝大多数仅使用框架 API 而非手写 kernel 的应用开发者，这一差异被框架适配层（`torch_npu`）完全屏蔽。此外，Triton 编译器的 tile 级抽象（`tl.load`/`tl.dot`/`tl.store`）与 Ascend C 的三段式范式在逻辑上高度一致——Triton-昇腾后端移植后，大量现有 Triton kernel 可近零改写直接运行。
 
 **第四层：HCCL → NCCL**
 
