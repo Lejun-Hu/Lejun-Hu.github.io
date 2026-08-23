@@ -893,33 +893,37 @@ AscendCL 是 CANN 的统一编程接口，在 API 分类和调用模式上直接
 
 因此，更准确的说法是：**DSA 架构确实倾向于"一次下沉、自主执行"，这比 CUDA 更接近"一次调用"的理想形态；但能否真正做到只调用一次，取决于编译粒度（整模型还是单算子）和应用场景（单次推理还是多 step 训练）。** 图下沉是昇腾的能力与优化方向，而非所有场景的必然形态。
 
+在梳理完最底层的 AscendCL 之后，我们把视角往上移一层，来看昇腾软件栈里最核心、也最具特色的组件——图引擎。如果说 AscendCL 对标的是 CUDA 的 Runtime/Driver API（解决"如何调用"），那么这一层对标的是 CUDA 生态里的"图优化与编译"工具链（解决"如何优化"）。
+
 **第二层：GE 图引擎 → CUDA Graphs + TensorRT + torch.compile**
 
-GE（Graph Engine）是 CANN 中最具特色的组件，它同时扮演了 CUDA 生态中三个不同工具的角色：
+GE（Graph Engine）是 CANN 中最具特色的组件，它同时扮演了 CUDA 生态中三个不同工具的角色，下面逐一说明：
 
 - **TensorRT 的图优化角色**：GE 内置数十种融合 pass（编译器优化遍历，对计算图做等价变换以提升效率），可将 Conv→BN→ReLU 融合为单算子（中间结果在片上 UB 内流转不写 HBM），自动做常量折叠、死代码消除和公共子表达式消除。
+
 - **torch.compile/Inductor 的角色**：GE 通过 `torch.compile` 直接对接 PyTorch——用户使用 `torch.compile(model, backend="inductor")` 后，昇腾后端自动接管 PyTorch 生成的 FX 图，转化为 AIR 中间表示，再执行全链路图优化。这使 PyTorch 用户从 eager 模式切换到图模式时几乎不需要代码改动。
 
-  这里有两个中间表示（IR, Intermediate Representation）概念需要说明。**FX 图**是 PyTorch 官方的计算图捕获机制：当调用 `torch.compile` 或 `torch.fx` 时，PyTorch 通过符号执行把模型的 Python 代码"记录"下来，生成一张由算子节点（`matmul`、`conv`、`relu` 等）组成的有向无环图——这张图就是 FX Graph。它本质上是把"模型代码"变成"可分析、可优化的图结构"，是编译器做图级优化（融合、重排、常量折叠）的基础。**AIR（Ascend Intermediate Representation）** 则是昇腾自家的中间表示：FX 图传给昇腾后端后，会被翻译成 AIR，GE 图引擎在 AIR 这一层做昇腾特有的图优化（例如针对 Cube/Vector 分离架构的算子拆分、片上内存分配等），最终再编译成可执行的 `.om`。两者的关系是 `PyTorch FX 图 →（昇腾后端翻译）→ AIR →（GE 优化）→ .om`——FX 是 PyTorch 侧的通用 IR，AIR 是昇腾侧的私有 IR，中间要经历一次"翻译"。
+- **CUDA Graphs 的角色**：GE 支持**图下沉（Graph Sinking）**——将整个优化后的计算图一次性下发到 NPU，NPU 侧自主完成所有执行，Host 仅等待最终结果。由于 NPU 的静态调度特性，图下沉能彻底消除 Host-Device 间的来回交互。
 
-这里需要具体说明：从 CUDA 迁移到昇腾，用户代码和底层库**分别要改什么**。分两层来看：
+这里涉及两个需要展开说明的概念——"FX 图/AIR 中间表示"和"图下沉"，它们分别对应上面的 torch.compile 角色和 CUDA Graphs 角色：
+
+首先看**中间表示（IR, Intermediate Representation）**。**FX 图**是 PyTorch 官方的计算图捕获机制：当调用 `torch.compile` 或 `torch.fx` 时，PyTorch 通过符号执行把模型的 Python 代码"记录"下来，生成一张由算子节点（`matmul`、`conv`、`relu` 等）组成的有向无环图——这张图就是 FX Graph。它本质上是把"模型代码"变成"可分析、可优化的图结构"，是编译器做图级优化（融合、重排、常量折叠）的基础。**AIR（Ascend Intermediate Representation）** 则是昇腾自家的中间表示：FX 图传给昇腾后端后，会被翻译成 AIR，GE 图引擎在 AIR 这一层做昇腾特有的图优化（例如针对 Cube/Vector 分离架构的算子拆分、片上内存分配等），最终再编译成可执行的 `.om`。两者的关系是 `PyTorch FX 图 →（昇腾后端翻译）→ AIR →（GE 优化）→ .om`——FX 是 PyTorch 侧的通用 IR，AIR 是昇腾侧的私有 IR，中间要经历一次"翻译"。
+
+再看**图下沉**。所谓图下沉，可以理解为：把整个模型的计算图（包含所有算子、算子间的依赖关系、内存布局）作为一个整体，**一次性下发到 Device（NPU）侧**；此后 Host 侧只需要下发一条"执行"指令，Device 就自主地按图内依赖调度、依次执行所有算子，期间无需 Host 逐个算子地下发指令，Host 只需在最后等待最终结果。需要特别说明的是，"图下沉"这个思想**并非 CANN 独有**——CUDA 生态里也有对应的机制，就是 §1.8 讲的 **CUDA Graphs**：通过 `cudaGraphLaunch` 一次性把整张 kernel 依赖图提交给 GPU，GPU 自主按依赖调度执行，消除反复提交的开销。两者在概念上高度等价，只是叫法不同（CUDA 叫 CUDA Graph，昇腾叫图下沉/模型下沉）。但两者也存在重要差异，根源在于硬件架构：**CUDA Graph 在 NVIDIA GPU 上是"可选优化"**——GPGPU 的动态调度能力允许开发者不用 CUDA Graph、直接 eager 逐 kernel 下发也能跑（只是性能差一些）；**而昇腾的图下沉更接近"天然形态"**——因为达芬奇 DSA 架构是静态调度，本来就需要编译器提前规划好整张图的执行计划，所以图下沉对昇腾而言不仅是优化，更是与硬件特性深度契合的默认执行方式，下沉的"彻底程度"也更高（整图在 Device 侧完全自主，几乎不依赖 Host）。
+
+在理解了 GE 图引擎的三种角色之后，一个实际的问题浮现出来：**从 CUDA 迁移到昇腾，用户代码和底层库分别要改什么？** 分两层来看：
 
 **用户代码层面的改动（极少）**：对于只使用 PyTorch 高层 API 的应用开发者，迁移昇腾只需两处改动——(1) 增加一行 `import torch_npu`（昇腾的 PyTorch 适配插件）；(2) 把设备名从 `"cuda"` 改为 `"npu"`（`model.to("npu")`、`tensor.to("npu")`）。其余代码（模型定义、`torch.compile` 调用、训练循环、`torch.distributed` 通信）全部不变。原因在于昇腾通过 `torch_npu` 这个插件注册了一个 PyTorch 的 **PrivateUse1 后端**——它劫持了 PyTorch dispatcher 对 `"npu"` 设备的调度，把原本会发往 CUDA 后端的算子调用，全部路由到昇腾自己的算子实现上。
 
 **底层库层面的替换（大量，但对用户透明）**：虽然用户代码几乎不改，但底层发生了大规模的"库替换"——PyTorch 原本依赖的 cuBLAS/cuDNN/NCCL 等 CUDA 库，全部被昇腾对标库取代：矩阵乘/卷积走昇腾的算子库（ATC 编译出的 `.om` 算子），集合通信走 HCCL（对标 NCCL），图优化走 GE（对标 TensorRT/torch.compile 的 CUDA 后端）。这些替换由 `torch_npu` 在加载时自动完成，用户无需感知。
 
 所以准确地说，**"几乎不需要代码改动"指的是用户代码层**；而在库这一层，昇腾做了完整的一套 CUDA 生态替代，只是这套替代对上层完全透明。这也是昇腾"有限兼容"策略的精髓——把兼容工作放在框架适配层（`torch_npu`）和算子库层，从而让应用开发者的迁移成本趋近于零。
-- **CUDA Graphs 的角色**：GE 支持**图下沉（Graph Sinking）**——将整个优化后的计算图一次性下发到 NPU，NPU 侧自主完成所有执行，Host 仅等待最终结果。由于 NPU 的静态调度特性，图下沉能彻底消除 Host-Device 间的来回交互。
 
-  这里需要解释一下"图下沉"的含义，以及它与 CUDA 的关系。所谓图下沉，可以理解为：把整个模型的计算图（包含所有算子、算子间的依赖关系、内存布局）作为一个整体，**一次性下发到 Device（NPU）侧**；此后 Host 侧只需要下发一条"执行"指令，Device 就自主地按图内依赖调度、依次执行所有算子，期间无需 Host 逐个算子地下发指令，Host 只需在最后等待最终结果。这正是你理解的那个意思——"全部计算图一次性下发到设备侧，设备自行调度，Host 仅等结果"。
-
-  需要特别说明的是，"图下沉"这个思想**并非 CANN 独有**——CUDA 生态里也有对应的机制，就是 §1.8 讲的 **CUDA Graphs**：通过 `cudaGraphLaunch` 一次性把整张 kernel 依赖图提交给 GPU，GPU 自主按依赖调度执行，消除反复提交的开销。两者在概念上高度等价，只是叫法不同（CUDA 叫 CUDA Graph，昇腾叫图下沉/模型下沉）。
-
-  但两者也存在重要差异，根源在于硬件架构：**CUDA Graph 在 NVIDIA GPU 上是"可选优化"**——GPGPU 的动态调度能力允许开发者不用 CUDA Graph、直接 eager 逐 kernel 下发也能跑（只是性能差一些）。**而昇腾的图下沉更接近"天然形态"**——因为达芬奇 DSA 架构是静态调度，本来就需要编译器提前规划好整张图的执行计划，所以图下沉对昇腾而言不仅是优化，更是与硬件特性深度契合的默认执行方式，下沉的"彻底程度"也更高（整图在 Device 侧完全自主，几乎不依赖 Host）。
+前面的两层（AscendCL 和 GE）解决的都是"框架如何用起来"的问题，对应用开发者来说基本透明。而接下来这一层，则是 CANN 与 CUDA 生态**差异最大**的地方——它面向的是需要手写底层算子的开发者。从这里开始，DSA 架构与 GPGPU 架构在编程模型上的根本分歧，才真正显露出来。
 
 **第三层：Ascend C → CUDA C++ Kernel 编程**
 
-这是 CANN 与 CUDA 差异最大的一层。在 NVIDIA 生态中，自定义 kernel 用 CUDA C++ 编写（`__global__` 函数）；在昇腾生态中，对应的是 **Ascend C**——一套基于 C++17 标准的算子编程语言，但其编程范式与 CUDA 截然不同。以下对比直观地展示了差异：
+在 NVIDIA 生态中，自定义 kernel 用 CUDA C++ 编写（`__global__` 函数）；在昇腾生态中，对应的是 **Ascend C**——一套基于 C++17 标准的算子编程语言，但其编程范式与 CUDA 截然不同。以下对比直观地展示了差异：
 
 ```cpp
 // ---- CUDA C++: SIMT 线程模型 ----
@@ -963,6 +967,8 @@ __global__ __aicore__ void vecAdd_ascendc(
 Ascend C 的编程范式可以概括为 **CopyIn → Compute → CopyOut 三段式 + Tiling 多核拆分**。不过需要澄清的是，从 CUDA 到 Ascend C 的迁移，**核心的索引与计算逻辑其实并没有本质变化**——对比上面两段代码可以看到，CUDA 用 `i = threadIdx + blockIdx * blockDim` 定位元素，Ascend C 用 `i = start + j`（其中 `start` 由 block 编号算出）定位元素，两者都是"先算出当前要处理哪个数据位置，再对该位置做加法"，索引的思维完全一致。真正变化的只有两点：其一，**并行粒度从"线程"变成了"数据块"**（CUDA 让开发者想象"每个线程处理一个元素"，Ascend C 让开发者想象"每个 AI Core 处理一块数据"）；其二，**内存搬运从隐式变成了显式**（CUDA 里 `c[i]=a[i]+b[i]` 的 global→shared→register 数据移动由编译器/硬件自动完成，Ascend C 则需要开发者手动用 `__memcpy` 把 HBM 搬到 UB、算完再搬回）。所以准确地说，这不是"根本性的编程习惯转换"，而是**并行粒度与内存管理方式上的调整，计算与索引的核心逻辑是同构的**——对已有 CUDA 经验的开发者而言，学习曲线比想象中平缓得多。
 
 不过对于绝大多数仅使用框架 API 而非手写 kernel 的应用开发者，这一差异被框架适配层（`torch_npu`）完全屏蔽。此外，Triton 编译器的 tile 级抽象（`tl.load`/`tl.dot`/`tl.store`）与 Ascend C 的三段式范式在逻辑上高度一致——Triton-昇腾后端移植后，大量现有 Triton kernel 可近零改写直接运行。
+
+最后，我们再回到多卡场景。前面三层讨论的都是"单卡"上的软件栈映射，但当模型需要跨多张 NPU 训练时，还必须有集合通信库的支撑——这正是昇腾对标 NCCL 的那一层。与前几层"兼容程度不一"不同，这一层是昇腾与 CUDA 生态**最接近、几乎无差别**的一层。
 
 **第四层：HCCL → NCCL**
 
