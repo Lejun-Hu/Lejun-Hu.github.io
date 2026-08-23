@@ -1141,6 +1141,8 @@ with tf.Session() as sess:            # 只有在 Session 里 run 时才真正�
 
 ---
 
+## 五、案例三：摩尔线程 MUSA —— GPGPU 路线的"极致 API 兼容"
+
 摩尔线程是国产 GPU 中走 CUDA 兼容路线最坚定的一家。其策略可概括为：**让开发者写的 CUDA 代码几乎不改就能在自己的卡上跑起来。** 这一定位的硬件基础是 MUSA（Meta-computing Unified System Architecture，元计算统一系统架构）——一套从芯片架构到软件栈全栈自研的 GPGPU 体系。
 
 ### 5.1 MUSA 的分层兼容策略
