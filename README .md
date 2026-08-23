@@ -1,79 +1,57 @@
-# 个人简历网站
-# Everything about me will be added soon !!!!  Hope So LOL~
+# Lejun-Hu.github.io
 
-这是一个基于 Jekyll 和 GitHub Pages 构建的个人简历网站模板。
+> 个人技术主页 & 学习笔记仓库 —— 记录一个 AI Infra 工程师在集合通信、加速器架构与分布式系统上的学习与思考。
 
-## 🚀 快速开始
+## 关于这个库
 
-### 1. 使用此模板
+这是我的个人网站与博客仓库，基于 **Jekyll** + **GitHub Pages** 构建，访问地址为 [lejun-hu.github.io](https://lejun-hu.github.io)。
 
-1. 下载 `cv-website.zip` 文件并解压
-2. 将所有文件上传到你的 GitHub Pages 仓库（`username.github.io`）
-3. 或者 fork 此仓库并改名为 `你的用户名.github.io`
+网站包含两部分内容：
 
-### 2. 个性化配置
+- **个人主页**（`index.md`）：简历式自我介绍，涵盖工作经历、技术栈、教育背景等信息。
+- **学习笔记**（`_notes/`）：长期更新的技术博客，是我在学习 AI 全栈过程中的笔记沉淀。目前主要围绕 **AI 计算系统** 这条主线展开。
 
-编辑 `_config.yml` 文件，修改以下信息：
+我的技术方向是 **AI Infra（AI 基础设施）**，日常工作涉及集合通信库（NCCL / HCCL / XCCL 等）、RDMA 与在网计算、CUDA kernel 开发，以及大模型分布式训练/推理中的通信与数据流优化。这个仓库的笔记，正是我在这些领域学习与实战的记录。
 
-```yaml
-title: "你的名字"
-description: "你的职位 | 经验年限 | 专业领域"
-email: your-email@example.com
+## 已发布的笔记
 
-author:
-  name: 你的名字
-  email: your-email@example.com
-  github: your-github-username
-  linkedin: your-linkedin-id
-  location: 你的城市, 国家
-```
+| 笔记 | 主题 |
+|------|------|
+| [GPU、TPU 与 LPU：AI 时代计算架构的分野](https://lejun-hu.github.io/notes/gpu-tpu-lpu-architecture/) | 三种加速器的架构哲学与"通用性 vs 专用性"权衡 |
+| [GPU 卡间互联协议深度调研](https://lejun-hu.github.io/notes/GPU_Interconnect_Research/) | NVLink/NVSwitch 及 scale-up / scale-out 替代方案全景 |
+| [CUDA 软件栈全路径拆解与国产 AI 芯片生态兼容分析](https://lejun-hu.github.io/notes/cuda-ecosystem-compatibility/) | 从框架到硬件的 CUDA 编译执行链路，及国产芯片兼容策略 |
+| [NCCL 源码学习笔记](https://lejun-hu.github.io/notes/nccl-source-study/) | NCCL 源码的初始化、执行路径与 GIN 机制（持续完善中） |
 
-### 3. 更新内容数据
+## 将来的学习计划
 
-#### 修改技能（`_data/skills.yml`）
-```yaml
-categories:
-  - name: 你的技能分类
-    icon: 🚀
-    items:
-      - name: 技能名称
-        level: 90  # 百分比 0-100
-```
+以下是计划中的学习主题（状态会随学习进度更新）：
 
-#### 修改工作经历（`_data/experience.yml`）
-```yaml
-jobs:
-  - company: 公司名称
-    position: 职位
-    location: 地点
-    start_date: 2020-01
-    end_date: 至今
-    current: true
-    description: |
-      工作描述...
-    highlights:
-      - 成就 1
-      - 成就 2
-```
+### 集合通信与网络
 
-#### 修改教育背景（`_data/education.yml`）
-```yaml
-degrees:
-  - school: 学校名称
-    degree: 专业 学位
-    start_year: 2015
-    end_year: 2019
-    description: 描述信息
-```
+- [ ] NCCL 源码精读：Ring/Tree 搜索算法、Channel 与 Connector 机制、协议选择（LL/LL128/Simple）
+- [ ] NCCL 传输层深入：P2P/SHM/NET 三种 Transport 的连接建立与数据路径
+- [ ] GIN（GPU Initiated Network）机制详解与国产芯片适配
+- [ ] RDMA / InfiniBand / RoCEv2 协议栈与 Verbs 编程
+- [ ] 在网计算（SHARP / CollNet）的原理与实现
+- [ ] 国产集合通信库（HCCL 等）与 NCCL 的对比分析
 
-### 4. 添加个人照片
+### 加速器架构与 CUDA
 
-将你的照片命名为 `profile.jpg` 并放入 `assets/images/` 目录。
-建议尺寸：600x600 像素以上，正方形比例最佳。
+- [ ] CUDA kernel 优化：Memory Coalescing、Shared Memory、Warp 调度
+- [ ] Tensor Core 编程模型与矩阵乘优化
+- [ ] 国产 AI 芯片架构（昇腾达芬奇 / 寒武纪 / 壁仞等）的软硬件协同
 
-### 5. 本地预览（可选）
+### 大模型分布式系统
 
-如果你想在本地预览效果：
+- [ ] 张量并行 / 流水线并行 / 数据并行 / 专家并行的通信模式拆解
+- [ ] 通信-计算重叠（overlap）与通算融合技术
+- [ ] 大模型训练/推理中的通信瓶颈分析与优化
+
+> 计划会随着学习和工作重心的变化不断调整，欢迎通过邮件交流指正。
+
+## 快速开始
+
+### 本地预览
 
 ```bash
 # 安装依赖
@@ -85,92 +63,49 @@ bundle exec jekyll serve
 # 访问 http://localhost:4000
 ```
 
-## 📁 文件结构
+### 添加一篇新笔记
+
+1. 在 `_notes/` 下新建 Markdown 文件，命名格式 `YYYY-M-D-标题.md`
+2. 添加 front matter：
+
+```markdown
+---
+title: "笔记标题"
+permalink: /notes/your-slug/
+date: 2026-08-24
+category: "分类"
+tags: ["标签1", "标签2"]
+description: "笔记简介"
+published: true
+---
+```
+
+3. 如有配图，放入 `assets/images/notes/your-slug/` 目录，正文中用 `{{ '/assets/images/notes/your-slug/xxx.png' | relative_url }}` 引用
+
+## 文件结构
 
 ```
 .
 ├── _config.yml          # 网站配置
-├── _data/               # 数据文件
-│   ├── education.yml    # 教育背景
-│   ├── experience.yml   # 工作经历
-│   └── skills.yml       # 技能数据
-├── _includes/           # 可复用组件
-│   ├── footer.html      # 页脚
-│   ├── head.html        # HTML head
-│   └── header.html      # 导航栏
-├── _layouts/            # 页面布局
-│   └── default.html     # 默认布局
-├── _sass/               # SCSS 样式（如需要）
-├── assets/              # 静态资源
-│   ├── css/
-│   │   └── main.scss    # 主样式文件
-│   ├── js/
-│   │   └── main.js      # JavaScript 交互
-│   └── images/          # 图片资源
-│       ├── profile.jpg  # 你的照片（需自行添加）
-│       ├── project1.jpg # 项目截图（可选）
-│       └── project2.jpg # 项目截图（可选）
-├── index.md             # 主页（个人简历）
-└── README.md            # 本文件
+├── _data/               # 数据文件（教育背景、工作经历、技能等）
+├── _includes/           # 可复用组件（head/header/footer）
+├── _layouts/            # 页面布局（default/note）
+├── _notes/              # 学习笔记（Markdown 集合）
+├── notes/               # 笔记列表页
+├── assets/
+│   ├── css/             # 主样式表
+│   ├── js/              # 交互脚本
+│   └── images/          # 图片资源（含 notes/ 配图目录）
+└── index.md             # 主页（个人简历）
 ```
 
-## 🎨 自定义样式
-
-所有样式都在 `assets/css/main.scss` 中。你可以修改 CSS 变量来改变配色：
-
-```scss
-:root {
-  --color-primary: #2563eb;      // 修改主色调
-  --color-text: #1e293b;         // 修改文字颜色
-  --color-bg-alt: #f8fafc;       // 修改背景色
-}
-```
-
-## 📝 添加博客文章（可选）
-
-如果你想添加博客功能：
-
-1. 创建 `_posts` 目录
-2. 创建文章文件，命名格式：`YYYY-MM-DD-标题.md`
-3. 添加 front matter：
-
-```markdown
----
-layout: post
-title: "文章标题"
-date: 2024-01-15
-categories: [技术]
-tags: [jekyll, 教程]
----
-
-文章内容...
-```
-
-## 📄 生成 PDF 简历
-
-网站已优化打印样式，你可以：
-1. 在浏览器中打开网站
-2. 按 `Ctrl+P`（或 `Cmd+P`）
-3. 选择"另存为 PDF"
-4. 隐藏页眉页脚，保存为 PDF 格式简历
-
-## 🛠️ 技术栈
+## 技术栈
 
 - [Jekyll](https://jekyllrb.com/) - 静态网站生成器
 - [GitHub Pages](https://pages.github.com/) - 免费托管
 - [SCSS](https://sass-lang.com/) - CSS 预处理器
 - [Liquid](https://shopify.github.io/liquid/) - 模板语言
 
-## 📄 许可证
+## 许可证
 
-MIT License - 自由使用和修改
-
-## 💡 提示
-
-- 修改完成后，GitHub Pages 需要 1-2 分钟来构建和部署
-- 如果样式没有更新，尝试清除浏览器缓存
-- 遇到问题可以查看 [GitHub Pages 文档](https://docs.github.com/cn/pages)
-
----
-
-**祝求职顺利！** 🎉
+MIT License
