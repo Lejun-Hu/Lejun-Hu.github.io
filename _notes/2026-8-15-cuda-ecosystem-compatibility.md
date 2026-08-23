@@ -1,7 +1,7 @@
 ---
 title: "【未完成】CUDA软件栈全路径拆解与国产AI芯片生态兼容深度分析"
 permalink: /notes/cuda-ecosystem-compatibility/
-date: 2026-08-20
+date: 2026-08-23
 category: "AI芯片软件栈"
 tags: ["CUDA", "GPU软件栈", "PTX", "算子编译器", "DSA", "GPGPU", "华为CANN", "昇腾", "Google TPU", "摩尔线程MUSA", "国产AI芯片", "PyTorch", "cuBLAS", "NCCL", "Triton"]
 description: "从PyTorch框架调用到GPU硬件执行，逐层拆解CUDA软件栈的完整编译与执行链路；分析GPGPU与DSA两种架构路线在兼容CUDA生态时的工作量差异与技术权衡；以华为昇腾CANN（DSA）、Google TPU（DSA自主生态）和摩尔线程MUSA（GPGPU）为案例，详解各厂商的软件栈实现与开发者迁移路径。"
@@ -910,6 +910,12 @@ GE（Graph Engine）是 CANN 中最具特色的组件，它同时扮演了 CUDA 
 
 所以准确地说，**"几乎不需要代码改动"指的是用户代码层**；而在库这一层，昇腾做了完整的一套 CUDA 生态替代，只是这套替代对上层完全透明。这也是昇腾"有限兼容"策略的精髓——把兼容工作放在框架适配层（`torch_npu`）和算子库层，从而让应用开发者的迁移成本趋近于零。
 - **CUDA Graphs 的角色**：GE 支持**图下沉（Graph Sinking）**——将整个优化后的计算图一次性下发到 NPU，NPU 侧自主完成所有执行，Host 仅等待最终结果。由于 NPU 的静态调度特性，图下沉能彻底消除 Host-Device 间的来回交互。
+
+  这里需要解释一下"图下沉"的含义，以及它与 CUDA 的关系。所谓图下沉，可以理解为：把整个模型的计算图（包含所有算子、算子间的依赖关系、内存布局）作为一个整体，**一次性下发到 Device（NPU）侧**；此后 Host 侧只需要下发一条"执行"指令，Device 就自主地按图内依赖调度、依次执行所有算子，期间无需 Host 逐个算子地下发指令，Host 只需在最后等待最终结果。这正是你理解的那个意思——"全部计算图一次性下发到设备侧，设备自行调度，Host 仅等结果"。
+
+  需要特别说明的是，"图下沉"这个思想**并非 CANN 独有**——CUDA 生态里也有对应的机制，就是 §1.8 讲的 **CUDA Graphs**：通过 `cudaGraphLaunch` 一次性把整张 kernel 依赖图提交给 GPU，GPU 自主按依赖调度执行，消除反复提交的开销。两者在概念上高度等价，只是叫法不同（CUDA 叫 CUDA Graph，昇腾叫图下沉/模型下沉）。
+
+  但两者也存在重要差异，根源在于硬件架构：**CUDA Graph 在 NVIDIA GPU 上是"可选优化"**——GPGPU 的动态调度能力允许开发者不用 CUDA Graph、直接 eager 逐 kernel 下发也能跑（只是性能差一些）。**而昇腾的图下沉更接近"天然形态"**——因为达芬奇 DSA 架构是静态调度，本来就需要编译器提前规划好整张图的执行计划，所以图下沉对昇腾而言不仅是优化，更是与硬件特性深度契合的默认执行方式，下沉的"彻底程度"也更高（整图在 Device 侧完全自主，几乎不依赖 Host）。
 
 **第三层：Ascend C → CUDA C++ Kernel 编程**
 
