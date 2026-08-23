@@ -1,5 +1,5 @@
 ---
-title: "【未完成】CUDA软件栈全路径拆解与国产AI芯片生态兼容深度分析"
+title: "CUDA软件栈全路径拆解与国产AI芯片生态兼容深度分析"
 permalink: /notes/cuda-ecosystem-compatibility/
 date: 2026-08-23
 category: "AI芯片软件栈"
