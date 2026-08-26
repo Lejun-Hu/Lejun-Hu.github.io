@@ -75,6 +75,63 @@ NCCL 库:  libnccl.so → ncclAllReduce(...)
    >
    > **Communicator（通信器，`ncclComm_t`）**：可以理解为"一次集合通信的参与范围 + 所有相关状态"的集合体。它记录了这次通信包含哪些 rank（进程/GPU）、它们之间已经建好的连接、拓扑信息、缓冲区等。只有**在同一个 communicator 里的 rank 才能互相通信**。它的创建（`ncclCommInitRank`）比较昂贵，所以框架会尽量复用，而不是每次通信都重新建一个——这正是 `ProcessGroupNCCL` 要"管理 communicator 的创建与复用"的原因。
    >
+   > 可以这样类比：一个 communicator 就是**一个"通信域"**。这个域里所有 rank 的地位是平等的、彼此可达的，域外的 rank 则无法参与进来。但要注意，**并不是"一个通信域只能有一个通信器"**——恰恰相反，同一个进程（GPU）可以同时属于多个 communicator。例如：8 卡做数据并行需要"全体 8 卡的 communicator"，同时每 2 卡之间又要做张量并行需要"局部 2 卡的 communicator"，这两个 communicator 可以并存，互不干扰。更准确的说法是：**每一次集合通信操作，必须在"某一个确定的 communicator"上进行，所有参与者拿到的必须是"同一个 communicator"**——这是它们能正确协作的前提。
+   >
+   > 那么这个 communicator 里到底存了什么？NCCL 源码里 `ncclComm` 结构体（定义于 `src/include/comm.h:523`）就是它的真身，字段非常多，我们挑几组最有代表性的来看：
+
+```cpp
+// src/include/comm.h:523-797（节选，保留关键字段并加上注释）
+struct ncclComm {
+  // ---- 拓扑信息：这个通信域的基本盘 ----
+  struct ncclTopoSystem* topo;              // 整个通信域的硬件拓扑图（GPU/NVLink/PCIe/NIC 等节点与链路）
+  struct ncclTopoGraph graphs[NCCL_NUM_ALGORITHMS]; // 各算法（Ring/Tree/CollNet/NVLS）算出的通信图
+  struct ncclPeerInfo* peerInfo;             // 每个 rank 的信息（GPU UUID、busId、hostHash 等）
+
+  // ---- 网络与传输插件 ----
+  ncclNet_t* ncclNet;                        // 网络插件接口（RDMA 网卡等）
+  void* netContext;                          // 网络上下文
+  void* ginContext;                          // GIN（GPU 直接发起网络）上下文
+  ncclCollNet_t* ncclCollNet;                // 网内计算（SHARP）插件接口
+
+  // ---- 我在这个域里的身份 ----
+  int rank;      // 我在 communicator 里的编号
+  int nRanks;    // communicator 里一共有多少个 rank
+  int cudaDev;   // 我对应的 CUDA 设备号
+  int nvmlDev;   // 我对应的 NVML 设备号
+  int compCap;   // 我这块 GPU 的计算能力（compute capability）
+  int64_t busId; // 我的 PCI bus ID
+
+  // ---- 节点/本地视角 ----
+  int node;           // 我在哪个节点
+  int nNodes;         // 一共多少个节点
+  int localRank;      // 我在本节点内的编号
+  int localRanks;     // 本节点内有多少个 rank
+
+  // ---- 通道与缓冲区 ----
+  struct ncclChannel channels[MAXCHANNELS];  // 并行通信通道（每个 channel 承载一条 Ring/Tree 连接）
+  int nChannels;                             // 实际使用的 channel 数
+  int buffSizes[NCCL_NUM_PROTOCOLS];         // 各协议（LL/LL128/Simple）的缓冲区大小
+
+  // ---- 算法/协议选择用的调优数据 ----
+  float latencies[NCCL_NUM_FUNCTIONS][NCCL_NUM_ALGORITHMS][NCCL_NUM_PROTOCOLS];   // 延迟表
+  float bandwidths[NCCL_NUM_FUNCTIONS][NCCL_NUM_ALGORITHMS][NCCL_NUM_PROTOCOLS];  // 带宽表
+
+  // ---- 设备侧与内核调度 ----
+  struct ncclKernelComm* devComm;            // 设备侧（GPU 可见的）communicator
+  void* workFifoBuf;                         // Work FIFO：CPU 向 GPU 内核下发任务的队列
+  struct ncclKernelPlanner planner;          // 任务调度器
+
+  // ---- 杂项 ----
+  uint64_t commHash;                         // 该通信域的唯一标识哈希
+  ncclConfig_t config;                       // 用户配置（超时、阻塞模式等）
+  ...
+};
+```
+
+   > 读这段代码时，你可以抓住一条主线：**`ncclComm` 就是"一次通信所需的全部上下文"的容器**——它既记录了"我是谁、我在哪"（`rank`/`nRanks`/`node`/`busId`），也记录了"这个域的硬件长什么样"（`topo`/`graphs`），还记录了"数据怎么搬"（`channels`/`buffSizes`/`planner`/`workFifoBuf`）。后面讲初始化流程时，你会看到这个结构体是**一步步被填充起来**的——先建 bootstrap、再 AllGather 交换 peerInfo、再算拓扑和图、再建连接，最后才是一个"可用"的 communicator。
+   >
+   > 顺带一提，`ncclComm` 的首尾两个字段 `startMagic` 和 `endMagic` 是"魔数哨兵"（`comm.h:524` 与 `comm.h:796`），用于在内存越界或结构体被误用（比如传错了指针类型）时快速发现问题。
+   >
    > **CUDA Stream（流，`cudaStream_t`）**：是 GPU 上任务执行的"队列"。同一流里的操作按顺序执行，不同流里的操作则可以并行。把通信操作放到哪个流上，决定了它相对计算操作是"串行等待"还是"并行重叠"。`ncclAllReduce` 的最后一个参数就是 stream，NCCL 会把通信内核"入队"到这个流上，从而与计算在正确的先后顺序下协调执行。理解了这两个概念，后文看源码时对 `comm` 和 `stream` 这两个反复出现的参数就不会再陌生了。
 
 3. **NCCL C API**：`ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream)`。看到这个签名你就明白了——NCCL 不关心张量形状、不关心梯度，它只关心"从哪块内存搬到哪块内存、多少字节、什么归约操作、在哪个 CUDA 流上执行"。
