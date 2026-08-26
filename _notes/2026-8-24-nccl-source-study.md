@@ -71,6 +71,10 @@ NCCL 库:  libnccl.so → ncclAllReduce(...)
    - 管理 NCCL communicator（`ncclComm_t`）的创建与复用；
    - 处理 CUDA stream 的同步（确保通信和计算在同一流上有正确的先后关系）。
 
+3. **NCCL C API**：`ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream)`。看到这个签名你就明白了——NCCL 不关心张量形状、不关心梯度，它只关心"从哪块内存搬到哪块内存、多少字节、什么归约操作、在哪个 CUDA 流上执行"。
+
+   > 你可以去 PyTorch 源码里验证：在 `ProcessGroupNCCL.cpp` 里搜 `ncclAllReduce(`，会看到 `allreduce` 相关的函数里直接调用了它，把 `tensor.data_ptr()` 作为 `sendbuff`/`recvbuff` 传进去。
+
    > 上面提到了两个初学者容易混淆、却又贯穿 NCCL 全程的概念，这里单独解释一下：
    >
    > **Communicator（通信器，`ncclComm_t`）**：可以理解为"一次集合通信的参与范围 + 所有相关状态"的集合体。它记录了这次通信包含哪些 rank（进程/GPU）、它们之间已经建好的连接、拓扑信息、缓冲区等。只有**在同一个 communicator 里的 rank 才能互相通信**。它的创建（`ncclCommInitRank`）比较昂贵，所以框架会尽量复用，而不是每次通信都重新建一个——这正是 `ProcessGroupNCCL` 要"管理 communicator 的创建与复用"的原因。
@@ -144,9 +148,7 @@ struct ncclComm {
    >
    > **CUDA Stream（流，`cudaStream_t`）**：是 GPU 上任务执行的"队列"。同一流里的操作按顺序执行，不同流里的操作则可以并行。把通信操作放到哪个流上，决定了它相对计算操作是"串行等待"还是"并行重叠"。`ncclAllReduce` 的最后一个参数就是 stream，NCCL 会把通信内核"入队"到这个流上，从而与计算在正确的先后顺序下协调执行。理解了这两个概念，后文看源码时对 `comm` 和 `stream` 这两个反复出现的参数就不会再陌生了。
 
-3. **NCCL C API**：`ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream)`。看到这个签名你就明白了——NCCL 不关心张量形状、不关心梯度，它只关心"从哪块内存搬到哪块内存、多少字节、什么归约操作、在哪个 CUDA 流上执行"。
 
-   > 你可以去 PyTorch 源码里验证：在 `ProcessGroupNCCL.cpp` 里搜 `ncclAllReduce(`，会看到 `allreduce` 相关的函数里直接调用了它，把 `tensor.data_ptr()` 作为 `sendbuff`/`recvbuff` 传进去。
 
 **所以，"不同库承担的角色"可以这样概括：**
 
