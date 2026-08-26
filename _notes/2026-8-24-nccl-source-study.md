@@ -94,7 +94,7 @@ struct ncclComm {
   // ---- 网络与传输插件 ----
   ncclNet_t* ncclNet;                        // 网络插件接口（RDMA 网卡等）
   void* netContext;                          // 网络上下文
-  void* ginContext;                          // GIN（GPU 直接发起网络）上下文
+  void* ginContext;                          // GIN 上下文（详见下方首次解释）
   ncclCollNet_t* ncclCollNet;                // 网内计算（SHARP）插件接口
 
   // ---- 我在这个域里的身份 ----
@@ -131,6 +131,12 @@ struct ncclComm {
   ...
 };
 ```
+
+   > **第一次出现 GIN，这里先解释一下**：GIN 全称 **GPU Initiated Network**，直译是"由 GPU 发起的网络通信"。它要解决的是传统通信里的一个痛点——**通信必须由 CPU（host）来"牵头"**：GPU 算完后，得先让 CPU 知道"算完了"，再由 CPU 去提交网络请求，中间有多次 CPU↔GPU 的同步和调度开销。
+   >
+   > GIN 的思路则反过来：**让 GPU 内核里的线程自己直接发起网络操作**（比如 `put` 把数据写到远程、`get` 从远程读、`signal` 发信号），全程不需要 CPU 参与。这样通信的触发点就从"CPU 调度"下沉到了"GPU 内核内部"，能够实现更细粒度的计算-通信重叠。
+   >
+   > 你可以在脑中先建立一个粗浅的印象：**传统路径是"CPU 下发通信任务"，GIN 路径是"GPU 自己发起通信"**。上面 `ncclComm` 里的 `ginContext` 字段，就是 GIN 所需的上下文句柄。至于 GIN 具体怎么工作、有哪些后端（GPI/GDAKI/Proxy），我们在第 0.4 节会先做个概念性收尾，到第四部分"GIN 详解"再完整展开。
 
    > 读这段代码时，你可以抓住一条主线：**`ncclComm` 就是"一次通信所需的全部上下文"的容器**——它既记录了"我是谁、我在哪"（`rank`/`nRanks`/`node`/`busId`），也记录了"这个域的硬件长什么样"（`topo`/`graphs`），还记录了"数据怎么搬"（`channels`/`buffSizes`/`planner`/`workFifoBuf`）。后面讲初始化流程时，你会看到这个结构体是**一步步被填充起来**的——先建 bootstrap、再 AllGather 交换 peerInfo、再算拓扑和图、再建连接，最后才是一个"可用"的 communicator。
    >
