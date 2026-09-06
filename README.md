@@ -28,8 +28,10 @@
 
 ### 集合通信与网络
 
-- [ ] NCCL 源码精读：Ring/Tree 搜索算法、Channel 与 Connector 机制、协议选择（LL/LL128/Simple）
-- [ ] NCCL 传输层深入：P2P/SHM/NET 三种 Transport 的连接建立与数据路径
+- [ ] NCCL 源码精读1：Ring/Tree 搜索算法、Channel 与 Connector 机制、协议选择（LL/LL128/Simple）
+- [ ] NCCL 源码精读2：P2P/SHM/NET 三种 Transport 的连接建立与数据路径
+- [ ] DeepEP 源码精读：对NCCL的依赖以及创新
+- [ ] 集合通信算法与拓扑实现的基础量化分析，例如各种allreduce 实现的开销以及BUF(Bandwidth Utilization Factor)
 - [ ] GIN（GPU Initiated Network）机制详解与国产芯片适配
 - [ ] RDMA / InfiniBand / RoCEv2 协议栈与 Verbs 编程
 - [ ] 在网计算（SHARP / CollNet）的原理与实现
