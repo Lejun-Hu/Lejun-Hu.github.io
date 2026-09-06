@@ -1,5 +1,5 @@
 ---
-title: "【未完成】NCCL 源码学习笔记"
+title: "【未完成】NCCL 与 DeepEP 源码学习笔记"
 permalink: /notes/nccl-source-study/
 date: 2026-09-20
 category: "集合通信"
