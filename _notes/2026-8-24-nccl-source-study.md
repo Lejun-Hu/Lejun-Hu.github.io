@@ -253,11 +253,80 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 | `src/param/` | 参数系统（环境变量注册与解析） |
 | `src/register/` | 缓冲区注册（集合通信和 SendRecv） |
 | `src/devcomm/` | 多版本设备通信结构体定义（v22902/v22907/v23000） |
-| `bindings/` | 多语言绑定 |
+| `bindings/` | 多语言绑定（详见 1.2 节） |
 | `nccl.h.in` | 公共 API 头文件模板 → `nccl.h` |
 | `CMakeLists.txt` | 构建系统入口 |
 
-### 1.2 src/ 核心源码详解
+### 1.2 src 之外：仓库顶层的其他目录
+
+在聚焦 `src/` 之前，先把 `src/` **同级**的其他目录过一遍，这样你对整个仓库才有一个完整的版图。这些目录大多不参与 `libnccl` 核心库的构建，但各有各的职责：
+
+**`bindings/` —— 对外的语言桥接层**
+
+目的是让非 C/C++ 的开发者也能调用 NCCL：
+
+| 子目录 | 作用 |
+|--------|------|
+| `nccl4py/` | **官方新一代 Python 绑定（核心）**。内部用 Cython 的 `.pyx`/`.pxd` 文件把 NCCL 的 C 接口封装成 Python 可调用的模块，再往上提供纯 Python 的 `core/`、`ep/` 等封装，其中 `ep` 对应端到端集合通信场景。这是当前官方最活跃、最推荐的 Python 接入方式，用来替代老的 nccl-python |
+| `ir/` | 存放 `nccl_device_wrapper.h` 等头文件（含 `clang_compat/`），作用是对设备端（device-side）接口做 Clang 编译兼容与包装，让主机端能顺利把设备端内核代码编译出来——本质是**编译器适配层**，不是给用户直接调用的 API |
+
+**`contrib/` —— 社区贡献与实验性项目**
+
+这些项目默认**不会被编进 `libnccl` 核心库**，每个子目录都有自己的 `Makefile` 和 `README`，需要单独编译使用：
+
+| 子目录 | 内容 |
+|--------|------|
+| `custom_algos/` | 自定义算法示例：教你用 NCCL 设备端 API 手写 allreduce、alltoall 等内核，附性能图，适合想深入设备端编程的开发者 |
+| `nccl_ep/` | 低延迟通信 endpoint 架构的实验，含独立的设备内核、测试和 benchmark |
+| `nccl_ubx/` | 在 nccl4py 之上再包一层更易用的 Python API，带 C++ 内核、bench 和测试 |
+| `nccl_m2n/` | 跨 GPU 组（cross-group）数据搬运的独立实验库，核心是 **reshard**（数据重排）：把全局张量在两个不相交的 GPU 进程组之间重新分布，基于 NCCL 的 user-window API（`ncclWindow_t` + `ncclMemAlloc`），实现零拷贝、单边（one-sided）传输 |
+| `nccl_checkpoint/` | 检查点 KV-store 客户端（`kv_store_client.cc`），用于保存和恢复 NCCL 运行状态 |
+
+> 可以把 `contrib/` 整体理解为"与 NCCL 相关的周边实验项目"——不参与核心库构建，但展示了 NCCL 能力的多种扩展方向。
+>
+> ⚠️ 一个容易踩的坑：网上部分资料把上面"跨 GPU 数据重排"的项目写成 `nccl_xfer/`，但本仓库里**实际目录名是 `nccl_m2n/`**（M2N 即 many-to-n / 跨组搬运）。功能描述没错，目录名以源码为准。
+
+**`plugins/` —— 插件化扩展点（2.17 起正式引入）**
+
+存放每种插件的接口头文件和参考示例，每个子目录都包含一个可编译的最小插件 `example/` 以及一组版本化的 `.h` 接口：
+
+| 子目录 | 插件类型 |
+|--------|----------|
+| `net/` | 网络插件：自定义 RDMA 或其他网络后端，接口从 `net_v2` 演进到 v12 |
+| `tuner/` | 调优插件：替换 NCCL 默认的算法和带宽选择策略 |
+| `profiler/` | 性能剖析插件：官方提供 inspector 实现，可把性能数据导出 JSON 或推送 Prometheus/Grafana 监控 |
+| `env/` | 环境变量插件：自定义环境变量的读取逻辑 |
+| `mixed/` | 混合插件示例：展示多种插件能力如何协同 |
+| `gin/` | GIN（GPU Initiated Networking）插件：对应 GPU 主动发起网络通信的场景 |
+
+这些插件的共同特点是：**用户不需要修改 NCCL 核心代码**，只要编译自己的动态库并在运行时加载，就能扩展 NCCL 的行为。
+
+**`docs/` —— 完整文档体系**
+
+| 子目录 | 内容 |
+|--------|------|
+| `userguide/` | Sphinx 用户手册源码：API 参考、环境变量说明、使用教程、故障排查指南，是查阅官方文档的源头 |
+| `examples/` | 从基础到高级的可运行示例，编号 `01`~`07`：通信器创建、点对点、集合通信、缓冲区注册、对称内存、设备端 API、内核融合，每个示例都提供 C 和 Python 两套版本 |
+| `dev_guide/` | 开发者规范（主要是代码风格约定） |
+| `contrib/` | GIN 等技术文档，补充核心手册之外的设计细节 |
+
+**`makefiles/` 与 `cmake/` —— 两套并行的构建体系**
+
+- `makefiles/`：NCCL 手写 Makefile 体系的核心片段，`src/` 里的 Makefile 会通过 `include` 引入。`common.mk`（通用编译规则）、`version.mk`（版本号）、`formatting.mk`（代码格式化）、`examples.mk`（编译示例）。
+- `cmake/`：`NCCLConfig.cmake.in`——下游项目用 `find_package(NCCL)` 查找 NCCL 时，CMake 基于这个模板生成配置文件。
+- 根目录同时存在 `CMakeLists.txt` 和 `Makefile`，说明 NCCL 维护着**老的 Makefile 体系**和**新的 CMake 体系**两套并行构建入口。
+
+**`pkg/` —— 打包发行**
+
+`debian/`、`redhat/`、`srctxz/`、`txz/` 分别用来生成 `.deb`、`.rpm`、`.tar.xz` 源码包或二进制包，`python_wheel/` 用来生成可 `pip install` 的 Python wheel。这些目录里包含 `*.spec.in`、`control.in`、`*.install.in` 等打包模板，配合发行版打包工具使用。
+
+**`maint/`、`.github/` 与根目录文件**
+
+- `maint/`：维护和开发工具目录，主要是 `run-clang-format.sh`（批量格式化代码，配合根目录 `.clang-format` 使用）。
+- `.github/`：GitHub 相关的 PR 模板和 Issue 模板，属仓库协作层面配置，不参与构建。
+- 根目录散落文件：`README.md`、`LICENSE.txt`、`ThirdPartyNotices.txt`、`CONTRIBUTING.md` 提供说明与许可证信息，`Makefile`/`CMakeLists.txt` 是构建入口，`.clang-format` 是代码风格配置。
+
+### 1.3 src/ 核心源码详解
 
 | 文件 | 执行位置 | 功能 |
 |------|----------|------|
@@ -290,7 +359,7 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 | `graph/xml.cc` | Host | XML 拓扑解析（NVML 导出） |
 | `graph/tuning.cc` | Host | Tuner 集成 |
 
-### 1.3 include/ 头文件组织
+### 1.4 include/ 头文件组织
 
 | 路径 | 内容 |
 |------|------|
@@ -314,7 +383,7 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 | `include/compiler/` | 编译器适配（GCC/MSVC） |
 | `include/os/` | 操作系统适配 |
 
-### 1.4 关键数据结构总览
+### 1.5 关键数据结构总览
 
 **`ncclComm`**（定义于 `src/include/comm.h:523-797`）是 NCCL 中最重要的数据结构，包含：
 
