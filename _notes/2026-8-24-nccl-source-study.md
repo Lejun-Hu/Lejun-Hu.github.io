@@ -511,6 +511,62 @@ NCCL 提供了四种实例，分别对应四类链路：
 >        └─ peers[其他] ──→ ncclChannelPeer（空，未建连接）
 >             └─ send[2] / recv[2]   // connector（connIndex 0=集合通信，1=点对点）
 > ```
+>
+> **补充：Tree 算法的邻居用 `up`（父）和 `down[]`（子）体现，而不是 prev/next。** `ncclTree`（`device.h:193-197`）的结构是：
+>
+> ```c
+> struct ncclTree {
+>   int depth;
+>   int up;                        // 父节点（1 个）
+>   int down[NCCL_MAX_TREE_ARITY]; // 子节点数组（最多 3 个）
+> };
+> ```
+>
+> - Ring 是"线性环"：每个 rank 固定 2 个邻居 `prev`（前驱）+ `next`（后继）；
+> - Tree 是"树"：每个 rank 有 **1 个 `up`（父）** + **最多 3 个 `down`（子）**。`up`/`down[]` 里存的是 rank 编号，`-1` 表示"没有该邻居"（树根 `up=-1`，叶子 `down=-1`）。
+>
+> 所以落到 `peers` 数组上，Tree 算法里"真正有连接的格子"是 `peers[up]` 和 `peers[down[0..2]]`，其余是空的。
+>
+> 为什么 `down` 最多是 3 个？这源于 NCCL Tree 的**两层结构**——它其实是"节点间二叉树 + 节点内链"的组合：
+>
+> - **节点间层（走网络，慢）**：把每个节点（机器）抽象成一个"虚拟节点"，节点之间组成**二叉树**（每个节点最多 2 个跨节点子节点）。用二叉树是为了把网络跳数压到 O(log N)。
+> - **节点内层（走 NVLink，快）**：同一节点里的多个 GPU 被排成一条**链**，链上每个 GPU 的 `down[0]` 存"链上的下一个 GPU"、`up` 存"链上的上一个"（见 `connect.cc:61-62`）。
+>
+> 所以 `down` 数组 3 个槽位的分工是：`down[0]` = 节点内链的下一个 GPU（NVLink），`down[1]` / `down[2]` = 跨节点的 2 个子节点（网络）。这就是 `all_reduce.h:96` 注释 "binary tree + local" 的确切含义——**二叉树（2 个跨节点子）+ 本地（1 个节点内链的下一个）**。
+>
+> ```text
+> 跨节点（二叉树，走网络）：
+>         [节点A] ← 树根
+>          ├─ down[1] ─▶ [节点B]
+>          └─ down[2] ─▶ [节点C]
+>
+> 节点内（链，走 NVLink），以节点A为例：
+>    rank0 ─down[0]─▶ rank1 ─down[0]─▶ rank2 ─down[0]─▶ rank3
+>    (链头，同时承担跨节点的 down[1]/down[2])
+> ```
+>
+> 一个容易误解的点：**不是"每个节点只有一个 GPU 参与树"**。恰恰相反——节点内**所有 GPU** 都参与树形结构，只是通过"节点内链"参与；跨节点的二叉树，才由**链头（head）这一个 GPU** 代表整个节点参与。于是 `down` 数组要同时容纳两种连接：
+>
+> - `down[0]`（节点内链）：链上**每个非尾部 GPU** 都用到；
+> - `down[1]` / `down[2]`（跨节点子）：**只有链头**用到（且仅当它不是叶子）。
+>
+> 以"2 节点 × 4 GPU"（rank0~3 在节点 A，rank4~7 在节点 B，rank0/rank4 为链头）为例，每个 rank 的 `down` 数组实际填的是：
+>
+> | rank | 角色 | `down[0]` | `down[1]`/`down[2]` |
+> |------|------|-----------|---------------------|
+> | rank0 | 链头 + 树根 | rank1（节点内） | rank4（跨节点子） |
+> | rank1 | 链中 | rank2 | -1 |
+> | rank2 | 链中 | rank3 | -1 |
+> | rank3 | 链尾 | -1 | -1 |
+> | rank4 | 链头 + 叶子 | rank5 | -1 |
+> | rank5~6 | 链中 | 下一个 | -1 |
+> | rank7 | 链尾 | -1 | -1 |
+>
+> 可以看到：`down[0]` 是"链上几乎人人都有"的槽位，`down[1]`/`down[2]` 是"链头专属"的槽位。所以 3 个槽位不是"多给某个节点留的"，而是**节点内链（1 个）和节点间二叉树（2 个）两种层次的连接必须共存于同一个 `down` 数组**。
+>
+> 而树根的上限 `NCCL_MAX_TREE_ARITY_TOP = 2`（比内部节点少 1），是因为 NCCL 用的是 Double Binary Tree（双树）：每棵树的根只有 1 个跨节点子（+1 节点内 = 2），内部节点才有 2 个跨节点子（+1 节点内 = 3）。
+>
+> 连接建立时（`ncclTransportTreeConnect`，`generic.cc:55-58`），Tree 是"recv 来自 `down[]`（最多 3 个子）+ send 给 `up`（1 个父）"，再反向一套；而 Ring（`ncclTransportRingConnect`，`generic.cc:26`）是"recv 来自 `prev` + send 给 `next`"。
 
 > 到这里，完整的层次链就补全了：**`ncclComm`（通信域）→ `ncclChannel`（并行通道）→ `ncclConnector`（对某个 peer 的具体连接）→ `ncclTransport`（该连接走的传输层）**。Channel 负责"逻辑上谁连谁"，Connector 负责"物理上怎么连"，Transport 负责"连上之后怎么搬"。
 >
