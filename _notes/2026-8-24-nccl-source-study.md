@@ -336,7 +336,7 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 | `enqueue.cc`（144KB） | Host | 集合操作入队：`ncclEnqueueCheck`、Kernel Plan 构建、Work Batch 组装、算法/协议选择 |
 | `group.cc`（34KB） | Host | Group 操作：`ncclGroupStart/End`、异步任务管理、Preconnect |
 | `collectives.cc`（16KB） | Host | 所有集合操作 API 入口：AllReduce、AllGather、ReduceScatter、Broadcast、SendRecv、RMA 等 |
-| `proxy.cc`（84KB） | Host | Proxy 线程机制：负责 Host 侧数据搬运（Network → GPU / SHM → GPU） |
+| `proxy.cc`（84KB） | Host | Proxy 线程机制：当 GPU 无法直接驱动网卡/CPU 拷贝时，由 Host 侧常驻线程代劳完成数据搬运（详见 5.2 节） |
 | `transport.cc`（22KB） | Host | 传输层调度：`selectTransport`、`ncclTransportP2pConnect`、传输类型检查 |
 | `bootstrap.cc`（57KB） | Host | 带外 Bootstrap 机制：TCP Socket 通信，用于初始化阶段的 AllGather/Barrier |
 | `channel.cc`（9KB） | Host | Channel 初始化与释放 |
@@ -875,26 +875,44 @@ Progress 线程的启停由 `ginState->ginProgress` 状态控制：`0`（暂停�
 
 ### 5.2 Proxy 机制
 
-Proxy 是 NCCL 中负责 Host 侧数据搬运的线程机制（`src/proxy.cc`）。
+先正面回答一个常见疑问：**Proxy 是不是"本卡 GPU 为了通过 Host 侧网卡发消息的一个交互"？** —— 你的直觉方向是对的，但可以更精确地说：
+
+> **Proxy 的本质是"代劳"**：当 GPU **无法直接驱动某个硬件链路**时（典型是跨节点的 RDMA 网卡、同机 SHM 的 CPU 拷贝），NCCL 在 Host 侧拉起一个**常驻线程（proxy 线程）**，由它来"代理"完成那部分物理搬运。GPU 内核负责"算好数据 + 标记就绪"，Proxy 线程负责"真正把数据经网卡/CPU 搬走或搬进来"。
 
 **为什么需要 Proxy：**
 
-- NET transport 不支持 GPU 直接发起 RDMA 操作（不使用 GIN 时）
-- SHM transport 需要通过 CPU 在共享内存和 GPU 之间拷贝数据
-- CollNet transport 需要在 Host 侧管理网内计算资源
+- **NET transport（跨节点 RDMA）**：传统路径下 GPU 不能直接写网卡发送队列（doorbell），必须由 CPU 通过网卡驱动发起 `isend`/`irecv`；
+- **SHM transport**：需要通过 CPU 在共享内存和 GPU 显存之间做 `memcpy`；
+- **CollNet transport**：需要在 Host 侧管理网内计算（SHARP）资源。
 
-**Proxy 工作模式：**
+（补充一句：有了 GIN 之后，NET 场景下 GPU 才能直接发起网络操作，从而绕开 Proxy——这正是前面第 0.4 节和第四部分讲 GIN 时的对比点。Proxy 和 GIN 本质上是"谁发起网络操作"的两种答案。）
 
-1. 设备端 Kernel 将数据传输描述写入 Proxy Queue（共享内存或设备内存）
-2. Host 侧 Proxy 线程轮询 Queue，取出操作描述符
-3. 根据 `ncclPattern_t`（Ring/Tree/CollNet 等）选择合适的执行路径
-4. 调用 `transportComm->proxyProgress` 完成实际数据搬运
+**两侧代码各在哪（这是理解 Proxy 的关键）：**
 
-**关键数据结构：**
+Proxy 是一个典型的 **Host/Device 协作机制**，两侧代码分布如下：
 
-- `ncclProxyOp`（`src/include/proxy.h:73-100`）：单个 Proxy 操作描述符，含数据指针、大小、模式、Channel ID 等
-- `ncclProxyArgs`：一批 Proxy 操作参数，传递给 Proxy 线程
-- `ncclProxyState`：Proxy 全局状态，含线程管理、连接表
+| 侧 | 文件 | 具体职责 |
+|----|------|----------|
+| **Host 侧**（proxy 线程） | `src/proxy.cc` | Proxy 线程主体：`ncclProxyProgress`（`proxy.cc:954`，线程主循环）、`progressOps`（`proxy.cc:801`）、`ncclProxyGetPostedOps`（`proxy.cc:835`）——轮询 op 队列并推进 |
+| Host 侧 | `src/transport/net.cc` | NET 的 proxy 实现：`sendProxyProgress`（`net.cc:1304`）、`recvProxyProgress`（`net.cc:1470`），真正调用 net plugin 的 `isend`/`irecv` |
+| Host 侧 | `src/transport/shm.cc` | SHM 的 proxy 实现：CPU `memcpy` 搬运 |
+| Host 侧 | `src/include/proxy.h` | 核心数据结构：`ncclProxyOp`（`proxy.h:73`）、`ncclProxyArgs`（`proxy.h:185`）、`ncclProxyState`（`proxy.h:333`）、`ncclProxyOpsPool`（`proxy.h:229`） |
+| **Device 侧**（GPU kernel） | `src/device/prims_simple.h` | 集合内核里更新 fifo 进度标记，例如 `peerPtr->send[connIndex].step += steps; st_relaxed_sys_global(...tail, ...)`（`prims_simple.h:307-308`） |
+| Device 侧 | `src/device/prims_ll.h` / `prims_ll128.h` | 同理，各协议内核里维护进度标记 |
+| Device 侧 | `src/include/comm.h` | 进度标记结构体：`ncclSendMem`（`comm.h:53`，含 `head`）、`ncclRecvMem`（`comm.h:67`，含 `tail`），就是 GPU 内核和 Proxy 线程之间"对话"用的共享内存 |
+
+**工作模式（以 NET 跨节点发送为例，串起上面两侧）：**
+
+1. **Device 侧**：GPU 内核把数据算好放进发送缓冲区，然后**写共享内存里的进度标记**（`ncclSendMem.head` / 对应 fifo 的 `step`），表示"这一块数据已经就绪，可以发了"；
+2. **Host 侧**：proxy 线程（`ncclProxyProgress`）**轮询**这些进度标记，发现新数据后，构造/取出 `ncclProxyOp`，走对应的 `proxyProgress`（NET 是 `sendProxyProgress`）；
+3. **Host 侧**：`sendProxyProgress` 调用 net plugin 的 `isend()`，把 GPU 缓冲区里的数据经 RDMA 网卡发出去；
+4. **接收侧反向**：对端 proxy 线程 `irecv()` 收数据到 GPU 接收缓冲区，更新 `ncclRecvMem.tail`；对端 GPU 内核轮询到 `tail` 前进后，才消费数据。
+
+**关键数据结构（Host 侧）：**
+
+- `ncclProxyOp`（`src/include/proxy.h:73`）：单个 Proxy 操作描述符，含连接指针、字节数、opCount、root 等；
+- `ncclProxyArgs`（`proxy.h:185`）：一批 Proxy 操作参数，带 `progress` 函数指针，传递给 Proxy 线程；
+- `ncclProxyState`（`proxy.h:333`）：Proxy 全局状态，含线程句柄、连接池、op 池等。
 
 Proxy 机制在 `ncclTransportP2pSetup` 完成后初始化（`ncclProxyInit`），其生命周期与通信器绑定。
 
