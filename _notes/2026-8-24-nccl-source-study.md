@@ -436,6 +436,14 @@ NCCL 的源码虽然庞大，但整个框架其实是**围绕少数几个核心�
 
 为什么一个通信器里要有**多个** Channel？答案是**并行**。一个集合操作的数据会被切成 `nChannels` 份，每个 Channel 独立负责其中一份——每个 Channel 对应一条 Ring 或 Tree 连接，并由独立的 CUDA CTA 并行执行（**CTA 即 Cooperative Thread Array，也就是我们常说的 block/线程块**——它是 CUDA 里线程调度的基本单元，一个 CTA 内的线程在同一个 SM 上协同工作）。Channel 越多，能同时搬运的数据块就越多，带宽利用就越充分（当然也受硬件限制，最大 `MAXCHANNELS`）。
 
+> **补充：Channel 是"逻辑通道"，不是物理链路绑定。** 一个 Channel 本身只包含"一条逻辑 Ring/Tree 连接 + 一份数据切片 + 一个 CUDA CTA"，它并不绑定某条具体物理链路——数据实际走 NVLink 还是 RDMA、走哪块网卡，是由每个连接（connector）的传输层和拓扑决定的。
+>
+> 那"切成多个 Channel 为什么就能并行、更快"？有两层原因：
+> 1. **GPU 侧并行**：一个 Channel 对应一个 CTA，只能占一个 SM；多个 Channel 就是多个 CTA 同时占多个 SM，把 GPU 的并行计算单元用满；
+> 2. **带宽叠加（更关键）**：单条 Ring 的吞吐受限于"环上最慢的一条链路"（比如单条 NVLink 端口、或单块网卡），而 GPU 总带宽远高于单条链路。用多条 Channel（多条并行的 Ring），每条走**不同的物理链路**（不同 NVLink 端口、不同网卡），带宽就能叠加，最终占满 GPU 总带宽。NCCL 源码里 `ncclTopoDupChannels`（`graph/search.cc:1036`）干的就是"把一条 Ring 复制成多条并行跑"。
+>
+> 至于"是不是对应不同的数据平面"——直觉接近，但不完全等同。Channel 的首要目的是 GPU 侧并行；只有跨节点多网卡时，多个 Channel 分散到**不同网卡（不同 rail）**上传输，才真正有"多数据平面"的意味。NCCL 里更贴近"物理数据平面/路径"的概念其实是 **rail**（`ncclTeamRail`，见本节 ① 里 Team 的说明）：每个 rail 对应一条网络路径（一块网卡），多个 Channel 可分布到多个 rail 上叠加多网卡带宽。
+
 它的核心字段：
 
 - `ncclRing ring` / `ncclTree tree`：这个 Channel 承载的 Ring / Tree 拓扑连接信息（即"我的上一跳是谁、下一跳是谁"）；
@@ -462,7 +470,67 @@ NCCL 提供了四种实例，分别对应四类链路：
 | `netTransport` | RDMA 网卡（InfiniBand / RoCE） | 跨节点 |
 | `collNetTransport` | 支持 SHARP 的交换机 | 跨节点大消息的网内计算 |
 
-> 到这里，三个结构体的关系就很清晰了：**一个 `ncclComm`（通信域）里挂着多个 `ncclChannel`（并行通道），每个 Channel 与各 peer 的连接又由某种 `ncclTransport`（传输层）来承载**。这个"Comm → Channel → Transport"的层次，就是 NCCL 的架构骨架。
+> **这四种实例在代码中的位置**：它们都是**全局的 `struct ncclTransport` 变量**，各自定义在对应的 transport 实现文件里——`p2pTransport` 在 `src/transport/p2p.cc:1466`、`shmTransport` 在 `src/transport/shm.cc:467`、`netTransport` 在 `src/transport/net.cc:2085`、`collNetTransport` 在 `src/transport/coll_net.cc:1867`（各自的 `name` 字段分别是 `"P2P"`/`"SHM"`/`"NET"`/`"COL"`），声明集中在 `src/include/transport.h:28-32`。
+>
+> 真正把它们"串起来"的是一个数组 `ncclTransports[]`（`src/transport.cc:15-18`），按优先级顺序注册：
+>
+> ```c
+> struct ncclTransport* ncclTransports[NTRANSPORTS + 1] = {
+>   &p2pTransport, &shmTransport, &netTransport, &collNetTransport,
+>   &profilerTransport // 仅用于创建轮询 profiler 计数器的 proxy op，并非真正的传输
+> };
+> ```
+>
+> 而"选哪一个"的逻辑在 `selectTransport`（`src/transport.cc:20-34`）：它遍历 `ncclTransports[]`，对每个 transport 调用 `canConnect` 判断两节点能否用这类链路，能用就选中，并把它填进 `connector->transportComm`。因为数组顺序是 P2P → SHM → NET → CollNet，所以这本质是一条**"优先 P2P，不行退 SHM，再不行 NET"的兜底链**——这正好和下面 ④ 讲的 connector 衔接起来：`selectTransport` 就是"给每个 connector 挑选 transport"的地方。
+
+#### ④ 连接器 `ncclConnector`：Channel 与 Transport 之间的桥梁
+
+前面说 Channel 是"逻辑通道"、Transport 是"物理链路的抽象"，那这两者是怎么衔接起来的？答案就是 **connector（连接器）**。
+
+**`ncclConnector`**（定义于 `src/include/device.h:165-173`）描述的是"**本 rank 在某个 Channel 里，与某个具体 peer 之间的一条连接**"。它把 Channel 里那句逻辑的"我的下一跳是 rank X"，落实成"具体用哪套 transport、哪条物理链路、哪块连接资源"。
+
+核心字段：
+
+- `transportComm`：指向传输层的虚函数表（`ncclTransportComm*`，正是 `ncclTransport` 里的 `send`/`recv`）——决定这条连接"走 P2P 还是 NET"；
+- `transportResources`：传输层的具体连接资源（比如 RDMA 的 QP、P2P 的映射地址等）；
+- `conn`：连接信息（`ncclConnInfo`，含具体传输类型、地址等）；
+- `connected`：连接是否已建立的状态标志；
+- `proxyConn`：对应的 Proxy 连接器（呼应 5.2 节的 Proxy 机制）。
+
+在 `ncclChannelPeer` 里，每个 peer 都有 `send[NCCL_MAX_CONNS]` 和 `recv[NCCL_MAX_CONNS]` 两组 connector（`device.h:233-234`）——即对每个 peer，发送和接收各有一套连接描述。
+
+> **那"一个 Channel 里，本 rank 与不同 rank 之间的连接是怎么划分的？"** 答案藏在 `ncclChannel.peers` 这个字段里：它是一个**按 rank 编号索引的指针数组**（长度 `nRanks`），`peers[r]` 专门存放"本 rank 在这个 channel 里，与 rank r 之间的连接载体"（见 `channel.cc:35-38` 的分配逻辑：`channel->peers[r] = sharedRes->peers[channelId] + topParentRanks[r]`）。
+>
+> 换句话说，**每个 Channel 都维护一张覆盖全部 rank 的"连接表"**，下标就是 rank 编号，天然把"和谁连"分好了格。但**不是每个格子都有真实连接**——Channel 的 Ring/Tree 结构（`ring.prev`/`ring.next`/`tree.up`/`tree.down`）决定了"本 rank 应该连哪些 rank"：Ring 里只连 `prev`、`next` 两个邻居，所以只有 `peers[prev]`、`peers[next]` 这两个格子里的 connector 是真正建好的（`connected=1`），其余格子的 connector 都是空的、未建连接。
+>
+> ```text
+> comm->channels[16]                 // 16 个 channel
+>   └─ channels[k].peers[128]        // 指针数组，下标 = rank 编号
+>        ├─ peers[prev] ──→ ncclChannelPeer（真实连接：Ring 前驱）
+>        ├─ peers[next] ──→ ncclChannelPeer（真实连接：Ring 后继）
+>        └─ peers[其他] ──→ ncclChannelPeer（空，未建连接）
+>             └─ send[2] / recv[2]   // connector（connIndex 0=集合通信，1=点对点）
+> ```
+
+> 到这里，完整的层次链就补全了：**`ncclComm`（通信域）→ `ncclChannel`（并行通道）→ `ncclConnector`（对某个 peer 的具体连接）→ `ncclTransport`（该连接走的传输层）**。Channel 负责"逻辑上谁连谁"，Connector 负责"物理上怎么连"，Transport 负责"连上之后怎么搬"。
+>
+> 为了把**数量关系**也讲透，举一个具体例子——假设 1 个通信器、128 个 rank、拓扑搜索后 `nChannels = 16`（Ring 算法）：
+>
+> - **Channel 是"全体 rank 共享"的全局结构，不是"每对 rank 之间"各有一套。** 这 128 个 rank 共享同一套 16 个 channel（channel 0~15），`nChannels` 是通信器级别的属性，所有 rank 相同（上限 `MAXCHANNELS = 64`）。
+> - **每个 Channel 是一条遍历全部 128 个 rank 的逻辑 Ring。** 16 个 channel = 16 条并行的、排列各异的 Ring，每条都串起全部 128 个 rank。数据被切成 16 份，第 k 份在第 k 条 Ring 上流动。
+> - **每个 rank 在每个 Channel 里只连 2 个邻居**（Ring 的 `prev` / `next`，见 `ncclRing` 定义 `device.h:175-187`），而不是连全部 127 个 rank。所以每个 rank 在 16 个 channel 里共有 16×2 = 32 条"邻居连接"，分散在 16 条不同的 Ring 里。
+> - **"每对 rank 之间有多少条连接"**：只有"在某条 Ring 里恰好相邻"的两个 rank 之间，才存在该 channel 的一条连接；若它们同时在多个 channel 里相邻，就有多条，否则没有。所以连接数取决于"它们在几条 Ring 里相邻"，而不是"每对 rank 之间固定有 16 条"。
+>
+> 落到数据结构上，以某个 rank 的视角看：
+>
+> ```c
+> comm->channels[16];                        // 本 rank 的 16 个 channel（comm.h:534）
+> channels[k].ring.prev / .next;             // 本 rank 在第 k 条 Ring 里的两个邻居
+> channels[k].peers[...];                    // 本 rank 在第 k 个 channel 里连到的 peer 数组
+> channels[k].peers[p]->send[...] / recv[...]; // 连到 peer p 的连接器
+> ```
+>
+> 其中每个 peer 的 `send`/`recv` 数组长度 `NCCL_MAX_CONNS = 2`（`device.h:231`），是因为一个 communicator 既要支持**集合通信**、又要支持**点对点通信**，两者是两套独立的连接：`connIndex = 0` 留给集合通信（Ring、Tree、CollNet 等**共用**这一个槽位，见 `ncclTransportRingConnect` 传 `0`、`ncclTransportTreeConnect` 也传 `0`，`generic.cc:26/55`），`connIndex = 1` 留给点对点 Send/Recv（见 `init.cc:1621/1625` 的 `send[1]`/`recv[1]`）。所以并不是"Ring 和 Tree 各占一个"，而是"集合通信与点对点通信各占一个"。
 
 ---
 
