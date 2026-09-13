@@ -387,32 +387,82 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 
 ### 1.5 关键数据结构总览
 
-**`ncclComm`**（定义于 `src/include/comm.h:523-797`）是 NCCL 中最重要的数据结构，包含：
+NCCL 的源码虽然庞大，但整个框架其实是**围绕少数几个核心结构体**搭建起来的。这一节就介绍其中最基础、也最能体现 NCCL 架构设计的三个结构体——`ncclComm`（通信器）、`ncclChannel`（通道）、`ncclTransport`（传输层）。你可以把它们理解成 NCCL 的"骨架"：理解了这三者各自代表什么、彼此什么关系，后面读初始化流程、执行路径时，就能时刻知道"现在这段代码在操作哪一层"。这里先建立直觉，字段细节不必强记，后面的正式流程会反复遇见它们。
 
-- **拓扑信息**：`ncclTopoSystem* topo`、`rank`、`nRanks`、`cudaDev`、`busId`
-- **Channel 数组**：`ncclChannel channels[MAXCHANNELS]`，每个 Channel 承载 Ring/Tree 结构
-- **Graph 数组**：`ncclTopoGraph graphs[NCCL_NUM_ALGORITHMS]`，分别为 Ring/Tree/CollNet/NVLS 算法存储图结构
-- **网络**：`ncclNet_t* ncclNet`、`netContext`、`ginContext`
-- **内核调度**：`ncclKernelPlanner planner`、workFifo 机制
-- **共享资源**：`ncclSharedResources* sharedRes`（跨 Split 子通信器共享）
-- **配置**：`ncclConfig_t config`
+#### ① 通信器 `ncclComm`：一个"通信域"的完整描述
 
-**`ncclChannel`**（定义于 `src/include/comm.h:150-172`）代表一条独立的通信通道：
+**`ncclComm`**（定义于 `src/include/comm.h:523-797`）是 NCCL 最重要的数据结构，它就是**通信器（communicator）**。它对应的抽象概念是**通信域（communication domain）**——一组彼此建立了连接、可以互相做集合通信的 rank（进程/GPU）。
 
-- `ncclRing ring`：Ring 拓扑连接信息
-- `ncclTree tree`：Tree 拓扑连接信息
-- `ncclChannelPeer** peers`：指向各 Peer 的连接器数组
-- `workFifoProduced`：Work FIFO 生产指针
+先厘清几个容易混的概念：
 
-**`ncclTransport`**（定义于 `src/include/transport.h:136-142`）是传输层虚函数表：
+- **通信域**：一个通信器所定义的"可以互相通信的范围"。域内的 rank 地位平等、彼此可达；域外的 rank 无法参与进来。
+- **通信组（process group）**：这是上层框架（PyTorch 的 `ProcessGroup`）的叫法。实际上，**一个 PyTorch 通信组的底层，就对应一个 NCCL communicator**——"通信组"和"通信域"是同一件事在不同层次的两个名字。
 
-- `canConnect`：判断两节点间是否可用此传输
-- `send.setup` / `recv.setup`：建立连接（交换 handle）
-- `send.connect` / `recv.connect`：完成连接
-- `send.free` / `recv.free`：释放连接
-- `proxySetup` / `proxyConnect` / `proxyProgress`：Proxy 线程侧操作
+一个进程（GPU）**可以同时属于多个通信域**，也就是持有多个 `ncclComm`。为什么需要这样？因为这正好对应大模型训练里**不同并行维度需要不同的通信范围**：
 
-四种实例：`p2pTransport`、`shmTransport`、`netTransport`、`collNetTransport`。
+| 并行维度 | 通信范围 | 对应通信器 | 典型操作 |
+|----------|----------|-----------|----------|
+| **DP（数据并行）** | 全体 rank | 一个大 communicator | 梯度 AllReduce（跨所有卡） |
+| **TP（张量并行）** | 节点内几个 rank | 一个小 communicator | AllReduce / AllGather（延迟敏感，希望走 NVLink） |
+| **PP（流水线并行）** | 相邻 stage（2 个 rank） | 更小的 communicator | 点对点 Send/Recv |
+
+于是 TP/PP/DP 会各自使用**不同的通信器、不同的通信域**，互不干扰，各自维护自己的连接和拓扑。
+
+更进一步，NCCL 还支持**子通信器**：通过 `ncclCommSplit` 从一个父通信器"分裂"出子通信器。子通信器拥有独立的通信域，但可以通过 `ncclSharedResources* sharedRes` 字段**复用父通信器的部分资源**（这正是字段注释里"跨 Split 子通信器共享"的含义），避免重复初始化。
+
+**而在一个 `ncclComm` 内部，又存在"Team"的概念**，这里要特别区分清楚：
+
+> **communicator 是"域"的边界**（不同 communicator 之间不能通信），**Team 是"域内"的子划分**。同一个 communicator 里，NCCL 会按硬件拓扑自动划分出逻辑子域（team），用来决定某对 rank 之间该走哪条物理链路。最常见的三种 Team：
+>
+> - `ncclTeamWorld`：全体 rank；
+> - `ncclTeamLsa`（Local NVLink Accessible）：同一 NVLink 域内、通过 NVLink 直接可达的一组 GPU（通常就是同一节点内的卡）；
+> - `ncclTeamRail`：跨节点的"同一位置" GPU 组（例如每个节点的第 0 号 GPU 组成一个 rail，共享同一条网络路径）。
+>
+> 一句话记忆：**"通信域 vs 通信组"是跨层次的同义词；"communicator vs Team"则是"域边界 vs 域内拓扑分组"的关系。**
+
+回到字段本身，`ncclComm` 里装的都是"这一个通信域"的全部上下文：
+
+- **拓扑信息**：`ncclTopoSystem* topo`、`rank`、`nRanks`、`cudaDev`、`busId`——"这个域有哪些 GPU、它们怎么连的、我是谁"；
+- **Channel 数组**：`ncclChannel channels[MAXCHANNELS]`——并行通信通道（见下面的 ②）；
+- **Graph 数组**：`ncclTopoGraph graphs[NCCL_NUM_ALGORITHMS]`——分别为 Ring/Tree/CollNet/NVLS 等算法算出的通信图；
+- **网络**：`ncclNet_t* ncclNet`、`netContext`、`ginContext`——跨节点的网络插件与 GIN 上下文；
+- **内核调度**：`ncclKernelPlanner planner`、workFifo 机制——把任务调度给 GPU 内核；
+- **共享资源**：`ncclSharedResources* sharedRes`——跨 Split 子通信器共享的资源；
+- **配置**：`ncclConfig_t config`——用户配置（超时、阻塞模式等）。
+
+#### ② 通道 `ncclChannel`：并行通信的最小单位
+
+**`ncclChannel`**（定义于 `src/include/comm.h:150-172`）代表**一条独立的通信通道**，可以理解为"通信域里的一条并行管道"。
+
+为什么一个通信器里要有**多个** Channel？答案是**并行**。一个集合操作的数据会被切成 `nChannels` 份，每个 Channel 独立负责其中一份——每个 Channel 对应一条 Ring 或 Tree 连接，并由独立的 CUDA CTA 并行执行。Channel 越多，能同时搬运的数据块就越多，带宽利用就越充分（当然也受硬件限制，最大 `MAXCHANNELS`）。
+
+它的核心字段：
+
+- `ncclRing ring` / `ncclTree tree`：这个 Channel 承载的 Ring / Tree 拓扑连接信息（即"我的上一跳是谁、下一跳是谁"）；
+- `ncclChannelPeer** peers`：指向各 Peer 的连接器（connector）数组，描述"我连到每个 peer 的具体连接"；
+- `workFifoProduced`：Work FIFO 的生产指针，用于 CPU 向 GPU 内核下发任务；
+- 此外还有 `collnetChain` / `collnetDirect` / `ncclNvls nvls` 等字段，分别对应 CollNet、NVLS 这类"网内计算"算法在该 Channel 上的连接。
+
+#### ③ 传输层 `ncclTransport`：异构硬件的统一抽象
+
+**`ncclTransport`**（定义于 `src/include/transport.h:136-142`）是**传输层（transport）的虚函数表**，NCCL 用它把 NVLink、PCIe、RDMA 网卡、共享内存这些**异构物理链路，统一成同一套接口**。
+
+一个 `ncclTransport` 实例封装了"某一类链路"的全部操作：
+
+- `canConnect`：判断两个节点之间能否用这类传输连通；
+- `send` / `recv`（两个 `ncclTransportComm` 结构体）：分别管发送侧和接收侧，内含 `setup`（建连接、交换 handle）、`connect`（完成连接）、`free`（释放连接）等生命周期函数；
+- `proxySetup` / `proxyConnect` / `proxyProgress`：**Proxy 线程侧**的操作（正好对应 5.2 节讲的 Proxy 机制——当 GPU 不能直接驱动该链路时，由 Host 侧线程代劳）。
+
+NCCL 提供了四种实例，分别对应四类链路：
+
+| 实例 | 底层链路 | 场景 |
+|------|----------|------|
+| `p2pTransport` | NVLink / PCIe / C2C 直连 | 机内 GPU 直接读写对方显存 |
+| `shmTransport` | 共享内存 + CPU 拷贝 | 同进程多卡、或无法 P2P 时的兜底 |
+| `netTransport` | RDMA 网卡（InfiniBand / RoCE） | 跨节点 |
+| `collNetTransport` | 支持 SHARP 的交换机 | 跨节点大消息的网内计算 |
+
+> 到这里，三个结构体的关系就很清晰了：**一个 `ncclComm`（通信域）里挂着多个 `ncclChannel`（并行通道），每个 Channel 与各 peer 的连接又由某种 `ncclTransport`（传输层）来承载**。这个"Comm → Channel → Transport"的层次，就是 NCCL 的架构骨架。
 
 ---
 
