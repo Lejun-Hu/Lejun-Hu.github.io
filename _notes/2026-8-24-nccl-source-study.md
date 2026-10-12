@@ -594,40 +594,113 @@ NCCL 提供了四种实例，分别对应四类链路：
 
 > 第一章我们认清了 NCCL 的几个核心结构体（通信器、通道、连接子、传输层）。这一章回答一个更具体的问题：**当你（或 PyTorch）调用一次 `ncclCommInitRank` 之后，一个"可用的通信器"到底是怎么被一步步造出来的？**
 >
-> 阅读建议：先读 **2.1**（认清 API 家族——哪个函数是谁在什么场景下调用）和 **2.2**（全景图——总共分五个阶段），再逐个阶段深入。若只想快速把握骨架，读完 2.1、2.2、2.7 即可。
+> 阅读建议：先读 **2.1**（认清 API 家族——先弄懂"五个公共 API 如何收敛到同一个执行体"这条主线）和 **2.2**（全景图——总共分五个阶段），再逐个阶段深入。若只想快速把握骨架，读完 2.1、2.2、2.7 即可。
 
-### 2.1 先认清 API 家族：谁是给用户/框架的，谁是内部实现
+### 2.1 先认清 API 家族：五个公共 API 如何收敛到同一个执行体
 
-初始化相关的函数名字一大堆（`ncclCommInitRank`、`ncclCommInitRankConfig`、`ncclCommInitRankScalable`、`ncclCommInitAll`、`ncclCommInitRankDev`、`ncclCommInitRankFunc`……），第一次看极易迷路。其实只要抓住**两条分界线**，立刻就清楚了。
+初始化相关的函数名字一大堆（`ncclCommInitRank`、`ncclCommInitRankConfig`、`ncclCommInitRankScalable`、`ncclCommInitAll`、`ncclCommInitRankDev`、`ncclCommInitRankFunc`……），第一次看极易迷路。
 
-#### 分界线一：是否被 `NCCL_API` 导出（即"用户/框架能不能看见"）
+**但只要抓住一条主线，立刻就清楚了：这些函数不是并列关系，而是"四个层次、逐层收敛"的关系。**
 
-| 函数 | 是否导出 | 定位 | 谁调用 | 使用场景 |
-|------|---------|------|--------|----------|
-| `ncclGetUniqueId` | ✅ 公共 | 生成"入场券" | 用户 / 框架 | 每个 communicator 初始化前先做一次 |
-| `ncclCommInitRank` | ✅ 公共 | 最基础的初始化 | 用户 | 多进程/多线程各自建 comm；**隐式全局同步**（会阻塞等齐所有 rank） |
-| `ncclCommInitRankConfig` | ✅ 公共 | 带配置的初始化 | **上层框架**（PyTorch 等） | 需要传 `ncclConfig_t`（超时、blocking 模式、splitShare…）时用 |
-| `ncclCommInitRankScalable` | ✅ 公共 | 大规模加速版 | 框架 / 超大规模训练 | 允许传**多个** uniqueId（最多每 rank 一个）来加速初始化，避免单一 root 瓶颈 |
-| `ncclCommInitAll` | ✅ 公共 | **单进程多卡**便捷版 | 用户 | 一个进程管多张卡时，一次建出"一整串"communicator |
-| `ncclCommInitRankDev` | ❌ 内部（`static`） | **统一实现入口** | NCCL 自己 | 所有公共 API 最终都收敛到这里 |
-| `ncclCommInitRankFunc` | ❌ 内部（`static`） | **真正干活的执行体** | `ncclAsyncLaunch` | 异步任务的函数体，完成全部初始化 |
+#### 核心主线：四个层次，一条调用链
 
-> **怎么一眼分辨？** 看 `src/init.cc` 里的声明形式：写成 `NCCL_API(ncclResult_t, ncclCommInitRank, ...)` 的是**导出符号**（`NCCL_API` 宏会额外生成一个 `pnccl*` 别名并做符号可见性控制），是给外部调用的；写成 `static ncclResult_t xxx(...)` 的是**内部函数**，链接期外部根本找不到。
+```
+【门面层】对外的公共 API（用户 / 框架调用）
+    ncclCommInitRank   ncclCommInitRankConfig   ncclCommInitRankScalable   ncclCommInitAll
+              │                   │                        │                    │
+              └───────────────────┴────────────┬───────────┴────────────────────┘
+                                               │  都调用同一个函数，只是参数不同
+                                               ▼
+【实现层】ncclCommInitRankDev(...)      ← 唯一的实现入口（static，外部看不见）
+                                               │  ① 校验 + 归一化参数
+                                               │  ② 分配 ncclComm 骨架
+                                               │  ③ 建 AsyncJob 集装箱，转交调度层
+                                               │  ncclAsyncLaunch(job, ncclCommInitRankFunc, ...)
+                                               ▼
+【调度层】ncclAsyncLaunch(...)          ← 决定"什么时候、在哪个线程执行"
+                                               │  不在 Group → 立即执行；在 Group → 入队；非阻塞 → 后台线程
+                                               ▼
+【执行层】ncclCommInitRankFunc(job)     ← 真正干活：本章 2.3~2.7 的五个阶段全在它体内
+```
 
-#### 分界线二：命名后缀的含义（`Dev` / `Func` / `AsyncJob`）
+**各层职责一句话**：
 
-这三个后缀经常让人误以为是"设备端"，其实它们是**内部实现的分层命名**：
+| 层 | 代表函数 | 只负责 | 外部可见 |
+|----|----------|--------|----------|
+| 门面层 | `ncclCommInitRank` 等 5 个 | 参数预处理（取 device、准备默认 config、性能标记）后**转交** | ✅ 导出 |
+| 实现层 | `ncclCommInitRankDev` | 把各门面 API 的参数差异**归一化**，备好 comm 骨架与任务，再转交 | ❌ `static` |
+| 调度层 | `ncclAsyncLaunch` | 决定**同步执行 / 入队 / 后台线程**三种执行方式 | ❌ `static`（辅助函数） |
+| 执行层 | `ncclCommInitRankFunc` | **真正建立通信器**（拓扑、图、连接、资源全在这里完成） | ❌ `static` |
+
+> 记住这张图，后面每一步都能对号入座：**门面层只做"预处理"，实现层做"归一化 + 备料"，调度层管"何时执行"，执行层干"实际建通信器"。**
+
+#### 2.1.1 门面层：5 个公共 API，差异只在三处参数
+
+| 公共 API | 一句话场景 | 关键差异 |
+|----------|-----------|----------|
+| `ncclGetUniqueId` | 先生成"入场券"（严格说不属于 init 家族，但**必须先做**） | 无 |
+| `ncclCommInitRank` | 最基础的初始化，多进程/多线程各自建 comm | 不包 Group → **同步阻塞** |
+| `ncclCommInitRankConfig` | 带用户配置的初始化，**上层框架常用** | 多一个 `ncclConfig_t` 入参 |
+| `ncclCommInitRankScalable` | 超大规模训练，用多个 uniqueId 加速 | 多一个 `nId`（uniqueId 个数）入参 |
+| `ncclCommInitAll` | 单进程管多卡时，一次建出"一整串"communicator | 内部**循环**调用实现层 |
+
+**门面函数的共同特征：它们的函数体几乎都只有"预处理 + 转交"两步。** 看最基础的 `ncclCommInitRank` 全文（只有 4 件事）：
+
+```cpp
+// src/init.cc:2562-2578（完整函数体）
+ncclResult_t ncclCommInitRank(ncclComm_t* newcomm, int nranks, ncclUniqueId commId, int myrank) {
+  NCCLCHECK(ncclInitEnv());                        // ① 环境准备（加载环境变量等）
+  NVTX3_RANGE(NcclNvtxParamsCommInitRank)          // ② 性能标记（见 5.1 节）
+  (void)ncclCudaLibraryInit();                     // ③ 加载 CUDA 驱动、解析 dlsym hook
+  int cudaDev;
+  ncclConfig_t config = NCCL_CONFIG_INITIALIZER;   // ④ 准备默认配置
+  CUDACHECK(cudaGetDevice(&cudaDev));              //    取当前 CUDA 设备号
+  NCCLCHECK(ncclCommInitRankDev(newcomm, nranks, 1, &commId, myrank, cudaDev, &config, __func__));
+  // ↑ 转交实现层。注意倒数第一个参数是本函数名（__func__），供下层打日志/报错时定位
+  NVTX3_RANGE_ADD_PAYLOAD(CommInitRank, NcclNvtxParamsCommInitRankSchema,
+                          NVTX3_PAYLOAD((*newcomm)->commHash, nranks, myrank, cudaDev));
+  return ncclSuccess;
+}
+```
+
+> 这两点最能体现"门面"性质：**（1）** 它把"当前是哪个设备""用什么配置"这些**上下文信息**补全后传下去（因为 `ncclCommInitRank` 的签名里根本没有 device 参数，它默认用当前设备）；**（2）** 它把 `__func__`（调用者函数名）一路传下去，让下层在出错时能报出"是哪个 API 调用的"。
+
+#### 2.1.2 命名规范：`Dev` / `Func` / `AsyncJob` 后缀的含义
+
+（插叙一段：这几个后缀很容易被误读成"设备端"，先把这个命名约定讲清楚，后面看名字就不会被绊住；2.1.3 接回主线。）
+
+这三个后缀是**"按层命名"**的产物，对应上面链条图里的三层：
 
 | 后缀 | 含义 | 例子 |
 |------|------|------|
 | 无后缀（公共名） | 对外的门面函数：只做参数预处理（取当前 device、准备默认 config）就转交下去 | `ncclCommInitRank` |
-| `...Dev` | **统一实现入口**：接收已确定好的 `cudaDev`、`config`、以及调用者函数名（`funcName`，用于日志/报错定位），把各公共 API 的参数差异**归一化**，然后创建异步任务 | `ncclCommInitRankDev`（`src/init.cc:2477`） |
-| `...Func` | **异步任务体**：真正完成初始化全部工作的函数，被 `ncclAsyncLaunch` 调用 | `ncclCommInitRankFunc`（`src/init.cc:1831`） |
-| `...AsyncJob` | 传递参数的**任务结构体** | `ncclCommInitRankAsyncJob`（`src/init.cc:1734-1753`） |
+| `...Dev` | **实现层的唯一入口**：接收已确定好的 `cudaDev`、`config`、以及调用者函数名（`funcName`，用于日志/报错定位），把各公共 API 的参数差异**归一化**，然后创建异步任务 | `ncclCommInitRankDev`（`src/init.cc:2477`） |
+| `...Func` | **执行层的函数体**：真正完成初始化全部工作的那个函数，由调度层调用 | `ncclCommInitRankFunc`（`src/init.cc:1831`） |
+| `...AsyncJob` | 传递参数的**任务结构体**（"集装箱"：把门面层的差异参数装进去，带到执行层） | `ncclCommInitRankAsyncJob`（`src/init.cc:1734-1753`） |
 
-#### 所有公共 API 都收敛到同一个内部入口
+> **怎么一眼分辨"公共"还是"内部"？** 看 `src/init.cc` 里的声明形式：
+> - 写成 `NCCL_API(ncclResult_t, ncclCommInitRank, ...)` 的是**导出符号**，外部可调用；
+> - 写成 `static ncclResult_t ncclCommInitRankDev(...)` 的是**内部函数**——`static` 意味着**文件作用域**，链接期外部根本找不到它（所以框架想调也调不到）。
+>
+> 顺带看清 `NCCL_API` 宏本身（`src/include/core.h:16-27`）——它并不是简单的导出标记：
+>
+> ```cpp
+> // src/include/core.h:16-27（Linux 分支节选）
+> #if defined(NCCL_OS_LINUX)
+> #ifdef PROFAPI
+> #define NCCL_API(ret, func, args...) \
+>   extern "C" __attribute__((visibility("default"))) __attribute__((alias(#func))) ret p##func(args); \
+>   extern "C" __attribute__((visibility("default"))) __attribute__((weak)) ret func(args)
+> #else
+> #define NCCL_API(ret, func, args...) extern "C" __attribute__((visibility("default"))) ret func(args)
+> #endif
+> ```
+>
+> 两点值得注意：**（1）** 在定义了 `PROFAPI` 的构建里，它会用 GCC 的 `alias` 属性额外声明一个 `p##func`（即 `pncclCommInitRank`）作为 `func` 的**别名**——这正是 `nccl.h.in` 里每个 API 都有 `ncclXxx` / `pncclXxx` 两份声明的原因（`p` 版本供性能分析插桩层使用）；**（2）** 真正的实现符号被标成 `weak`，允许外部覆盖——这也是为什么"打桩/替换 NCCL API"能做到。
 
-看三个公共 API 的收尾调用，差异一目了然（`src/init.cc`）：
+#### 2.1.3 实现层：所有公共 API 都收敛到同一个函数
+
+**结论先摆出来：5 个门面 API，无论各自动机是什么，最终都调用同一个 `ncclCommInitRankDev`——只是传入的参数不同。** 看三个 API 的收尾调用（`src/init.cc`）：
 
 ```cpp
 // :2572 —— ncclCommInitRank：nId 固定为 1，config 用默认值，不包 Group
@@ -640,7 +713,7 @@ NCCLCHECKGOTO(ncclCommInitRankDev(newcomm, nranks, 1, &commId, myrank, cudaDev, 
 NCCLCHECKGOTO(ncclCommInitRankDev(newcomm, nranks, nId, commId, myrank, cudaDev, internalConfigPtr, __func__), ret, fail);
 ```
 
-**这四个参数上的差异，正是几个公共 API 的差异所在**：
+**所以几个公共 API 的差异，全部浓缩在这两处参数（`nId` 与 `config`）+ 一个控制流（是否包 Group）上**：
 
 | 公共 API | `nId`（用几个 uniqueId） | `config` 来源 | 是否包在 Group 里 | 阻塞行为 |
 |----------|------------------------|---------------|------------------|----------|
@@ -655,7 +728,7 @@ NCCLCHECKGOTO(ncclCommInitRankDev(newcomm, nranks, nId, commId, myrank, cudaDev,
 > - `ncclCommInitRankScalable`（`:259-263`）："similar to ncclCommInitRankConfig. Allows to use **more than one ncclUniqueId** (up to one per rank), indicated by nId, to **accelerate the init operation**. The number of ncclUniqueIds and their order must be the same for every rank."
 > - `ncclCommInitAll`（`:189-195`）："Creates a clique of communicators (**single process version**)"。
 
-#### "同步还是异步"是怎么决定的：`ncclAsyncLaunch` 的分支
+#### 2.1.4 调度层：`ncclAsyncLaunch` 决定"什么时候、在哪个线程执行"
 
 `ncclCommInitRankDev` 的最后一步是启动异步任务（`src/init.cc:2544`）：
 
@@ -679,10 +752,11 @@ ncclResult_t ncclAsyncLaunch(struct ncclAsyncJob* job, ncclResult_t (*func)(stru
 }
 ```
 
-于是两条路径就清楚了：
+结合门面层的差异，执行方式其实分成**三种情况**（正好对应"用户想不想异步"的需求）：
 
-- **`ncclCommInitRank`（不包 Group）** → `ncclGroupDepth == 0` → **同步阻塞**执行，这就是官方文档说它"隐式同步"的底层原因；
-- **`Config` / `Scalable` / `CommInitAll`（包 Group）** → 任务入队，在 `ncclGroupEndInternal` 里统一处理。若配置了 `blocking == 0`，group end 会**另起线程**后台执行并立刻返回 `ncclInProgress`（`src/group.cc:854-857`）：
+1. **不在 Group 里（`ncclCommInitRank` 走这条）** → `ncclGroupDepth == 0` → **立即同步执行、阻塞到完成**。这就是官方文档说它"隐式同步"的底层原因；
+2. **在 Group 里 + `blocking != 0`（默认）** → 任务先入队，在 `ncclGroupEndInternal` 里**同步**执行完再返回；
+3. **在 Group 里 + `blocking == 0`** → group end **另起一个线程**在后台执行，自己立刻返回 `ncclInProgress`（`src/group.cc:854-857`）：
 
 ```cpp
 // src/group.cc:854-857（节选）
@@ -694,7 +768,34 @@ ret = ncclInProgress;   // ← 立即返回"进行中"
 
 这种情况下调用方需要用 `ncclCommGetAsyncError()` **轮询**，直到状态变成 `ncclSuccess`。这就是"非阻塞初始化"的全貌——本质是**把初始化工作挪到后台线程**，让主线程可以先去干别的（比如加载数据）。（注意这也是 `ncclCommInitRankConfig` 在 `:2680-2683` 里对非阻塞 comm 调用 `ncclCommGetAsyncError` 的原因。）
 
-#### 上层框架用哪个？
+#### 2.1.5 执行层：`ncclCommInitRankFunc` 才是真正干活的那个
+
+前两层都在"准备和转交"，真正建立通信器的代码在**执行层**。它的入口长这样（`src/init.cc:1831-1833`）：
+
+```cpp
+// src/init.cc:1831-1833
+static ncclResult_t ncclCommInitRankFunc(struct ncclAsyncJob* job_) {
+  struct ncclCommInitRankAsyncJob* job = (struct ncclCommInitRankAsyncJob*)job_;  // 取回"集装箱"
+  ncclComm_t comm = job->comm;
+  ...   // ← 本章 2.3 ~ 2.7 讲的五个阶段，全部发生在这个函数体内
+}
+```
+
+它接收的参数是**基类指针** `ncclAsyncJob*`（因为调度层要统一处理各种任务），进函数后第一件事就是**向下转型**回具体的 `ncclCommInitRankAsyncJob`，再取出 `comm`、`nranks`、`commId`、`config`、`cudaDev` 等参数。
+
+> **为什么需要一个"任务结构体"来传参，而不是直接传一堆参数？** 因为执行可能发生在**另一个线程**（非阻塞初始化，见 2.1.4）或**稍后的 Group 结束时刻**——那时门面函数的栈帧早就销毁了，参数必须"打包带走"。`ncclCommInitRankAsyncJob`（`src/init.cc:1734-1753`）就是这个集装箱，它还容纳了**多个门面 API 共用的字段**：
+>
+> | 字段分组 | 服务于哪个门面 API |
+> |----------|-------------------|
+> | `nranks, myrank, nId, commId, config` | `ncclCommInitRank` / `Config` / `Scalable` |
+> | `parent, color, key, childCount` | `ncclCommSplit`（从父通信器派生） |
+> | `excludeRanksList, excludeRanksCount` | `ncclCommShrink`（剔除某些 rank） |
+> | `isGrow` | `ncclCommGrow`（扩容） |
+> | `funcName[NCCL_COMMINIT_FUNCNAME_LEN]` | 记录"是哪个 API 发起的"，用于日志与报错定位 |
+>
+> 也就是说：**门面层的 API 数量还会继续增加（split/shrink/grow 都复用了这条链），但实现层和执行层不用重复造轮子**——这正是分层收敛的价值。
+
+#### 2.1.6 上层框架用哪个？为什么要提供这么多变体
 
 **框架只能看见公共 API**（`Dev`/`Func` 是 `static` 的）。实践上，PyTorch 的 `ProcessGroupNCCL` 走的是 **`ncclCommInitRankConfig`**——因为它需要传递 `ncclConfig_t`（超时、blocking、splitShare 等），而基础版 `ncclCommInitRank` 没有配置入口，只作为老版本 NCCL 的回退路径。
 
