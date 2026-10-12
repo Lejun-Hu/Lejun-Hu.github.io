@@ -590,166 +590,526 @@ NCCL 提供了四种实例，分别对应四类链路：
 
 ---
 
-## 二、初始化流程：从 API 调用到网络就绪
+## 二、初始化流程：从 ncclCommInitRank 到网络就绪
 
-### 2.1 总体调用链路
+> 第一章我们认清了 NCCL 的几个核心结构体（通信器、通道、连接子、传输层）。这一章回答一个更具体的问题：**当你（或 PyTorch）调用一次 `ncclCommInitRank` 之后，一个"可用的通信器"到底是怎么被一步步造出来的？**
+>
+> 阅读建议：先读 **2.1**（认清 API 家族——哪个函数是谁在什么场景下调用）和 **2.2**（全景图——总共分五个阶段），再逐个阶段深入。若只想快速把握骨架，读完 2.1、2.2、2.7 即可。
 
-完整调用链：
+### 2.1 先认清 API 家族：谁是给用户/框架的，谁是内部实现
 
-```
-ncclGetUniqueId → ncclCommInitRank → ncclCommInitRankDev → ncclAsyncLaunch → ncclCommInitRankFunc
-```
+初始化相关的函数名字一大堆（`ncclCommInitRank`、`ncclCommInitRankConfig`、`ncclCommInitRankScalable`、`ncclCommInitAll`、`ncclCommInitRankDev`、`ncclCommInitRankFunc`……），第一次看极易迷路。其实只要抓住**两条分界线**，立刻就清楚了。
 
-**代码位置：**
+#### 分界线一：是否被 `NCCL_API` 导出（即"用户/框架能不能看见"）
 
-- `ncclGetUniqueId`：`src/init.cc:183` — 创建 Root bootstrap handle，生成 128 字节唯一 ID
-- `ncclCommInitRank`：`src/init.cc:2562` — 公共 API 入口，解析配置、调用 `ncclCommInitRankDev`
-- `ncclCommInitRankDev`：`src/init.cc:2477` — 创建异步任务 `ncclCommInitRankAsyncJob`
-- `ncclCommInitRankFunc`：`src/init.cc:1831` — 异步任务执行体，完成全部初始化
+| 函数 | 是否导出 | 定位 | 谁调用 | 使用场景 |
+|------|---------|------|--------|----------|
+| `ncclGetUniqueId` | ✅ 公共 | 生成"入场券" | 用户 / 框架 | 每个 communicator 初始化前先做一次 |
+| `ncclCommInitRank` | ✅ 公共 | 最基础的初始化 | 用户 | 多进程/多线程各自建 comm；**隐式全局同步**（会阻塞等齐所有 rank） |
+| `ncclCommInitRankConfig` | ✅ 公共 | 带配置的初始化 | **上层框架**（PyTorch 等） | 需要传 `ncclConfig_t`（超时、blocking 模式、splitShare…）时用 |
+| `ncclCommInitRankScalable` | ✅ 公共 | 大规模加速版 | 框架 / 超大规模训练 | 允许传**多个** uniqueId（最多每 rank 一个）来加速初始化，避免单一 root 瓶颈 |
+| `ncclCommInitAll` | ✅ 公共 | **单进程多卡**便捷版 | 用户 | 一个进程管多张卡时，一次建出"一整串"communicator |
+| `ncclCommInitRankDev` | ❌ 内部（`static`） | **统一实现入口** | NCCL 自己 | 所有公共 API 最终都收敛到这里 |
+| `ncclCommInitRankFunc` | ❌ 内部（`static`） | **真正干活的执行体** | `ncclAsyncLaunch` | 异步任务的函数体，完成全部初始化 |
 
-### 2.2 Bootstrap 阶段
+> **怎么一眼分辨？** 看 `src/init.cc` 里的声明形式：写成 `NCCL_API(ncclResult_t, ncclCommInitRank, ...)` 的是**导出符号**（`NCCL_API` 宏会额外生成一个 `pnccl*` 别名并做符号可见性控制），是给外部调用的；写成 `static ncclResult_t xxx(...)` 的是**内部函数**，链接期外部根本找不到。
 
-**功能：** 在所有 Rank 间建立带外通信通道，用于交换初始化信息。基于 TCP Socket，不依赖任何 GPU 间直接互联。
+#### 分界线二：命名后缀的含义（`Dev` / `Func` / `AsyncJob`）
 
-关键调用（在 `ncclCommInitRankFunc` 中）：
+这三个后缀经常让人误以为是"设备端"，其实它们是**内部实现的分层命名**：
+
+| 后缀 | 含义 | 例子 |
+|------|------|------|
+| 无后缀（公共名） | 对外的门面函数：只做参数预处理（取当前 device、准备默认 config）就转交下去 | `ncclCommInitRank` |
+| `...Dev` | **统一实现入口**：接收已确定好的 `cudaDev`、`config`、以及调用者函数名（`funcName`，用于日志/报错定位），把各公共 API 的参数差异**归一化**，然后创建异步任务 | `ncclCommInitRankDev`（`src/init.cc:2477`） |
+| `...Func` | **异步任务体**：真正完成初始化全部工作的函数，被 `ncclAsyncLaunch` 调用 | `ncclCommInitRankFunc`（`src/init.cc:1831`） |
+| `...AsyncJob` | 传递参数的**任务结构体** | `ncclCommInitRankAsyncJob`（`src/init.cc:1734-1753`） |
+
+#### 所有公共 API 都收敛到同一个内部入口
+
+看三个公共 API 的收尾调用，差异一目了然（`src/init.cc`）：
 
 ```cpp
-// src/init.cc:1916 — 常规初始化
+// :2572 —— ncclCommInitRank：nId 固定为 1，config 用默认值，不包 Group
+NCCLCHECK(ncclCommInitRankDev(newcomm, nranks, 1, &commId, myrank, cudaDev, &config, __func__));
+
+// :2674 —— ncclCommInitRankConfig：nId 仍为 1，但 config 由用户传入
+NCCLCHECKGOTO(ncclCommInitRankDev(newcomm, nranks, 1, &commId, myrank, cudaDev, internalConfigPtr, __func__), ret, fail);
+
+// :2711 —— ncclCommInitRankScalable：nId 也由用户传入（提供多个 uniqueId）
+NCCLCHECKGOTO(ncclCommInitRankDev(newcomm, nranks, nId, commId, myrank, cudaDev, internalConfigPtr, __func__), ret, fail);
+```
+
+**这四个参数上的差异，正是几个公共 API 的差异所在**：
+
+| 公共 API | `nId`（用几个 uniqueId） | `config` 来源 | 是否包在 Group 里 | 阻塞行为 |
+|----------|------------------------|---------------|------------------|----------|
+| `ncclCommInitRank` | 固定 1 | 默认值 | ❌ 不包 | **同步阻塞**，返回即完成 |
+| `ncclCommInitRankConfig` | 固定 1 | 用户传入 | ✅ 包（`ncclGroupStartInternal`/`EndInternal`） | 取决于 `config.blocking`，可为非阻塞 |
+| `ncclCommInitRankScalable` | 用户传入（≤ nranks） | 用户传入 | ✅ 包 | 同上 |
+| `ncclCommInitAll` | 固定 1 | 默认值 | ✅ 包 | 内部对每个设备循环调用 `ncclCommInitRankDev` |
+
+> 官方头文件（`src/nccl.h.in`）对这几个 API 的定位说得很直白：
+> - `ncclCommInitRank`（`:180-186`）："ncclCommInitRank **implicitly synchronizes with other ranks**, so it must be called by different threads/processes or use ncclGroupStart/ncclGroupEnd"——它天然阻塞。
+> - `ncclCommInitRankConfig`（`:175-177`）："Create a new communicator (multi thread/process version) **with a configuration set by users**"。
+> - `ncclCommInitRankScalable`（`:259-263`）："similar to ncclCommInitRankConfig. Allows to use **more than one ncclUniqueId** (up to one per rank), indicated by nId, to **accelerate the init operation**. The number of ncclUniqueIds and their order must be the same for every rank."
+> - `ncclCommInitAll`（`:189-195`）："Creates a clique of communicators (**single process version**)"。
+
+#### "同步还是异步"是怎么决定的：`ncclAsyncLaunch` 的分支
+
+`ncclCommInitRankDev` 的最后一步是启动异步任务（`src/init.cc:2544`）：
+
+```cpp
+NCCLCHECKGOTO(ncclAsyncLaunch((struct ncclAsyncJob*)job, ncclCommInitRankFunc, NULL, ncclCommInitJobFree, comm), res, fail);
+```
+
+而 `ncclAsyncLaunch` 的**行为取决于当前是否在 Group 内**（`src/group.cc:35-43`）：
+
+```cpp
+// src/group.cc:35-43（节选）
+ncclResult_t ncclAsyncLaunch(struct ncclAsyncJob* job, ncclResult_t (*func)(struct ncclAsyncJob*), ...) {
+  job->destroyFlag = comm->destroyFlag;
+  if (ncclGroupDepth == 0) {
+    ret = func(job);              // ← 不在 Group 里：直接同步执行，返回即完成
+    ...
+  } else {
+    job->func = func;             // ← 在 Group 里：只是入队，等 ncclGroupEnd 统一处理
+    ...
+  }
+}
+```
+
+于是两条路径就清楚了：
+
+- **`ncclCommInitRank`（不包 Group）** → `ncclGroupDepth == 0` → **同步阻塞**执行，这就是官方文档说它"隐式同步"的底层原因；
+- **`Config` / `Scalable` / `CommInitAll`（包 Group）** → 任务入队，在 `ncclGroupEndInternal` 里统一处理。若配置了 `blocking == 0`，group end 会**另起线程**后台执行并立刻返回 `ncclInProgress`（`src/group.cc:854-857`）：
+
+```cpp
+// src/group.cc:854-857（节选）
+groupJob->base.func = groupLaunchNonBlocking;
+STDTHREADCREATE_GOTO(groupJob->base.thread, ncclAsyncJobMain, ret, fail, &groupJob->base);
+groupJob->nonBlockingInit = true;
+ret = ncclInProgress;   // ← 立即返回"进行中"
+```
+
+这种情况下调用方需要用 `ncclCommGetAsyncError()` **轮询**，直到状态变成 `ncclSuccess`。这就是"非阻塞初始化"的全貌——本质是**把初始化工作挪到后台线程**，让主线程可以先去干别的（比如加载数据）。（注意这也是 `ncclCommInitRankConfig` 在 `:2680-2683` 里对非阻塞 comm 调用 `ncclCommGetAsyncError` 的原因。）
+
+#### 上层框架用哪个？
+
+**框架只能看见公共 API**（`Dev`/`Func` 是 `static` 的）。实践上，PyTorch 的 `ProcessGroupNCCL` 走的是 **`ncclCommInitRankConfig`**——因为它需要传递 `ncclConfig_t`（超时、blocking、splitShare 等），而基础版 `ncclCommInitRank` 没有配置入口，只作为老版本 NCCL 的回退路径。
+
+> 你可以自己验证：在 PyTorch 源码 `torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp` 里搜索 `ncclCommInitRankConfig`，会看到它在创建 communicator 的辅助函数里被调用。
+>
+> **这也解释了 NCCL 为什么要提供这么多变体**：不同调用者的需求不同（要不要传配置、规模大到需要多 root、是不是单进程管多卡），但**实现只有一份**（全部收敛到 `ncclCommInitRankDev` → `ncclCommInitRankFunc`）。这是典型的"门面函数 + 统一内核"设计。
+
+### 2.2 初始化全景图：五个阶段
+
+搞清 API 家族后，再看整个初始化的**阶段划分**。`ncclCommInitRankFunc`（真正干活的执行体）做的事可以归纳为五个阶段：
+
+| 阶段 | 目标（职责） | 关键函数 | 产物 |
+|------|-------------|----------|------|
+| **① 入场券** | 生成全局唯一的 ID，让各 rank 能找到同一个"集会地点" | `ncclGetUniqueId` → `bootstrapGetUniqueId` | `ncclUniqueId`（含 root 的 IP:port + magic） |
+| **② 骨架 + 控制面** | 分配 `ncclComm` 空壳；各 rank 建立**不依赖 GPU 互联**的带外通道 | `ncclCommInitRankDev` 分配骨架 → `bootstrapInit` | 空的 `ncclComm` + `comm->bootstrap` |
+| **③ 信息交换** | 通过控制面做两轮 AllGather：交换各自的 peerInfo、以及图计算结果 | `bootstrapAllGather` ×2（在 `initTransportsRank` 中） | 全量 peer 信息 + 各算法的图参数 |
+| **④ 拓扑与图** | 探测本机硬件拓扑，搜索出 Ring/Tree/CollNet/NVLS 各自的通信图 | `ncclTopoGetSystem`、`ncclTopoCompute` | `comm->topo`、`comm->graphs[]`、`comm->nChannels` |
+| **⑤ 连接与资源** | 按图把 Channel → Connector → Transport 一层层建起来，映射真实物理资源；初始化 Proxy | `setupChannel`、`ncclTransportP2pSetup`、`ncclTransportRingConnect`、`ncclProxyInit` | 可用的 `comm->channels[]` |
+
+> **为什么必须先有"控制面"（阶段②③）才能做后面的？** 因为一个典型的先有鸡还是先有蛋问题：GPU 之间的高速链路（NVLink/RDMA）要建立连接，双方必须先交换各自的**地址/句柄信息**（比如对端显存的 IPC handle、网卡的 QP 号）。可这些信息怎么交换？此时 GPU 链路还不存在——所以 NCCL 先用最朴素可靠的 **TCP socket**（同机则用 Unix Domain Socket）建一条"带外通道"，用它把该交换的信息交换完，再据此建立高速链路。这就是阶段②③存在的意义。
+
+### 2.3 阶段一：入场券 —— `ncclGetUniqueId`
+
+**职责**：生成一个全局唯一 ID，让分处不同进程/机器的所有 rank 知道"我们要加入的是同一个通信域"。它是初始化流程里**唯一需要用户自己做一次跨进程分发**的东西（通常由 rank 0 生成，再通过 MPI/文件/env 广播给其他 rank）。
+
+```cpp
+// src/init.cc:182-196
+NCCL_API(ncclResult_t, ncclGetUniqueId, ncclUniqueId* out);
+ncclResult_t ncclGetUniqueId(ncclUniqueId* out) {
+  NCCLCHECK(ncclInitEnv());
+  NCCLCHECK(ncclInit());
+  NCCLCHECK(PtrCheck(out, "GetUniqueId", "out"));
+  struct ncclBootstrapHandle handle;
+  NCCLCHECK(bootstrapGetUniqueId(&handle, NULL));
+  // ncclUniqueId 和 bootstrapHandle 的大小/对齐不同，先清零再 memcpy
+  memset(out, 0, sizeof(*out));
+  memcpy(out, &handle, sizeof(handle));
+  ...
+}
+```
+
+> **几个值得注意的点**：
+> - `ncclUniqueId` 本质是 **bootstrap handle 的拷贝**——整个结构只有三个字段（`src/include/bootstrap.h:14-18`）：`uint64_t magic`（校验值，`bootstrap.cc:446` 写入 `NCCL_MAGIC`）、`union ncclSocketAddress addr`（root 的地址，即 IP:端口）、`int nRanks`。所以它**不包含任何 GPU 信息**，只是个"集会地点 + 规模"的描述。
+> - 它必须能塞进 128 字节：`nccl.h.in:40-41` 定义 `NCCL_UNIQUE_ID_BYTES = 128`，并由 `static_assert(sizeof(ncclBootstrapHandle) <= sizeof(ncclUniqueId))` 在**编译期**保证装得下（`bootstrap.h:19-20`）。由于两者大小/对齐不同，函数里先 `memset` 清零再 `memcpy`，避免残留的未初始化数据被当作有效内容。
+> - 它**必须早于** `ncclCommInitRank` 调用，且同一个 ID 可以被**多个** communicator 使用（每次 init 会各自建一套连接）。
+
+### 2.4 阶段二：骨架 + 控制面
+
+这一阶段做两件事：**分配一个"空壳" `ncclComm`**，以及**建立带外控制通道（Bootstrap）**。
+
+#### （1）分配骨架：`ncclComm` 的初始字段
+
+所有公共 API 最终都进 `ncclCommInitRankDev`，它在这里把 comm 的骨架和"安全阀"先建起来（`src/init.cc:2506-2510`）：
+
+```cpp
+// src/init.cc:2506-2510（节选）
+NCCLCHECKGOTO(ncclCalloc(&comm, 1), res, fail);                      // ncclComm 主体
+NCCLCHECKGOTO(ncclCalloc(&comm->abortFlag, 1), res, fail);           // 中断标志（host）
+NCCLCHECKGOTO(ncclCudaHostCalloc(&comm->abortFlagDev, 1), res, fail); // 中断标志（device 可见）
+comm->startMagic = comm->endMagic = NCCL_MAGIC; // Used to detect comm corruption.
+```
+
+> 注意 `startMagic`/`endMagic` 在这里就被设为 `NCCL_MAGIC`（还记得 1.5 节讲的"魔数哨兵"吗？就是这里写入的）。而 `abortFlag` 之所以要准备 **host 和 device 两份**，是因为 NCCL 允许"一个 rank 出错时通知所有 rank 的内核提前退出"——这个标志必须能被 CPU 写、被 GPU 读，所以要分配在**页锁定（pinned）主机内存**上（`ncclCudaHostCalloc`）。
+
+注意此时 comm 里**还什么都没有**：没有拓扑、没有 channel、没有连接。这些都要在后面的阶段逐步填充。
+
+#### （2）建立带外控制面：Bootstrap
+
+**职责**：在"GPU 之间的高速链路还不存在"的前提下，先建一条**只依赖网络栈（TCP / Unix Socket）的可靠通道**，用于后续交换建链所需的句柄信息。关键调用在 `ncclCommInitRankFunc` 中：
+
+```cpp
+// src/init.cc:1916 — 常规初始化（从 uniqueId 建 bootstrap）
 bootstrapInit(job->nId, (struct ncclBootstrapHandle*)job->commId, comm, job->parent);
 
-// src/init.cc:1891 — Split 初始化（从父通信器派生）
+// src/init.cc:1891 — Split 初始化（从父通信器派生，不需要新 root）
 bootstrapSplit(comm->commHash, comm, job->parent, job->color, job->key, parentRanks);
 ```
 
-Bootstrap 提供的原语（`src/include/bootstrap.h`）：
+Bootstrap 之后向上提供的原语（`src/include/bootstrap.h`）：
 
-- `bootstrapAllGather`：所有 Rank 交换数据
-- `bootstrapSend` / `bootstrapRecv`：点对点数据交换
-- `bootstrapBarrier`：全局栅栏同步
-- `bootstrapBroadcast`：广播
-- `bootstrapIntraNodeBarrier` / `bootstrapIntraNodeAllGather`：节点内优化版本
+| 原语 | 用途 |
+|------|------|
+| `bootstrapAllGather` | 所有 rank 交换数据（阶段三的主力） |
+| `bootstrapSend` / `bootstrapRecv` | 点对点数据交换 |
+| `bootstrapBarrier` | 全局栅栏同步 |
+| `bootstrapBroadcast` | 广播 |
+| `bootstrapIntraNodeBarrier` / `bootstrapIntraNodeAllGather` | 同节点内的优化版本（走 UDS，不绕 root） |
 
-Bootstrap 实现位于 `src/bootstrap.cc`。核心思路：Root Rank 创建 TCP 监听 Socket，其余 Rank 连接到 Root 形成星形拓扑，通过 Root 中转实现 AllGather。节点内通过共享文件描述符（Unix Domain Socket）建立直连，减少 Root 中转开销。
+**实现思路**（`src/bootstrap.cc`）：root rank 创建 TCP 监听 socket，其余 rank 连向 root，形成**星形拓扑**；跨 rank 的 AllGather 由 root 中转。同一个节点内的 rank 之间则通过**共享文件描述符（Unix Domain Socket）**建立直连，避免都挤到 root 上。
 
-### 2.3 AllGather 信息交换
+> **多 root 的意义**：`ncclCommInitRankScalable` 传的 `nId` 就是"用几个 uniqueId"，即**建多个 root**——因为在大规模集群里，让几千个 rank 都连向同一个 root 会形成瓶颈。这是"Scalable"这个名字的由来。
 
-在 `initTransportsRank`（`src/init.cc:965`）中通过 Bootstrap 完成两轮 AllGather：
+### 2.5 阶段三：信息交换 —— 两轮 AllGather
 
-**第一轮 AllGather：**
+**职责**：把"每个 rank 只有自己的局部认知"变成"所有 rank 拥有一致的全局认知"。这一步在 `initTransportsRank`（`src/init.cc:965`）里完成，靠的就是 Bootstrap 的 AllGather。**为什么恰好是两轮？** 因为中间隔着"拓扑发现与图计算"这个必须各 rank 独立完成的步骤：
+
+```
+第一轮 AllGather（交换"我是谁、我在哪"）
+      ↓
+各 rank 独立探测本机拓扑、搜索通信图（阶段四，见 2.6）
+      ↓
+第二轮 AllGather（交换"我算出来的图长什么样"，收敛到一致）
+```
+
+#### 第一轮：交换 `ncclPeerInfo`（认识彼此）
 
 ```cpp
 // src/init.cc:1036-1037
-fillInfo(comm, comm->peerInfo + rank, comm->commHash);
-bootstrapAllGather(comm->bootstrap, comm->peerInfo, sizeof(struct ncclPeerInfo));
+fillInfo(comm, comm->peerInfo + rank, comm->commHash);        // 填自己的信息
+bootstrapAllGather(comm->bootstrap, comm->peerInfo, sizeof(struct ncclPeerInfo));  // 收齐全员信息
 ```
 
-交换 `ncclPeerInfo`（`src/include/transport.h:43-65`），包含：rank、cudaDev、nvmlDev、busId、GPU UUID、hostHash、pidHash、计算能力、GIN 支持类型、RMA 可用性等。
+交换的结构体是 `ncclPeerInfo`（`src/include/transport.h:43-65`），字段就是"为了让别人能连上我，我必须告诉别人的一切"：
 
-**第二轮 AllGather：**
+| 字段 | 作用 |
+|------|------|
+| `rank` / `cudaDev` / `nvmlDev` | 身份与设备号 |
+| `busId` / `gpuUuid` | **物理定位**：靠它判断两块 GPU 在不在同一台机器、能不能走 NVLink |
+| `hostHash` / `pidHash` | 是否同主机、是否同进程——决定能否用 UDS 快通道、能否用 CUDA IPC |
+| `cudaCompCap` | 计算能力（决定可用内核特性） |
+| `gdrSupport` / `fabricInfo` | GDR（GPU Direct RDMA）、MNNVL 等能力协商 |
+| `comm` | 回指通信器 |
+
+> 这一轮的产物是 `comm->peerInfo[]`——一个**长度为 nRanks 的数组**，之后"我能不能和 rank r 直连走 NVLink"这类判断全靠它。
+
+#### 第二轮：交换图计算结果（达成一致）
 
 ```cpp
 // src/init.cc:1283 — 第二轮 AllGather：交换图计算结果
 bootstrapAllGather(comm->bootstrap, allGather3Data, sizeof(*allGather3Data));
 ```
 
-交换图计算结果：各算法的 channel 数、带宽、跨 NIC 信息、拓扑排序 ranks。
+交换的是各 rank **各自算出的图参数**：各算法（Ring/Tree/CollNet/NVLS）的 channel 数、带宽估计、跨 NIC 信息、拓扑排序后的 rank 序列等。之所以要再交换一轮，是因为**阶段四的拓扑探测和图搜索是"各 rank 独立算"的**：
 
-### 2.4 拓扑发现与路径计算
+- 每台机器只看得见自己的本地拓扑（自己那几张卡、自己的网卡）；
+- 但一个集合通信图（比如 Ring 的环序、Tree 的父子关系）必须是**全局一致**的——否则 rank A 以为下一跳是 B，B 却以为下一跳是 C，通信立刻错乱。
+
+所以第二轮 AllGather 的作用是"**对答案**"：把各自的局部计算结果汇总，取全局最优/一致的方案（例如各 rank 上报自己到 NIC 的带宽，取最小值作为公共可用带宽），最终确定 `comm->nChannels` 等全局参数。
+
+### 2.6 阶段四：拓扑发现与图搜索
+
+**职责**：回答两个问题——**（1）** 这台机器/整个集群里的 GPU、NVSwitch、网卡是怎么连的？（拓扑发现）**（2）** 在这种连接关系上，Ring/Tree/CollNet/NVLS 各自应该按什么顺序组织 rank、用几条 channel？（图搜索）
+
+产物是 `comm->topo`（硬件拓扑图）和 `comm->graphs[]`（各算法的通信图），以及全局参数 `comm->nChannels`。
+
+#### 2.6.1 拓扑发现：把硬件画成一张图
 
 ```cpp
-// src/init.cc:1141 — 构建系统拓扑图
-ncclTopoGetSystem(comm, &comm->topo);
-
-// src/init.cc:1143 — 计算 GPU↔NIC 路径
-ncclTopoComputePaths(comm->topo, comm);
-
-// src/init.cc:1145 — 删除不可达 GPU 和未使用 NIC
-ncclTopoTrimSystem(comm->topo, comm);
-
-// src/init.cc:1147 — 重新计算路径
-ncclTopoComputePaths(comm->topo, comm);
-
-// src/init.cc:1149 — 初始化搜索状态
-ncclTopoSearchInit(comm->topo);
+// src/init.cc:1141-1149（节选）
+ncclTopoGetSystem(comm, &comm->topo);          // 构建系统拓扑图
+ncclTopoComputePaths(comm->topo, comm);        // 计算 GPU ↔ NIC 路径
+ncclTopoTrimSystem(comm->topo, comm);          // 剔除不可达 GPU / 未使用 NIC
+ncclTopoComputePaths(comm->topo, comm);        // 裁剪后重算路径
+ncclTopoSearchInit(comm->topo);                // 初始化搜索状态
 ```
 
-**拓扑节点类型**（`src/graph/topo.cc:32-34`）：GPU, PCI, NVS (NVSwitch), CPU, NIC, NET, GIN, RMA, DEV, CXB。
+实现主要靠 **NVML API** 查询 GPU 互联信息，构建一张**以 GPU 为中心的加权图**（`src/graph/topo.cc`、`src/graph/xml.cc`）：
 
-**链接类型**：LOC (Local), NVL (NVLink), C2C (Chip-to-Chip), PCI, SYS (跨 CPU Socket), NET。
+- **节点类型**：GPU、PCI（PCIe 桥）、NVS（NVSwitch）、CPU、NIC、NET、GIN、RMA、DEV、CXB（`src/graph/topo.cc:32-34`）
+- **链路类型**：LOC（本地）、NVL（NVLink）、C2C（片间直连）、PCI、SYS（跨 CPU Socket）、NET
+- **链路"名字"（用于表达路径质量）**：LOC、NVL、NVB（NVLink Bridge）、C2C、PIX（同一 PCIe Switch）、PXB（跨 PCIe Switch）、P2C、PXN（跨 CPU 但经 NVLink）、PHB、SYS、NET
 
-**拓扑名类型**：LOC, NVL, NVB (NVLink Bridge), C2C, PIX (PCIe 同一 Switch), PXB (跨 PCIe Switch), P2C, PXN (PCIe 同一 CPU 通过 NVLink), PHB, SYS, NET。
+> 用"节点 + 加权边"表达硬件，好处是后面可以套用**通用图搜索算法**：把"带宽"当作边的代价，就能用统一的搜索框架找"总代价最低的环/树"。
 
-拓扑发现主要通过 NVML API 查询 GPU 互联信息，构建以 GPU 为中心的图结构。具体实现在 `src/graph/topo.cc` 和 `src/graph/xml.cc`。
+#### 2.6.2 图搜索：为每种算法找一条最优路径
 
-### 2.5 图计算：Ring/Tree/CollNet/NVLS
+以 AllReduce 为例，NCCL 会为 Ring、Tree 两种算法**各算一份图**（还有可选的 CollNet、NVLS）：
 
 ```cpp
-// src/init.cc:1173-1178 — Ring
-ringGraph->pattern = NCCL_TOPO_PATTERN_RING;
+// src/init.cc:1173-1217（节选）
+ringGraph->pattern = NCCL_TOPO_PATTERN_RING;                  // 环形
 ncclTopoCompute(comm->topo, ringGraph);
 
-// src/init.cc:1181-1187 — Tree
-treeGraph->pattern = NCCL_TOPO_PATTERN_BALANCED_TREE;
+treeGraph->pattern = NCCL_TOPO_PATTERN_BALANCED_TREE;         // 平衡二叉树
 ncclTopoCompute(comm->topo, treeGraph);
 
-// src/init.cc:1202-1207 — CollNet（若启用）
-collNetChainGraph->pattern = NCCL_TOPO_PATTERN_TREE;
+collNetChainGraph->pattern = NCCL_TOPO_PATTERN_TREE;          // CollNet（若启用交换机网内计算）
 collNetDirectGraph->pattern = NCCL_TOPO_PATTERN_COLLNET_DIRECT;
 ncclTopoCompute(comm->topo, collNetChainGraph);
-ncclTopoCompute(comm->topo, collNetDirectGraph);
 
-// src/init.cc:1209-1217 — NVLS（若可用）
-nvlsGraph->pattern = NCCL_TOPO_PATTERN_NVLS;
+nvlsGraph->pattern = NCCL_TOPO_PATTERN_NVLS;                  // NVLS（若支持 NVSwitch 网内计算）
 ncclTopoCompute(comm->topo, nvlsGraph);
 ```
 
 支持的算法枚举（`src/init.cc:53-54`）：`Tree, Ring, CollNetDirect, CollNetChain, NVLS, NVLSTree, PAT`。
 
-搜索算法实现在 `src/graph/search.cc`（通用搜索框架）、`src/graph/rings.cc`（Ring 搜索）、`src/graph/trees.cc`（Tree 搜索）。
+搜索算法实现在 `src/graph/search.cc`（通用搜索框架——含超时、带宽递减重试等策略）、`src/graph/rings.cc`（Ring 搜索）、`src/graph/trees.cc`（Tree 搜索）。
 
-### 2.6 Transport 连接建立
+> **为什么"图"要分算法各算一份？** 因为它们的**优化目标不同**：
+> - **Ring**：目标是环上相邻 rank 之间路径代价之和最小（适合大消息、带宽优先）；
+> - **Tree**：目标是树的形状让跳数 ≤ O(log N)（适合小消息、延迟优先），且要区分"节点间二叉树 + 节点内链"两层结构（见 1.5 节）；
+> - **CollNet / NVLS**：目标是利用交换机/NVSwitch 的**网内计算**能力，让归约在交换节点完成，减少数据往返。
+>
+> 这个阶段的本质是**"把硬件拓扑翻译成若干条候选通信路线"**，供运行时（第三、五章）根据消息大小挑选。
 
-**传输类型：**
+### 2.7 阶段五：连接与资源 —— Channel / Connector / Transport 是怎么落地的
 
-| 常量 | 传输 | 适用场景 |
-|------|------|----------|
-| `TRANSPORT_P2P` (0) | GPU 直接访问 | NVLink / PCIe P2P（同节点） |
-| `TRANSPORT_SHM` (1) | 共享内存 | 同进程多 Rank / CE memcpy |
-| `TRANSPORT_NET` (2) | 网络（RDMA） | 跨节点 InfiniBand / RoCE |
-| `TRANSPORT_COLLNET` (3) | 网内计算 | SHARP / SHARPv2 |
-| `TRANSPORT_PROFILER` (4) | Profiler 代理 | 轮询 Profiler 计数器 |
+**职责**：把阶段四算出的"**逻辑**通信图"（Ring 的环序、Tree 的父子关系）翻译成**真实的连接与物理资源**——为每个 channel 分配连接表、为每条连接挑一种传输方式、和对端交换句柄、映射显存/网卡资源，最后把连接信息下发到 GPU。
 
-连接建立流程：
+这是整章最"硬"的一节，我们从结构层次讲起，再讲建链过程。
 
-```cpp
-// P2P 连接建立（含 SHM fallback）
-ncclTransportP2pSetup(comm, NULL, 1);
+#### 2.7.1 全景：一条五层结构链
 
-// Ring 连接：逐一建立 send/recv connector
-ncclTransportRingConnect(comm);
-// Tree 连接：建立父子连接
-ncclTransportTreeConnect(comm);
-// CollNet：网内计算资源
-ncclCollNetSetup(comm, parent, graphs);
-// NVLS：Multicast 缓冲区
-ncclNvlsBufferSetup(comm);
+前面 1.5 节我们分别认识了这些结构体，现在把它们按**"逻辑 → 物理"的顺序串起来**：
 
-// Proxy 初始化
-ncclProxyInit(comm);
+```
+ncclComm（通信器）                          ← 一个通信域的全部上下文
+  └── ncclChannel channels[MAXCHANNELS]     ← 并行通道数组（nChannels 条）
+        └── ncclChannelPeer* peers[nRanks]  ← "连接表"：下标 = peer 的 rank
+              └── ncclConnector send[2]/recv[2]   ← 连接子：一条具体连接
+                    └── ncclTransportComm* transportComm   ← 走哪类物理链路
+                          └── 物理资源（P2P 显存映射 / SHM 主机内存 / NET QP …）
 ```
 
-在 `ncclTransportP2pSetup` 中（`src/transport.cc:20-42`），`selectTransport` 模板函数按优先级遍历 `ncclTransports[]`（P2P → SHM → NET → CollNet），调用 `canConnect` 判断两节点是否可用当前传输，然后调用对应的 `setup`。
+逐层的职责与数量关系：
 
-**P2P Transport**（`src/transport/p2p.cc`）支持四种模式：
+| 层 | 数据结构 | 职责 | 数量 | 代码位置 |
+|----|----------|------|------|----------|
+| **① 通信器** | `ncclComm` | 一个通信域的全局上下文 | 1 | `comm.h:523-797` |
+| **② 通道** | `ncclChannel` | 一条独立的并行通信管道（承载一份数据切片） | `nChannels`（≤ `MAXCHANNELS`=64） | `comm.h:150-172` |
+| **③ 连接表** | `ncclChannelPeer* peers[]` | "本 rank 在这个通道里，与各 peer 的连接载体"；**下标就是 rank 号** | 每通道 `nRanks` 项 | `comm.h:151` |
+| **④ 连接子** | `ncclConnector` | 一条具体连接：走哪个传输、有哪些资源、进度指针在哪 | 每 peer `2 send + 2 recv` | `device.h:165-173` |
+| **⑤ 传输虚函数表** | `ncclTransportComm` | 这条连接用**哪类**物理链路（P2P/SHM/NET/CollNet）及其操作集 | 全局 4 种实例 | `transport.h:117-134` |
+| **⑥ 物理资源** | `p2pResources` / `shm*Resources` / `sendNetResources` … | 真正的东西：显存映射、主机内存、网卡 QP | 每条连接一份 | 各 `transport/*.cc` |
 
-- `P2P_DIRECT`：GPU 直接 P2P 访问（NVLink/C2C）
-- `P2P_INTERMEDIATE`：通过中间 GPU 中转
-- `P2P_IPC`：CUDA IPC（同主机不同进程）
-- `P2P_CUMEM`：cuMem API（CUDA 12.0+ 虚拟地址）
+> **一句话理解这个层次**：**通信器**划定"谁能和谁说话"；**通道**把数据切成几份并行处理；**连接表**用 rank 号索引"我和每个人的连接"；**连接子**描述"这一条连接"；**传输**决定"这条连接走什么物理链路"；**物理资源**才是内存里真实的句柄、地址和队列。
 
-**NET Transport**（`src/transport/net.cc`）通过 Net Plugin API（v12）与 RDMA 网卡交互。Setup 阶段交换 `ncclNetHandle_t`（含 QP 信息），Connect 阶段修改 QP 状态到 RTS。
+#### 2.7.2 第一步：建通道，同时分配它的"连接表"
 
-### 2.7 国产芯片适配要点
+阶段四算出了每个 channel 的 ring 环序，接下来按它建通道并分配连接表（`src/init.cc:791-808`）：
+
+```cpp
+// src/init.cc:791-793（节选）
+static ncclResult_t setupChannel(struct ncclComm* comm, int channelId, int rank, int nranks, int* ringRanks) {
+  NCCLCHECK(initChannel(comm, channelId));   // ① 分配该通道的连接表（下面展开）
+  struct ncclRing* ring = &comm->channels[channelId].ring;
+  ...                                        // ② 按 ringRanks 填 ring->userRanks / rankToIndex / index
+}
+```
+
+`initChannel` 里分配连接表的关键几行（`src/channel.cc:17-39`）：
+
+```cpp
+// src/channel.cc:17-39（节选）
+int nPeers = nRanks + 1 /* Collnet */ + nvlsRanks /* NVLS */;
+channel->peers = ncclMemoryStackAlloc<struct ncclChannelPeer*>(&comm->memPermanent, nPeers);
+for (int r = 0; r < nRanks; r++) {
+  channel->peers[r] = comm->sharedRes->peers[channelId] + comm->topParentRanks[r];
+  ncclAtomicRefCountIncrement(&channel->peers[r]->refCount);
+}
+```
+
+要点：
+
+- `peers` 是**按 rank 编号索引**的指针数组，长度是 `nRanks + 1（CollNet 用）+ 本节点 GPU 数（NVLS 用）`；
+- **此刻表里的每一项都还是"空连接载体"**——`ncclChannelPeer` 里的 connector 尚未建连（`connected == 0`）。真正填内容是接下来的步骤；
+- 数组元素来自 `comm->sharedRes->peers[channelId]`（**共享资源**），并用 `refCount` 计数——所以 `ncclCommSplit` 出来的子通信器能复用父通信器已分配的这些载体（呼应 1.5 节 `sharedRes` 的作用）；
+- 同一段代码还分配了 **device 侧镜像** `channel->devPeers`（`src/channel.cc:42-56`）——连接信息最终要出现在 GPU 能读到的地方，所以 host 侧和 device 侧各有一套。
+
+#### 2.7.3 第二步："登记"要建哪些连接
+
+Ring/Tree 的建链入口会先**登记**（而不是立刻建）需要建立的连接（`src/transport/generic.cc:24-28`）：
+
+```cpp
+// src/transport/generic.cc:24-28（Ring，节选）
+for (int c = 0; c < comm->nChannels; c++) {
+  struct ncclChannel* channel = comm->channels + c;
+  NCCLCHECKGOTO(ncclTransportP2pConnect(comm, c, 1, &channel->ring.prev, 1, &channel->ring.next, 0), ret, fail);
+}
+NCCLCHECKGOTO(ncclTransportP2pSetup(comm, &comm->graphs[NCCL_ALGO_RING], 0), ret, fail);
+```
+
+`ncclTransportP2pConnect`（`src/transport.cc:44-69`）做的事很轻：按 ring 的 `prev`/`next`（Tree 则按 `up`/`down[]`）把"我要和哪个 peer 建连"记进 `comm->connectSend` / `connectRecv` 两个**位图**（每个 bit 代表一个 channel），并跳过 `connected` 已为 1 的连接。
+
+> **为什么先"登记"再"建"？** 因为建连是**成对**的：A 要连 B，B 也要连 A。先把全体要建的连接汇总成位图，才能高效地做"批量握手"（下一步的 setup/connect 会遍历这些位图，一次把同 peer 的多条连接一起处理），避免每个 channel 各自来回通信。
+
+#### 2.7.4 第三步：两段式建链 —— setup（换句柄）→ connect（映射资源）
+
+这是整个阶段五最核心的机制，也是最容易被忽略的细节。NCCL 把"建立一条连接"拆成了**两段**，对应 `ncclTransportComm` 里的两个函数指针：
+
+| 段 | 函数 | 做什么 | 是否跨 rank 通信 |
+|----|------|--------|------------------|
+| **setup** | `transportComm->setup(...)` | 生成"**让对方能连上我**"的信息（信封），并通过 **bootstrap** 与对端交换；同时创建 `transportResources`（物理资源容器） | ✅ 交换（用阶段二的控制面） |
+| **connect** | `transportComm->connect(...)` | 拿到对端信封后，**真正完成映射/连接**，把结果填进 `connector->conn` | 部分（如 NET 需改 QP 状态） |
+
+两段之间传递的"信封"是一个**不透明缓冲区**：
+
+```cpp
+// src/include/transport.h:70-72
+struct ncclConnect {
+  char data[CONNECT_SIZE];   // 内容由各 transport 自己解释
+};
+```
+
+> 为什么设计成不透明缓冲区？因为不同传输要交换的东西完全不同：P2P 交换的是**显存缓冲区的 IPC/cuMem 句柄**，NET 交换的是**网卡 handle（含 QP 信息）**，SHM 交换的是**共享内存 IPC 描述符**。用固定大小的 `char[]` 统一信封，传输层就能横向插拔——这正是 4 种 transport 能共用一套流程的原因。
+
+**connect 之后，连接信息会被下发到 GPU**（`src/transport.cc:242-253`）：
+
+```cpp
+// src/transport.cc:242-253（节选）
+struct ncclConnector* conn = comm->channels[c].peers[sendPeer]->send + connIndex;
+if (conn->connected == 0) {
+  NCCLCHECKGOTO(conn->transportComm->connect(comm, sendData[p] + sendDataOffset, 1, comm->rank, conn), ret, fail);
+  if (ret == ncclSuccess) {
+    conn->connected = 1;
+    /* comm->channels[c].devPeers[sendPeer]->send[connIndex] is a device memory access. */
+    CUDACHECKGOTO(cudaMemcpyAsync(&comm->channels[c].devPeersHostPtr[sendPeer]->send[connIndex],
+                                  &conn->conn, sizeof(struct ncclConnInfo), cudaMemcpyHostToDevice, hostStream),
+                  ret, fail);
+  } else if (ret == ncclInProgress) {
+    allChannelsConnected = false;   // ← 连接可能异步进行，未完成则稍后重试
+  }
+}
+```
+
+注意 `ret == ncclInProgress` 这一分支：**建连是允许异步的**（比如某些传输的连接需要等网卡状态），所以 `ncclTransportP2pSetup` 内部会循环重试直到所有 channel 都连上。
+
+#### 2.7.5 连接子里面到底装了什么：`ncclConnInfo`
+
+`connect` 的成果全部体现在 `connector->conn`（类型 `ncclConnInfo`，`src/include/device.h:133-151`）里。这个结构体是**内核真正使用的东西**，值得逐字段看：
+
+| 字段 | 含义 |
+|------|------|
+| `buffs[NCCL_NUM_PROTOCOLS]` | 三个协议（LL/LL128/SIMPLE）各自的**缓冲区地址**——发送方向指向对端显存（或本地发缓冲），接收方向指向本地缓冲 |
+| `tail` / `head` | **进度指针**：head 由发送侧推进、tail 由接收侧推进；GPU 内核与 Host Proxy 线程就是靠这两个指针"对话"（呼应 5.3 节的 Proxy 机制） |
+| `connFifo` | GPU ↔ Proxy 之间传递控制信息的**环形缓冲** |
+| `ptrExchange` / `redOpArgExchange` | 直连（direct pointer）模式下的**指针交换区**与 reduce 参数交换区 |
+| `mhandles[]` / `netDeviceHandle` | 内存**注册句柄**（RDMA 的 MR）、网卡设备句柄 |
+| `flags` | 连接属性（如 `NCCL_P2P_WRITE` / `NCCL_P2P_READ` / `NCCL_DIRECT_NIC`） |
+| `stepSize` / `step` / `llLastCleaning` | 流水线的步进与内部状态 |
+
+**以 P2P（同机 GPU 直连）为例，看 connect 具体填了什么**（`src/transport/p2p.cc:536-557`）：
+
+```cpp
+// src/transport/p2p.cc:536-557（节选）
+struct p2pResources* resources = (struct p2pResources*)send->transportResources;
+// ① 把对端的进度标记内存映射进本进程地址空间
+NCCLCHECK(p2pMap(comm, &send->proxyConn, comm->peerInfo + rank, comm->peerInfo + info->rank, &info->p2pBuff,
+                 (void**)&remDevMem, &resources->recvMemIpc));
+// ② 切分缓冲区：把对端显存里的各协议缓冲区首地址，逐个填进 conn.buffs[]
+char* buff = (char*)(remDevMem + 1);
+for (int p = 0; p < NCCL_NUM_PROTOCOLS; p++) {
+  send->conn.buffs[p] = buff;
+  buff += comm->buffSizes[p];
+}
+send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE] / NCCL_STEPS;
+```
+
+> 这两句就是 **"P2P 直连"的全部魔法**：`p2pMap` 把对端显存映射到了本进程的地址空间（用的是 CUDA IPC / cuMem / 或对端在同进程时直接给指针），于是 `conn.buffs[p]` 就是**一个本进程可写的、指向对端显存的地址**——之后 GPU 内核用普通的 `st.global` 指令写这个地址，数据就出现在对端显存里了。**不需要网卡、不需要 CPU 搬运**。
+
+#### 2.7.6 四类传输各自对应哪些物理资源
+
+| 传输（虚函数表实例） | 常量 | resources 结构 | 物理资源 | 代码位置 |
+|---------------------|------|----------------|----------|----------|
+| `p2pTransport` | `TRANSPORT_P2P` (0) | `p2pResources` | 对端显存映射（IPC/cuMem 句柄）、进度标记内存（`ncclSendMem`/`ncclRecvMem`） | `p2p.cc:80-95` |
+| `shmTransport` | `TRANSPORT_SHM` (1) | `shmSendResources` / `shmRecvResources` | **主机内存**（共享内存段）+ IPC 描述符 | `shm.cc:28-42` |
+| `netTransport` | `TRANSPORT_NET` (2) | `sendNetResources` / `recvNetResources` | 网卡通信对象（**QP**）、内存注册句柄、GDR 描述符、网卡设备句柄 | `net.cc:89-137` |
+| `collNetTransport` | `TRANSPORT_COLLNET` (3) | CollNet 相关资源 | 交换机侧 SHARP 资源 | `coll_net.cc` |
+| （`profilerTransport`） | `TRANSPORT_PROFILER` (4) | — | 仅为轮询 profiler 计数器而存在，不是真正的传输 | — |
+
+其中 P2P 内部还细分为四种模式（`src/transport/p2p.cc:20-25` 的 `enum p2pType`），由 `p2pGetInfo` 依据拓扑和 cuMem 可用性自动选择：
+
+| 模式 | 含义 |
+|------|------|
+| `P2P_DIRECT` | 对端显存可直接访问（NVLink / C2C / 同进程） |
+| `P2P_INTERMEDIATE` | 两者不能直连，需**经一张中间的 GPU 中转** |
+| `P2P_IPC` | 同主机不同进程，用传统 CUDA IPC 共享显存 |
+| `P2P_CUMEM` | 用 cuMem API（CUDA 12+ 虚拟地址管理，支持 MNNVL 多节点 NVLink） |
+
+而 NET transport 与网卡的交互完全通过 **Net Plugin API**（`src/include/plugin/nccl_net.h`，v12）：**setup** 阶段向对端提供网卡的 `handle`（内含 QP 信息），**connect** 阶段把对端 QP 置为 RTS（Ready To Send）状态——这也是"国产网卡替换"最关键的一个接口（见 2.8 节）。
+
+#### 2.7.7 第四步：收尾 —— Proxy 与运行时资源
+
+各算法/传输的建链依次完成后，还有一批"运行时资源"要初始化：
+
+```cpp
+ncclTransportP2pSetup(comm, NULL, 1);      // P2P 连接（connIndex=1，点对点 Send/Recv 用）
+ncclTransportRingConnect(comm);            // Ring 连接（connIndex=0，集合通信用）
+ncclTransportTreeConnect(comm);            // Tree 连接（connIndex=0）
+ncclCollNetSetup(comm, parent, graphs);    // CollNet 网内计算资源（若启用）
+ncclNvlsBufferSetup(comm);                 // NVLS Multicast 缓冲区（若支持）
+ncclProxyInit(comm);                       // ★ Proxy 线程 + 共享内存 op 池
+```
+
+> **注意这里 `connIndex` 的差异**：`0` 给集合通信（Ring/Tree/CollNet 共用），`1` 给点对点 Send/Recv——这正是 1.5 节里 `NCCL_MAX_CONNS = 2` 的由来。
+>
+> `ncclProxyInit` 是"连接层"和"运行时"的分界点：它把 5.3 节讲的 Proxy 线程和共享内存 op 池建起来，从此 GPU 内核与 Host 之间就有了数据搬运的通道。到这一步，`comm->channels[]` 里的连接**全部可用**，通信器正式"就绪"。
+
+#### 2.7.8 回看这条链：一次调用的完整旅程
+
+把本章五个阶段串成一条线：
+
+```
+ncclGetUniqueId
+   → 生成"集会地点"（root IP:port + magic）
+ncclCommInitRank → ncclCommInitRankDev
+   → 分配 ncclComm 空壳（含 abortFlag、魔数哨兵）
+ncclCommInitRankFunc（异步任务体，真正干活）
+   ├─ 阶段② bootstrapInit ──────────── 建带外控制面（TCP/UDS）
+   ├─ 阶段③ 第一轮 AllGather ───────── 交换 peerInfo（我是谁、我在哪）
+   ├─ 阶段④ ncclTopoGetSystem + ncclTopoCompute
+   │         ──────────────────────── 探测拓扑 → 搜索 Ring/Tree/CollNet/NVLS 图
+   ├─ 阶段③ 第二轮 AllGather ───────── 交换图计算结果（全局达成一致）
+   └─ 阶段⑤ setupChannel / Connect 系列
+             ├─ channels[c].peers[]    分配连接表（按 rank 索引）
+             ├─ ncclTransportP2pConnect 登记要建的连接（位图）
+             ├─ setup（交换句柄 via bootstrap）
+             ├─ connect（映射显存/QP，填 conn，下发到 device）
+             └─ ncclProxyInit           建 Proxy 线程与 op 池
+   → 通信器可用，可以开始 ncclAllReduce
+```
+
+> **这条链体现的设计哲学**：**逻辑与物理分离**。阶段四产出的是纯粹的"逻辑图"（谁和谁相邻），阶段五才把它落到具体传输和资源上。好处是：换一种物理链路（比如国产网卡、自研互联）只需要替换阶段五的 transport 实现，前面的拓扑/图逻辑完全不用动。
+
+### 2.8 国产芯片适配要点
 
 > 本节梳理了 NCCL 中 NV 闭源组件对应的抽象层，以及可能的替换策略，供国产芯片适配时参考。
 
