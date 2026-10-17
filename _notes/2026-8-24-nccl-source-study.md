@@ -766,7 +766,164 @@ groupJob->nonBlockingInit = true;
 ret = ncclInProgress;   // ← 立即返回"进行中"
 ```
 
-这种情况下调用方需要用 `ncclCommGetAsyncError()` **轮询**，直到状态变成 `ncclSuccess`。这就是"非阻塞初始化"的全貌——本质是**把初始化工作挪到后台线程**，让主线程可以先去干别的（比如加载数据）。（注意这也是 `ncclCommInitRankConfig` 在 `:2680-2683` 里对非阻塞 comm 调用 `ncclCommGetAsyncError` 的原因。）
+##### 先厘清：这个 `ncclInProgress` 到底是"谁"返回的？
+
+这是读这段代码最容易踩的坑。答案是：
+
+> **`ncclInProgress` 是 `ncclGroupEndInternal()`（`src/group.cc:857`）返回的**——也就是 Group 的"发令枪"。
+> 上面代码里的 `ret` 是 `ncclGroupEndInternal` 的**局部变量**，随后由函数末尾的 `return ret` 抛出。
+
+**不是** `ncclAsyncLaunch` 返回的，也**不是** `ncclCommInitRankDev` 返回的。这两个函数在 Group 模式下返回的都是 `ncclSuccess`——那个成功**只代表"任务已成功入队"**，不代表初始化已经完成：
+
+```cpp
+// src/group.cc:44-69（ncclAsyncLaunch 的 Group 分支，节选）
+} else {
+  job->func = func;
+  job->state = ncclGroupJobRunning;
+  ncclIntruQueueEnqueue(&ncclAsyncJobs, job);   // ← 只是把任务挂到这个 thread_local 队列
+  ...
+}
+return ret;   // ret 仍是 ncclSuccess
+```
+
+所以完整的两跳传播链是：
+
+```
+①  ncclGroupEndInternal()
+        │  （非阻塞分支里 ret = ncclInProgress 后 return）
+        ▼
+②  ncclCommInitRankConfig 的收尾：
+    NCCLCHECK( ncclGroupEndInternal() )
+        │  （NCCLCHECK 对 ncclInProgress 放行，不中断）
+        ▼
+③  ncclCommGetAsyncError( *newcomm, &ret )
+        │  （用 comm->asyncResult 覆盖 ret）
+        ▼
+④  return ret   →   用户拿到 ncclInProgress
+```
+
+要特别注意 `ncclCommInitRankConfig` 的收尾这段（`src/init.cc:2677-2687`）：
+
+```cpp
+exit:
+  ncclGroupErrCheck(ret);
+  NCCLCHECK(ncclGroupEndInternal());          // ① 这里可能返回 ncclInProgress
+  if (newcomm && *newcomm) {
+    if (!(*newcomm)->config.blocking) {
+      (void)ncclCommGetAsyncError(*newcomm, &ret);   // ② 用 comm 自己的状态覆盖 ret
+    }
+    ...
+  }
+  return ret;
+```
+
+第 ① 步返回 `ncclInProgress` 却**不会**提前结束函数，是因为 `NCCLCHECK` 对 `ncclInProgress` 是**放行**的（`src/include/checks.h:148-156`）：
+
+```cpp
+#define NCCLCHECK(call) \
+  do { \
+    ncclResult_t RES = call; \
+    if (RES != ncclSuccess && RES != ncclInProgress) { \
+      return RES;   // ← 只有真正的错误才返回；inProgress 会继续往下走
+    } \
+  } while (0)
+```
+
+于是控制流走到 ②，用 `comm` 自己的异步状态覆盖 `ret`——**这才是函数最终返回给用户的值**。
+
+##### `ncclCommGetAsyncError` 只是"读一个原子变量"，它不干活
+
+这是第二个容易误解的点。它的实现只有几行（`src/init.cc:3448-3456`）：
+
+```cpp
+ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t* asyncError) {
+  NCCLCHECK(CommCheck(comm, "ncclGetAsyncError", "comm"));
+  NCCLCHECK(PtrCheck(asyncError, "ncclGetAsyncError", "asyncError"));
+
+  *asyncError = COMPILER_ATOMIC_LOAD(&comm->asyncResult, std::memory_order_acquire);  // ← 纯读
+  if (*asyncError == ncclSuccess && comm->proxyState) {
+    *asyncError = COMPILER_ATOMIC_LOAD(&comm->proxyState->asyncResult, std::memory_order_acquire);
+  }
+  // 后面还会顺带检查 GIN progress 线程的状态……
+}
+```
+
+它**不推进、不阻塞、不等待**任何工作——就是一次 `acquire` 语义的原子读。所以它是"**查询**"，不是"**推进**"。
+
+进度是由**另一个线程**推进的，形成一个标准的"生产者—消费者"模型：
+
+| 阶段 | 谁在做 | 动作 | 源码位置 |
+|------|--------|------|----------|
+| **置为进行中** | 主线程（`ncclGroupEndInternal` 起线程前） | `ncclCommSetAsyncError(comm, ncclInProgress)` 把 `comm->asyncResult` 写成 `ncclInProgress` | `group.cc:830` / `group.cc:843` |
+| **后台推进** | 新起的后台线程 | `groupLaunchNonBlocking` → `groupLaunch` → `ncclCommInitRankFunc` 真正建通信器 | `group.cc:855` → `group.cc:762` |
+| **写入终态** | 后台线程（`groupLaunch` 收尾） | `if (!comm->config.blocking) ncclCommSetAsyncError(comm, ret)`，把状态改成 `ncclSuccess` 或错误码 | `group.cc:748-750` |
+| **读取状态** | 用户线程 | `ncclCommGetAsyncError(comm, &err)` 原子读 `comm->asyncResult` | `init.cc:3453` |
+
+> 顺便区分两个容易混淆的字段：`comm->asyncResult`（`comm.h:647`）是 **Group 层对外暴露**的异步状态，`ncclCommGetAsyncError` 读的是它；而 `comm->initState`（`comm.h:741`）是**初始化函数内部**的进度标记（`init.cc:2514` 置为 `ncclInProgress`，`init.cc:1924` 在 `initTransportsRank` 成功后置为 `ncclSuccess`）。两者分工不同，`ncclCommEnsureReady` 检查的是前者。
+
+##### 谁必须轮询？（直接回答"哪个流程需要保证初始化完成"）
+
+**不需要"某个额外流程"去轮询——谁想用这个 comm，谁就得先确认它 ready。** 具体分两类：
+
+**（1）直接以 `blocking = 0` 调用 `ncclCommInitRankConfig` 的用户代码**
+
+API 只是"把状态告诉你一次"就返回了，**不会替你等**。你必须自己写轮询循环：
+
+```c
+// 非阻塞初始化的典型用法（伪代码，语义与 NCCL 官方示例一致）
+ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
+config.blocking = 0;
+ncclComm_t comm;
+ncclCommInitRankConfig(&comm, nranks, id, rank, &config);   // 返回 ncclInProgress
+
+// 主线程可以先去做别的事，比如加载数据、建 pipeline
+load_data();
+
+ncclResult_t asyncErr = ncclInProgress;
+while (asyncErr == ncclInProgress) {
+  ncclCommGetAsyncError(comm, &asyncErr);   // 反复读那个原子变量
+}
+if (asyncErr != ncclSuccess) { /* 初始化失败，处理错误 */ }
+```
+
+**（2）任何后续要使用这个 comm 的代码——NCCL 会强制拦住你**
+
+这一点很关键：NCCL 在几乎所有 API 的入口都埋了一道检查 `ncclCommEnsureReady()`（`src/init.cc:422-439`）：
+
+```cpp
+ncclResult_t ncclCommEnsureReady(ncclComm_t comm) {
+  ncclResult_t ret = ncclSuccess;
+  if (COMPILER_ATOMIC_LOAD(comm->abortFlag, std::memory_order_acquire)) {
+    ncclGroupJobAbort(comm->groupJob);
+  } else {
+    NCCLCHECK(ncclCommGetAsyncError(comm, &ret));       // ← 内部也是调它去读状态
+    if (ret == ncclInProgress) {
+      WARN("Attempt to use communicator before the previous operation returned ncclSuccess");
+      ret = ncclInvalidArgument;                        // ← 直接判为非法使用
+      goto exit;
+    }
+  }
+  return ret;
+}
+```
+
+`ncclCommCount`、`ncclCommCuDevice`、`ncclCommUserRank`、集合通信、`ncclCommFinalize`……这些函数的第一句基本都是 `NCCLCHECK(ncclCommEnsureReady(comm))`。所以如果你在初始化还没完成时就去用这个 comm，会直接拿到 `ncclInvalidArgument` 和那条醒目的 WARN。
+
+**换句话说**：轮询这件事不是"可选的性能优化"，而是**非阻塞模式下的强制契约**——要么你自己轮询到 `ncclSuccess`，要么你就会被 `ncclCommEnsureReady` 挡在门外。
+
+##### 顺带把 Group 机制的作用讲清楚
+
+到这儿可以回头理解 Group 到底为什么存在了。`ncclGroupStart()` / `ncclGroupEnd()` 的本质是**"攒批 + 统一发令"**：
+
+- 在 `ncclGroupStart` 与 `ncclGroupEnd` **之间**，所有 API 调用都只是**登记**：把任务塞进 `thread_local` 队列 `ncclAsyncJobs`（`group.cc:31`），**一个都还没真正执行**；
+- 只有到了 `ncclGroupEnd`，才一次性决定怎么启动它们（同步 `groupLaunch` 或后台线程）；
+- 由于队列是 `thread_local` 的，每个进程各自攒自己那一批，然后**所有 rank 在同一个 Group 边界上一起发令**。
+
+这个设计的价值在于：集合通信/初始化都要求"所有 rank 都到齐才能开始"。如果 rank 0 早早开始 Send 而 rank 1 还没准备好，就会卡死或者走成低效路径。**用 Group 把"下发"和"启动"分离**，能保证所有 rank 把该登记的都登记完，再同时起跑——既避免了时序错配导致死锁，也让多流、多 comm 的操作可以并发启动。
+
+而"非阻塞"只是这个机制上的一个开关（`config.blocking = 0`）：发令之后不等结果，**先把控制权还给调用者**，进度交给后台线程，状态通过 `asyncResult` 暴露给 `ncclCommGetAsyncError`。这就是"非阻塞初始化"的全貌。
+
+> 补充一句：`ncclCommInitRankConfig` 自己内部就包了一层 `ncclGroupStartInternal()` / `ncclGroupEndInternal()`（`init.cc:2667` / `init.cc:2679`）。所以即便用户代码里没有写 `ncclGroupStart`，走进 `ncclAsyncLaunch` 时 `ncclGroupDepth` 也已经是 1 —— 这就是为什么它一定会经过"入队 → 发令"这条路，而不是直接同步执行。
 
 #### 2.1.5 执行层：`ncclCommInitRankFunc` 才是真正干活的那个
 
