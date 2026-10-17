@@ -649,7 +649,7 @@ NCCL 提供了四种实例，分别对应四类链路：
 ```cpp
 // src/init.cc:2562-2578（完整函数体）
 ncclResult_t ncclCommInitRank(ncclComm_t* newcomm, int nranks, ncclUniqueId commId, int myrank) {
-  NCCLCHECK(ncclInitEnv());                        // ① 环境准备（加载环境变量等）
+  NCCLCHECK(ncclInitEnv());                        // ① 进程级一次性初始化（见下方说明）
   NVTX3_RANGE(NcclNvtxParamsCommInitRank)          // ② 性能标记（见 5.1 节）
   (void)ncclCudaLibraryInit();                     // ③ 加载 CUDA 驱动、解析 dlsym hook
   int cudaDev;
@@ -664,6 +664,82 @@ ncclResult_t ncclCommInitRank(ncclComm_t* newcomm, int nranks, ncclUniqueId comm
 ```
 
 > 这两点最能体现"门面"性质：**（1）** 它把"当前是哪个设备""用什么配置"这些**上下文信息**补全后传下去（因为 `ncclCommInitRank` 的签名里根本没有 device 参数，它默认用当前设备）；**（2）** 它把 `__func__`（调用者函数名）一路传下去，让下层在出错时能报出"是哪个 API 调用的"。
+
+##### 顺带解释：`ncclInitEnv()` 与 `ncclInit()` 到底在做什么
+
+这两个函数你在后面每个公共 API 入口都会反复看到，这里讲一次，后续不再重复。
+
+**① 为什么需要这样一个"进程级初始化"？**
+
+NCCL 是被加载进**你的进程**里的一个库。在它能够建立任何通信器之前，有一批东西必须先准备好，而这些准备事项有三个共同特征：
+
+1. **属于整个进程，不属于某个 comm**——比如"用哪块网卡做带外通道"、"环境变量从哪儿读"；
+2. **只需做一次**——比如"把 GPU 显存映射到 CPU 可访问地址"；
+3. **成本高或必须唯一**——`dlopen` 一个库、探测网卡、改进程级线程属性都是重操作，重复做既浪费也可能出错。
+
+这类东西显然不能塞进"每个 comm 各自的初始化"里：`ncclCommInitRank` 在真实训练里会被调用**很多次**（数据并行一个 comm、张量并行又一个、MoE 再一个），每次都去 dlopen、探网卡、改线程默认属性，纯属浪费。所以 NCCL 把它们抽成**一次性初始化**，用 `std::call_once` 保证全进程只执行一次。
+
+而 `ncclInitEnv()` 只做一件事：初始化**环境变量插件**（`ncclEnvPluginInit()`，`init.cc:170-173`）——决定环境变量"从哪里读"（默认直接读进程环境，也可由 `plugins/env` 接管）。它比 `ncclInit()` 更靠前，因为后面那些初始化本身可能就要读环境变量。
+
+**② `ncclInit()` 具体做了哪四件事**
+
+源码注释里那句 "Bootstrap network, CPU stack, GDR" 就是这四件事的缩写（`initOnceFunc`，`init.cc:147-155`）：
+
+| 步骤 | 做了什么 | 为什么需要 |
+|------|---------|-----------|
+| `ncclOsInitialize()` | 把**新建 pthread 的默认栈大小**抬到至少 8MB（`SAFE_STACK_SIZE`），通过 `pthread_setattr_default_np` 改进程默认值 | Linux 默认线程栈可能偏小（尤其 `RLIMIT_STACK` 为 unlimited 时），NCCL 内部线程栈溢出会直接崩。受 `NCCL_SET_CPU_STACK_SIZE` 控制（`src/os/linux.cc:152-157`） |
+| `initGdrCopy()` | 若 `NCCL_GDRCOPY_ENABLE=1`（**默认关**），动态加载 GDRCopy 库，句柄存进全局 `ncclGdrCopy` | 让 CPU 能低延迟读写显存，见下面 ③（`init.cc:137-142`） |
+| `bootstrapNetInit()` | 选定 bootstrap 带外通道用**哪块网卡/IP**：设了 `NCCL_COMM_ID` 就找同子网的本地网卡，否则自动挑一张；结果存进静态变量 `bootstrapNetIfName` / `bootstrapNetIfAddr` | 所有 rank 要靠这条 TCP/UDS 通道交换地址、QP 号等信息，才能建出 NVLink/RDMA 链路。你看到的 `Bootstrap: Using eth0:10.0.0.5` 就是它打的（`src/bootstrap.cc:105-138`） |
+| `initNvtxRegisteredEnums()` | 注册 NVTX 所需的枚举与描述符 | 供 5.1 节的性能标记使用 |
+
+> 注意"CPU stack"是**字面义**：CPU 侧线程栈大小，不是 CPU 拓扑。
+
+**③ GDRCopy 是什么（先把缩写说清楚）**
+
+- **GDR = GPUDirect RDMA**
+- **GDRCopy = GDR + Copy**，即"**基于 GPUDirect RDMA 技术做的 Copy 库**"
+
+所以严格讲，**GDRCopy 不等于 GPUDirect RDMA**。两者共用同一套底层机制（把 GPU 显存通过 PCIe BAR 映射到 CPU 可寻址的空间），区别在于**谁去访问显存**：
+
+| 技术 | 访问发起方 | 典型用途 |
+|------|-----------|---------|
+| **GPUDirect RDMA**（简称 GDR） | **第三方 PCIe 设备**，典型是 RDMA 网卡 | 网卡直接 DMA 读写 GPU 显存，**跨节点 RDMA 传输的基石** |
+| **GDRCopy** | **CPU** | CPU 用普通 load/store 直接读写显存，**省掉 `cudaMemcpy`** |
+
+GDRCopy 官方 README 的原话就是这个意思：GPUDirect RDMA 本是给"第三方设备直访显存"设计的，而 GDRCopy 把这套技术**搬给 CPU 用**。
+
+> **注意：NCCL 源码里 "GDR" 有两个不同含义**，读代码时很容易混：
+>
+> | 代码里的写法 | 实际指什么 |
+> |---|---|
+> | `ncclGdrCopy`、`initGdrCopy()`、`NCCL_GDRCOPY_ENABLE` | **GDRCopy**（CPU 直访显存）——本节开头 `ncclInit()` 注释里的 "GDR" 就是这个 |
+> | `peerInfo->gdrSupport`、`ncclIbGdrSupport()`、`ncclGpuGdrSupport()` | **GPUDirect RDMA**（网卡直访显存，依赖 `nvidia_peermem` 内核模块）。`src/include/net.h:28` 的注释原文就是 "Test whether the current GPU support GPU Direct RDMA" |
+
+具体到 GDRCopy，它做的事很朴素：**把一块 GPU 显存"钉住"（pin）并映射到 CPU 的用户态地址空间**，于是 CPU 就能用普通的读内存指令直接访问显存。
+
+关键在延迟差一个量级：`cudaMemcpy` 一次往返通常**微秒**级，而 GDRCopy 映射后 CPU 直接 load/store 只要**几百纳秒**。
+
+NCCL 主要用它来**让 CPU 侧（proxy 线程）低延迟读到 GPU 侧写的标志位**，例如：
+
+- `workFifo`（CPU 向 GPU 内核下发任务的队列）直接放在 GDR 映射的显存里（`init.cc:631-634`）；
+- NET / CollNet transport 的同步标志 `gdcSync` 和 flush 标志 `gdcFlush`（`net.cc:966-970`、`net.cc:1137-1140`、`net.cc:1658`）。
+
+一句话对比：**普通路径是"GPU 写显存 → CPU 用 cudaMemcpy 拷回来"；GDR 路径是"GPU 写显存 → CPU 直接用指针读"**，省掉那次拷贝。它默认关闭，需要 `NCCL_GDRCOPY_ENABLE=1` 且系统装了 `libgdrapi`；不满足时会自动降级回普通 host 内存方案（`gdrwrap.h:287-293` 的 `allocMemCPUAccessible` 就是这段降级逻辑）。
+
+**④ 为什么每个 API 入口都无脑调一遍？**
+
+因为实现是 `std::call_once` + 静态变量缓存结果（`init.cc:157-173`）：
+
+```cpp
+static ncclResult_t ncclInit() {
+  std::call_once(initOnceFlag, initOnceFunc);   // 只有第一次真正执行
+  return initResult;                            // 之后每次只是读一个已完成的标志
+}
+```
+
+所以它**幂等且近乎零成本**。NCCL 在每个入口调它，要的不是"再初始化一次"，而是"**确保底层已经就绪**"——哪怕这个 API 恰好是用户调用的第一个 NCCL 函数。
+
+> 一个容易看漏的点：`ncclCommInitRank` 这里**只调了 `ncclInitEnv()`，没有 `ncclInit()`**。`ncclInit()` 是在更下层的 `ncclCommInitRankDev` 里调的（`init.cc:2489`）；此外 `ncclGetUniqueId`（2.3 节）和 `ncclCommGrow` 也各会调一次——反正有 `call_once` 兜底，重复调用没有代价。
 
 #### 2.1.2 命名规范：`Dev` / `Func` / `AsyncJob` 后缀的含义
 
@@ -1668,7 +1744,7 @@ Progress 线程的启停由 `ginState->ginProgress` 状态控制：`0`（暂停�
 | 通信触发者 | Host 侧 Proxy 线程通过 `ncclProxyProgress` | GPU Kernel 内直接调用 `ncclGinApi_Put` / `ncclGinApi_Get` |
 | Kernel 与通信的 overlap | 粗粒度：Kernel 结束 → Proxy 处理 → 下一个 Kernel | 细粒度：同一 Kernel 内计算与通信交替执行 |
 | 同步机制 | 通过 `ncclSendMem.head` / `ncclRecvMem.tail` 跟踪进度，Host 可读写 | 通过 `ncclGinSignalDescriptor` 和 `ncclGinCounter`，设备端直接操作 |
-| 数据路径 | GPU → (GDR) → Host Buffer → Net Plugin → NIC | GPU → GIN Backend → NIC（尽可能短） |
+| 数据路径 | GPU → (GDRCopy) → Host Buffer → Net Plugin → NIC | GPU → GIN Backend → NIC（尽可能短） |
 | 代码位置 | `src/proxy.cc`、`src/transport/net.cc` | `src/gin/gin_host.cc` + `src/include/nccl_device/gin/` |
 | 延迟 | 较高（Host-Device 同步 + 线程调度） | 较低（消除 Host 参与） |
 
