@@ -923,6 +923,27 @@ ncclResult_t ncclCommEnsureReady(ncclComm_t comm) {
 
 而"非阻塞"只是这个机制上的一个开关（`config.blocking = 0`）：发令之后不等结果，**先把控制权还给调用者**，进度交给后台线程，状态通过 `asyncResult` 暴露给 `ncclCommGetAsyncError`。这就是"非阻塞初始化"的全貌。
 
+##### 反过来说：默认的阻塞模式会怎样？
+
+不设 `blocking = 0`（即默认 `blocking = 1`）时，同样是 `ncclGroupEndInternal` 发令，但走的是另一个分支：**不另起线程，而是在当前线程里把 `groupLaunch` 跑完才返回**（`group.cc:858-866`）。
+
+所以两者的区别，本质就一句话：
+
+> **阻塞 = "发令 + 站在原地等结果"；非阻塞 = "发令 + 先把控制权还给你，结果我另外通知"。**
+
+| 维度 | 阻塞（默认） | 非阻塞（`blocking = 0`） |
+|------|-------------|------------------------|
+| 函数返回时 | 初始化**已完成**（或已失败） | 可能**仍在进行** |
+| 返回值 | 真实结果（`ncclSuccess` / 错误码） | `ncclInProgress` |
+| 需要轮询吗 | 不需要 | 必须（否则后续 API 被 `ncclCommEnsureReady` 拦下） |
+| 主线程 | 被占住直到结束 | 立刻交还，可去做别的事 |
+
+> **阻塞的代价**：初始化要做 bootstrap 交换、拓扑探测、建连接、注册内存，跨机场景动辄几十毫秒到秒级。这段时间主线程完全被占住。非阻塞模式存在的意义就是**把这段等待利用起来**——先去加载数据、建 pipeline、准备下一批输入。
+
+> ⚠️ 一个约束：**同一个 Group 里不允许混用阻塞和非阻塞 comm**（`group.cc:60-63` 有明确检查，违反直接返回 `ncclInvalidArgument`）。
+
+（顺带一提：阻塞模式下 `asyncResult` 不会被更新——因为"函数返回"本身就是完成信号，不需要第二个通知渠道。它靠分配时清零即等于 `ncclSuccess`，所以后续 `ncclCommEnsureReady` 也不会误拦。）
+
 > 补充一句：`ncclCommInitRankConfig` 自己内部就包了一层 `ncclGroupStartInternal()` / `ncclGroupEndInternal()`（`init.cc:2667` / `init.cc:2679`）。所以即便用户代码里没有写 `ncclGroupStart`，走进 `ncclAsyncLaunch` 时 `ncclGroupDepth` 也已经是 1 —— 这就是为什么它一定会经过"入队 → 发令"这条路，而不是直接同步执行。
 
 #### 2.1.5 执行层：`ncclCommInitRankFunc` 才是真正干活的那个
