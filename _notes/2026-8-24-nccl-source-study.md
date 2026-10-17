@@ -696,35 +696,42 @@ NCCL 是被加载进**你的进程**里的一个库。在它能够建立任何�
 
 **③ GDRCopy 是什么（先把缩写说清楚）**
 
-- **GDR = GPUDirect RDMA**
-- **GDRCopy = GDR + Copy**，即"**基于 GPUDirect RDMA 技术做的 Copy 库**"
+- **GDR = GPUDirect RDMA**；**GDRCopy = GDR + Copy**，即"基于 GPUDirect RDMA 技术做的 Copy 库"
+- 两者共用同一套机制——**GPU 显存通过 PCIe BAR 暴露到 PCIe 地址空间**，区别只在**谁发起访问**：网卡（GPUDirect RDMA）还是 CPU（GDRCopy）
 
-所以严格讲，**GDRCopy 不等于 GPUDirect RDMA**。两者共用同一套底层机制（把 GPU 显存通过 PCIe BAR 映射到 CPU 可寻址的空间），区别在于**谁去访问显存**：
+**关键：别把二者当成二选一。** 放到一次跨机传输里看：
 
-| 技术 | 访问发起方 | 典型用途 |
-|------|-----------|---------|
-| **GPUDirect RDMA**（简称 GDR） | **第三方 PCIe 设备**，典型是 RDMA 网卡 | 网卡直接 DMA 读写 GPU 显存，**跨节点 RDMA 传输的基石** |
-| **GDRCopy** | **CPU** | CPU 用普通 load/store 直接读写显存，**省掉 `cudaMemcpy`** |
+```
+A 机 GPU 显存
+   │ ① 前提：显存要有"PCIe 可寻址"地址  ← BAR 映射（nvidia-peermem）
+   ▼
+A 机 RDMA 网卡
+   │ ② 网卡 DMA 引擎按该地址直接读显存  ← GPUDirect RDMA = ①+②
+   │ ③ 网络
+   ▼
+B 机 RDMA 网卡 ──④ 反向 DMA──▶ B 机 GPU 显存
+```
 
-GDRCopy 官方 README 的原话就是这个意思：GPUDirect RDMA 本是给"第三方设备直访显存"设计的，而 GDRCopy 把这套技术**搬给 CPU 用**。
+- **BAR 映射是"修路"**：让显存对 GPU 之外可见，但**自己一个字节都不搬**；
+- **网卡是"车"**：真正把字节送到对端。没有路，车没有目的地址可写；没有车，路修好了也出不了机器。
 
-> **注意：NCCL 源码里 "GDR" 有两个不同含义**，读代码时很容易混：
+所以差别只在于**网卡从哪拿数据**：
+
+| 场景 | 路径 | 额外拷贝 |
+|------|------|---------|
+| 有 GDRDMA（NCCL 置 `NCCL_DIRECT_NIC`，`device.h:122`） | GPU 显存 --(网卡 DMA)--> 网卡 | 0 次 |
+| 无 GDRDMA | GPU 显存 → 系统内存 → 网卡 | 多 1 次 |
+
+**GDRCopy 为什么不在这条链上**：它不搬 payload，只是让 CPU（proxy 线程）低延迟读到 GPU 写的标志位（`workFifo` 在 `init.cc:631-634`；`gdcSync`/`gdcFlush` 在 `net.cc:966-970`、`1137-1140`、`1658`）。一句话分工：**搬数据靠网卡，看状态靠 GDRCopy，两者都依赖 BAR 映射**。实现上是 `pin` 住显存再映射进用户态，CPU 直接 load/store 约**几百纳秒**，远快于 `cudaMemcpy` 的**微秒**级。
+
+> 内核组件：GPUDirect RDMA 依赖 `nvidia-peermem`（NCCL 在 `src/transport/net_ib/gdr.cc:18-20` 检查），GDRCopy 依赖 `gdrcopy.ko` + `libgdrapi.so`，可同时启用。GDRCopy 默认关闭，需 `NCCL_GDRCOPY_ENABLE=1`，不满足条件会自动降级回 host 内存（`gdrwrap.h:287-293`）。
+
+> **NCCL 源码里 "GDR" 有两个含义**，读代码别混：
 >
-> | 代码里的写法 | 实际指什么 |
+> | 代码写法 | 实际指 |
 > |---|---|
-> | `ncclGdrCopy`、`initGdrCopy()`、`NCCL_GDRCOPY_ENABLE` | **GDRCopy**（CPU 直访显存）——本节开头 `ncclInit()` 注释里的 "GDR" 就是这个 |
-> | `peerInfo->gdrSupport`、`ncclIbGdrSupport()`、`ncclGpuGdrSupport()` | **GPUDirect RDMA**（网卡直访显存，依赖 `nvidia_peermem` 内核模块）。`src/include/net.h:28` 的注释原文就是 "Test whether the current GPU support GPU Direct RDMA" |
-
-具体到 GDRCopy，它做的事很朴素：**把一块 GPU 显存"钉住"（pin）并映射到 CPU 的用户态地址空间**，于是 CPU 就能用普通的读内存指令直接访问显存。
-
-关键在延迟差一个量级：`cudaMemcpy` 一次往返通常**微秒**级，而 GDRCopy 映射后 CPU 直接 load/store 只要**几百纳秒**。
-
-NCCL 主要用它来**让 CPU 侧（proxy 线程）低延迟读到 GPU 侧写的标志位**，例如：
-
-- `workFifo`（CPU 向 GPU 内核下发任务的队列）直接放在 GDR 映射的显存里（`init.cc:631-634`）；
-- NET / CollNet transport 的同步标志 `gdcSync` 和 flush 标志 `gdcFlush`（`net.cc:966-970`、`net.cc:1137-1140`、`net.cc:1658`）。
-
-一句话对比：**普通路径是"GPU 写显存 → CPU 用 cudaMemcpy 拷回来"；GDR 路径是"GPU 写显存 → CPU 直接用指针读"**，省掉那次拷贝。它默认关闭，需要 `NCCL_GDRCOPY_ENABLE=1` 且系统装了 `libgdrapi`；不满足时会自动降级回普通 host 内存方案（`gdrwrap.h:287-293` 的 `allocMemCPUAccessible` 就是这段降级逻辑）。
+> | `ncclGdrCopy`、`initGdrCopy()`、`NCCL_GDRCOPY_ENABLE` | **GDRCopy**（CPU 直访显存）——本节 `ncclInit()` 注释里的 "GDR" 就是这个 |
+> | `peerInfo->gdrSupport`、`ncclIbGdrSupport()`、`ncclGpuGdrSupport()` | **GPUDirect RDMA**（网卡直访显存，`src/include/net.h:28` 注释原文 "Test whether the current GPU support GPU Direct RDMA"） |
 
 **④ 为什么每个 API 入口都无脑调一遍？**
 
@@ -1744,7 +1751,7 @@ Progress 线程的启停由 `ginState->ginProgress` 状态控制：`0`（暂停�
 | 通信触发者 | Host 侧 Proxy 线程通过 `ncclProxyProgress` | GPU Kernel 内直接调用 `ncclGinApi_Put` / `ncclGinApi_Get` |
 | Kernel 与通信的 overlap | 粗粒度：Kernel 结束 → Proxy 处理 → 下一个 Kernel | 细粒度：同一 Kernel 内计算与通信交替执行 |
 | 同步机制 | 通过 `ncclSendMem.head` / `ncclRecvMem.tail` 跟踪进度，Host 可读写 | 通过 `ncclGinSignalDescriptor` 和 `ncclGinCounter`，设备端直接操作 |
-| 数据路径 | GPU → (GDRCopy) → Host Buffer → Net Plugin → NIC | GPU → GIN Backend → NIC（尽可能短） |
+| 数据路径 | 有 GDRDMA：GPU 显存 --(NIC DMA 直读)--> 网卡；无 GDRDMA：GPU 显存 → Host Buffer → 网卡 | GPU → GIN Backend → 网卡（始终不经 Host 中转） |
 | 代码位置 | `src/proxy.cc`、`src/transport/net.cc` | `src/gin/gin_host.cc` + `src/include/nccl_device/gin/` |
 | 延迟 | 较高（Host-Device 同步 + 线程调度） | 较低（消除 Host 参与） |
 
