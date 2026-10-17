@@ -971,7 +971,17 @@ static ncclResult_t ncclCommInitRankFunc(struct ncclAsyncJob* job_) {
 > | `isGrow` | `ncclCommGrow`（扩容） |
 > | `funcName[NCCL_COMMINIT_FUNCNAME_LEN]` | 记录"是哪个 API 发起的"，用于日志与报错定位 |
 >
-> 也就是说：**门面层的 API 数量还会继续增加（split/shrink/grow 都复用了这条链），但实现层和执行层不用重复造轮子**——这正是分层收敛的价值。
+> 也就是说，`split` / `shrink` / `grow` 复用这条链**不是"顺带省了点代码"，而是这套分层的有意设计**。把当前仓库里所有走这条链的入口数一遍，会看到一个很清晰的收敛结构：
+>
+> **7 个公共 API → 3 个创建路径 → 1 个执行体（`ncclCommInitRankFunc`）**
+>
+> | 公共 API（门面层） | 走哪个创建路径（实现层） |
+> |-------------------|------------------------|
+> | `ncclCommInitRank` / `Config` / `Scalable` / `InitAll` | `ncclCommInitRankDev`（`init.cc:2544`） |
+> | `ncclCommSplit` / `ncclCommShrink` | `ncclCommInitChildComm`（`init.cc:3155`，源码注释即 "for both split and shrink"） |
+> | `ncclCommGrow` | `ncclCommGrow` 自身（`init.cc:3355`） |
+>
+> 这个结构的价值不在于"以后 API 会越来越多"，而在于**把变动隔离在一侧**：今后无论是新增一种派生方式，还是调整初始化的内部流程，改动都只需落在"门面层怎么组装 `ncclCommInitRankAsyncJob`"或"执行层怎么建通信器"其中一边，另一边基本不用跟着动。
 
 #### 2.1.6 上层框架用哪个？为什么要提供这么多变体
 
