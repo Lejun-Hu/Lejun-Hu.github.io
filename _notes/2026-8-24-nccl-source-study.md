@@ -594,7 +594,7 @@ NCCL 提供了四种实例，分别对应四类链路：
 
 > 第一章我们认清了 NCCL 的几个核心结构体（通信器、通道、连接子、传输层）。这一章回答一个更具体的问题：**当你（或 PyTorch）调用一次 `ncclCommInitRank` 之后，一个"可用的通信器"到底是怎么被一步步造出来的？**
 >
-> 阅读建议：先读 **2.1**（认清 API 家族——先弄懂"五个公共 API 如何收敛到同一个执行体"这条主线）和 **2.2**（全景图——总共分五个阶段），再逐个阶段深入。若只想快速把握骨架，读完 2.1、2.2、2.7 即可。
+> 阅读建议：先读 **2.1**（认清 API 家族——先弄懂"五个公共 API 如何收敛到同一个执行体"这条主线）和 **2.2**（全景图——总共分四个阶段），再逐个阶段深入。若只想快速把握骨架，读完 2.1、2.2、2.6 即可。
 
 ### 2.1 先认清 API 家族：五个公共 API 如何收敛到同一个执行体
 
@@ -620,7 +620,7 @@ NCCL 提供了四种实例，分别对应四类链路：
 【调度层】ncclAsyncLaunch(...)          ← 决定"什么时候、在哪个线程执行"
                                                │  不在 Group → 立即执行；在 Group → 入队；非阻塞 → 后台线程
                                                ▼
-【执行层】ncclCommInitRankFunc(job)     ← 真正干活：本章 2.3~2.7 的五个阶段全在它体内
+【执行层】ncclCommInitRankFunc(job)     ← 真正干活：本章 2.3~2.6 的四个阶段全在它体内
 ```
 
 **各层职责一句话**：
@@ -1038,7 +1038,7 @@ ncclResult_t ncclCommEnsureReady(ncclComm_t comm) {
 static ncclResult_t ncclCommInitRankFunc(struct ncclAsyncJob* job_) {
   struct ncclCommInitRankAsyncJob* job = (struct ncclCommInitRankAsyncJob*)job_;  // 取回"集装箱"
   ncclComm_t comm = job->comm;
-  ...   // ← 本章 2.3 ~ 2.7 讲的五个阶段，全部发生在这个函数体内
+  ...   // ← 本章 2.3 ~ 2.6 讲的四个阶段，全部发生在这个函数体内
 }
 ```
 
@@ -1074,17 +1074,16 @@ static ncclResult_t ncclCommInitRankFunc(struct ncclAsyncJob* job_) {
 >
 > **这也解释了 NCCL 为什么要提供这么多变体**：不同调用者的需求不同（要不要传配置、规模大到需要多 root、是不是单进程管多卡），但**实现只有一份**（全部收敛到 `ncclCommInitRankDev` → `ncclCommInitRankFunc`）。这是典型的"门面函数 + 统一内核"设计。
 
-### 2.2 初始化全景图：五个阶段
+### 2.2 初始化全景图：四个阶段
 
-搞清 API 家族后，再看整个初始化的**阶段划分**。`ncclCommInitRankFunc`（真正干活的执行体）做的事可以归纳为五个阶段：
+搞清 API 家族后，再看整个初始化的**阶段划分**。`ncclCommInitRankFunc`（真正干活的执行体）做的事可以归纳为四个阶段：
 
 | 阶段 | 目标（职责） | 关键函数 | 产物 |
 |------|-------------|----------|------|
 | **① 入场券** | 生成全局唯一的 ID，让各 rank 能找到同一个"集会地点" | `ncclGetUniqueId` → `bootstrapGetUniqueId` | `ncclUniqueId`（含 root 的 IP:port + magic） |
 | **② 骨架 + 控制面** | 分配 `ncclComm` 空壳；各 rank 建立**不依赖 GPU 互联**的带外通道 | `ncclCommInitRankDev` 分配骨架 → `bootstrapInit` | 空的 `ncclComm` + `comm->bootstrap` |
-| **③ 信息交换** | 通过控制面做**三次信息交换**：第 1 次（全体）交换 peerInfo；第 2 次（**仅机内**）融合同机 XML 拓扑；第 3 次（全体）交换图参数并聚合 | `bootstrapAllGather` ×2 + `bootstrapIntraNodeAllGather` ×1 | 全量 peer 信息 + 整机拓扑 + 各算法图参数 |
-| **④ 拓扑与图** | 探测本机硬件拓扑，搜索出 Ring/Tree/CollNet/NVLS 各自的通信图 | `ncclTopoGetSystem`、`ncclTopoCompute` | `comm->topo`、`comm->graphs[]`、`comm->nChannels` |
-| **⑤ 连接与资源** | 按图把 Channel → Connector → Transport 一层层建起来，映射真实物理资源；初始化 Proxy | `setupChannel`、`ncclTransportP2pSetup`、`ncclTransportRingConnect`、`ncclProxyInit` | 可用的 `comm->channels[]` |
+| **③ 信息交换与拓扑图** | 三次信息交换：第 1 次（全体）交换 peerInfo；第 2 次（**仅机内**）融合同机 XML 拓扑；探测本机拓扑并搜索 Ring/Tree/CollNet/NVLS 通信图；第 3 次（全体）交换图参数并聚合出全局一致 | `bootstrapAllGather` ×2 + `bootstrapIntraNodeAllGather` ×1 + `ncclTopoGetSystem` / `ncclTopoCompute` | 全量 peer 信息 + 整机拓扑 + 各算法图参数 + `comm->nChannels` |
+| **④ 连接与资源** | 按图把 Channel → Connector → Transport 一层层建起来，映射真实物理资源；初始化 Proxy | `setupChannel`、`ncclTransportP2pSetup`、`ncclTransportRingConnect`、`ncclProxyInit` | 可用的 `comm->channels[]` |
 
 > **为什么必须先有"控制面"（阶段②③）？** 换个角度看：高性能数据面网络（NVLink 拓扑、RDMA QP、IPC 显存句柄）的建立过程，本身需要**大量的元信息交换与协商**——拓扑探测结果、每个 rank 的设备与网卡信息、对端显存的 IPC handle、QP 号、内存注册句柄……这些消息**小、杂、多**，而且建网期间数据面还不存在。
 >
@@ -1169,32 +1168,32 @@ Bootstrap 之后向上提供的原语（`src/include/bootstrap.h`）：
 
 > **多 root 的意义**：`ncclCommInitRankScalable` 传的 `nId` 就是"用几个 uniqueId"，即**建多个 root**——因为在大规模集群里，让几千个 rank 都连向同一个 root 会形成瓶颈。这是"Scalable"这个名字的由来。
 
-### 2.5 阶段三：信息交换（第 1 次）—— 全体认识彼此
+### 2.5 阶段三：信息交换与全局拓扑 —— 从认识彼此到搜出通信图
 
-**职责**：把"每个 rank 只认识自己"变成"所有 rank 互相认识"。这一步在 `initTransportsRank`（`src/init.cc:965`）里完成，靠的就是 Bootstrap 的 AllGather。
+**职责**：把"每个 rank 只认识自己"变成"互相认识"，再据此把硬件画成拓扑图、搜出各算法的通信路线，最后聚合成全局一致的参数。这一步在 `initTransportsRank`（`src/init.cc:965`）里完成，靠的就是 Bootstrap 的 AllGather。
 
-先建立一个全局视角：**整个初始化里其实有三次信息交换**，它们的规模、范围、内容各不相同——这也是理解后面所有内容的主线：
+先建立一个全局视角：**这个阶段里其实有三次信息交换**，它们的规模、范围、内容各不相同——这也是理解后面所有内容的主线：
 
 | 次序 | 范围 | 交换什么 | 时机 |
 |------|------|---------|------|
-| **第 1 次**（源码注释 AllGather1） | **全体**（跨机 + 机内） | `ncclPeerInfo`：我是谁、我在哪、我有什么能力 | 阶段③（本节） |
-| **第 2 次** | **仅机内**（同主机 rank 之间） | 各自探测出的本机 XML 拓扑 → 融合成整机图 | 阶段④内（2.6.1） |
-| **第 3 次**（源码注释 AllGather3） | **全体**（跨机 + 机内） | 各自算出的图参数 + 预设邻居 → 聚合出全局一致 | 阶段④末尾（2.6.3） |
+| **第 1 次**（源码注释 AllGather1） | **全体**（跨机 + 机内） | `ncclPeerInfo`：我是谁、我在哪、我有什么能力 | 2.5.1 |
+| **第 2 次** | **仅机内**（同主机 rank 之间） | 各自探测出的本机 XML 拓扑 → 融合成整机图 | 2.5.2 |
+| **第 3 次**（源码注释 AllGather3） | **全体**（跨机 + 机内） | 各自算出的图参数 + 预设邻居 → 聚合出全局一致 | 2.5.4 |
 
 ```
 第 1 次交换【全体】：ncclPeerInfo ——「我是谁、我在哪、我能做什么」
       ↓
-阶段四：拓扑发现 + 图搜索（2.6）
+拓扑发现 + 图搜索（2.5.2 ~ 2.5.3）
       ├─ 本机探测（机内，NVML/PCIe 真探测）
       ├─ 第 2 次交换【仅机内】：同机 XML 融合成整机图
       └─ 图搜索（纯本地计算，零通信）
       ↓
-第 3 次交换【全体】：allGather3Data ——「我算出的图」，聚合出全局一致参数
+第 3 次交换【全体】：allGather3Data ——「我算出的图」，聚合出全局一致参数（2.5.4）
 ```
 
-> 范围的规律值得记住：**第 1、3 次是全体**——因为要建立/对齐的是**全局认知**；**第 2 次只有机内**——因为"整机精确拓扑"只需要同主机的进程合作，远程机器反正只能当"叶子"（见 2.6.1）。
+> 范围的规律值得记住：**第 1、3 次是全体**——因为要建立/对齐的是**全局认知**；**第 2 次只有机内**——因为"整机精确拓扑"只需要同主机的进程合作，远程机器反正只能当"叶子"（见 2.5.2）。
 
-#### 第 1 次交换【范围：全体】：`ncclPeerInfo` —— 认识彼此
+#### 2.5.1 第 1 次交换【范围：全体】：`ncclPeerInfo` —— 认识彼此
 
 ```cpp
 // src/init.cc:1036-1037
@@ -1226,13 +1225,9 @@ bootstrapAllGather(comm->bootstrap, comm->peerInfo, sizeof(struct ncclPeerInfo))
 
 > 这一轮的产物是 `comm->peerInfo[]`——一个**长度为 nRanks 的数组**，之后"我能不能和 rank r 直连走 NVLink"这类判断全靠它。
 
-### 2.6 阶段四：拓扑发现与图搜索
+#### 2.5.2 拓扑发现：三层建成全图
 
-**职责**：回答两个问题——**（1）** 这台机器/整个集群里的 GPU、NVSwitch、网卡是怎么连的？（拓扑发现）**（2）** 在这种连接关系上，Ring/Tree/CollNet/NVLS 各自应该按什么顺序组织 rank、用几条 channel？（图搜索）
-
-产物是 `comm->topo`（硬件拓扑图）和 `comm->graphs[]`（各算法的通信图），以及全局参数 `comm->nChannels`。
-
-#### 2.6.1 拓扑发现：把硬件画成一张图
+**职责**：回答"本机与全体的 GPU、NVSwitch、网卡是怎么连的"，产物是 `comm->topo`（硬件拓扑图）。（图搜索的产物 `comm->graphs[]`、`comm->nChannels` 见 2.5.3。）
 
 ```cpp
 // src/init.cc:1141-1149（节选）
@@ -1251,7 +1246,7 @@ ncclTopoSearchInit(comm->topo);                // 初始化搜索状态
 
 > 用"节点 + 加权边"表达硬件，好处是后面可以套用**通用图搜索算法**：把"带宽"当作边的代价，就能用统一的搜索框架找"总代价最低的环/树"。
 
-#### 这张"全图"分三层建成——每层范围、信息来源、精确度都不同
+**这张"全图"分三层建成——每层范围、信息来源、精确度都不同：**
 
 | 层 | 范围 | 信息来源 | 精确度 |
 |----|------|---------|--------|
@@ -1269,9 +1264,9 @@ for (int i = 0; i < nLocalRanks; i++)
   NCCLCHECKGOTO(ncclTopoFuseXml(xml, peerXml), ret, fail);       // 逐个融合成整机图
 ```
 
-**为什么第 ② 层只需机内、第 ③ 层却只能"将就"？** 整机拓扑（谁和谁用 NVLink 连着）只有同机的进程**探得到**；远程机器的内部接线谁也看不见，只能把它当"挂在网络上的叶子"。于是每台机器拿到的全图都是：**自己精确 + 同机精确（融合）+ 远程粗糙（叶子）**——机内段可以精细优化，跨机段只能按 NET 带宽近似。这也为 2.6.3 的聚合埋下伏笔：**各机的"精确部分"互不重叠，谁也没有完整真相**。
+**为什么第 ② 层只需机内、第 ③ 层却只能"将就"？** 整机拓扑（谁和谁用 NVLink 连着）只有同机的进程**探得到**；远程机器的内部接线谁也看不见，只能把它当"挂在网络上的叶子"。于是每台机器拿到的全图都是：**自己精确 + 同机精确（融合）+ 远程粗糙（叶子）**——机内段可以精细优化，跨机段只能按 NET 带宽近似。这也为 2.5.4 的聚合埋下伏笔：**各机的"精确部分"互不重叠，谁也没有完整真相**。
 
-#### 2.6.2 图搜索：为每种算法找一条最优路径
+#### 2.5.3 图搜索：为每种算法找一条最优路径
 
 以 AllReduce 为例，NCCL 会为 Ring、Tree 两种算法**各算一份图**（还有可选的 CollNet、NVLS）：
 
@@ -1304,7 +1299,7 @@ ncclTopoCompute(comm->topo, nvlsGraph);
 
 注意：**图搜索是纯本地计算，零通信**——但它的输入里含本机网卡（只有自己知道），所以各 rank 独立算出的结果**天然可能不同**。怎么收敛成全局一致？这正是下一次交换的任务。
 
-#### 2.6.3 第 3 次交换【范围：全体】：把各自的图对齐
+#### 2.5.4 第 3 次交换【范围：全体】：把各自的图对齐
 
 ```cpp
 // src/init.cc:1283 — 第 3 次全体交换（缓冲区就叫 allGather3Data，"3" 与 AllGather1 呼应）
@@ -1319,17 +1314,17 @@ bootstrapAllGather(comm->bootstrap, allGather3Data, sizeof(*allGather3Data));
 | **预设邻居** | `topoRanks`：`ringRecv`/`ringSend`/`ringPrev`/`ringNext`、`treeToParent`/`treeToChild0/1`、`nvlsHeads`（各 `MAXCHANNELS` 条） | 基于我的图，我认为我在这条 channel 上的上/下一跳是谁（`graph.h:195-206`） |
 | **本地事实** | `cpuArch`/`cpuVendor`、`localNetDeviceCount`/`Bw`、`localCollNetCount`、`minNetBw`、`isAllNvlink`、`p2pnChannelsPerPeer`/`p2pMaxPeers` | 只有我自己知道的机器事实 |
 
-AllGather 之后，聚合按字段逐个进行（`init.cc:1291-1316`、`1435-1451`），**产出正好是阶段⑤建连所需的全部全局参数**：
+AllGather 之后，聚合按字段逐个进行（`init.cc:1291-1316`、`1435-1451`），**产出正好是阶段四建连所需的全部全局参数**：
 
-| 聚合 | 规则 | 产出（交给阶段⑤） |
+| 聚合 | 规则 | 产出（交给阶段四） |
 |------|------|------------------|
-| 图参数 | `nChannels`/`sameChannels`/`bw*` → **min**；`type*`/`crossNic` → **max** | 全局统一的 `comm->nChannels` → 阶段⑤建几条 channel；带宽 → `computeBuffSizes` 定各协议（LL/LL128/Simple）缓冲区大小 |
-| `topoRanks` | `ncclTopoPostset`（`:1480`）把所有人的预设**拼装** | 最终 `rings[]`（每 channel 完整环序）→ `setupChannel` 按它建连接表；`ring.prev/next`、`tree.up/down` → 阶段⑤按它们与邻居握手 |
+| 图参数 | `nChannels`/`sameChannels`/`bw*` → **min**；`type*`/`crossNic` → **max** | 全局统一的 `comm->nChannels` → 阶段四建几条 channel；带宽 → `computeBuffSizes` 定各协议（LL/LL128/Simple）缓冲区大小 |
+| `topoRanks` | `ncclTopoPostset`（`:1480`）把所有人的预设**拼装** | 最终 `rings[]`（每 channel 完整环序）→ `setupChannel` 按它建连接表；`ring.prev/next`、`tree.up/down` → 阶段四按它们与邻居握手 |
 | `ringRecv[0]` | 相同者归为同一**节点** | `nNodes` / `rankToNode` / 各节点 `localRanks` 布局（`:1291-1301`）——"哪些 rank 同机"由此划定 |
 | 本地设备数 | min / max 对比 | 不一致 → WARN 甚至报错（`NCCL_IGNORE_NET_MISMATCH`，`:1324-1344`） |
 | 能力与带宽 | `isAllNvlink` 取 AND；`minNetBw` 取 min | 运行时调优表；CollNet/NVLS 若聚合后 channel 数为 0 则整体禁用（`:1452-1453`） |
 
-一句话：**第 3 次交换的产物 = "阶段⑤建连所需的全部全局参数"**——建几条 channel、每条环序如何、每对邻居是谁、缓冲区多大、NVLS/CollNet 开不开。没有它，阶段⑤的每一步都会因为"各说各话"而失败。
+一句话：**第 3 次交换的产物 = "阶段四建连所需的全部全局参数"**——建几条 channel、每条环序如何、每对邻居是谁、缓冲区多大、NVLS/CollNet 开不开。没有它，阶段四的每一步都会因为"各说各话"而失败。
 
 **为什么必须再交换一次？** 一个自然的疑问是："大家的输入不都一致吗，算出来的结果不应该自动一样？"——**前提就不成立**：
 
@@ -1342,15 +1337,15 @@ AllGather 之后，聚合按字段逐个进行（`init.cc:1291-1316`、`1435-145
 
 3. **一些全局结构只能从汇总数据里"长出来"**：比如"这个通信域有几个节点、每个节点由哪些 rank 组成"（`nNodes`/`rankToNode`，`:1291-1301`）要看到所有人的 `topoRanks.ringRecv[0]` 才能划分；ring/tree 的最终邻居也是 `ncclTopoPostset` 用所有人的 Preset 结果拼装的（`:1480`）。
 
-> 顺带修正一个容易产生的误解：Ring 的相邻关系**不靠"各自以为"**——阶段⑤建连时每对 prev/next 要直接握手确认，接错了根本连不上。真正需要全局对齐的是**结构参数**：否则会出现"有人建 8 条 channel、有人建 6 条""同一 channel 上收发双方对带宽/协议的预期不一致"这类握手之后才发现的错位。
+> 顺带修正一个容易产生的误解：Ring 的相邻关系**不靠"各自以为"**——阶段四建连时每对 prev/next 要直接握手确认，接错了根本连不上。真正需要全局对齐的是**结构参数**：否则会出现"有人建 8 条 channel、有人建 6 条""同一 channel 上收发双方对带宽/协议的预期不一致"这类握手之后才发现的错位。
 
-### 2.7 阶段五：连接与资源 —— Channel / Connector / Transport 是怎么落地的
+### 2.6 阶段四：连接与资源 —— Channel / Connector / Transport 是怎么落地的
 
-**职责**：把阶段四算出的"**逻辑**通信图"（Ring 的环序、Tree 的父子关系）翻译成**真实的连接与物理资源**——为每个 channel 分配连接表、为每条连接挑一种传输方式、和对端交换句柄、映射显存/网卡资源，最后把连接信息下发到 GPU。
+**职责**：把阶段三算出的"**逻辑**通信图"（Ring 的环序、Tree 的父子关系）翻译成**真实的连接与物理资源**——为每个 channel 分配连接表、为每条连接挑一种传输方式、和对端交换句柄、映射显存/网卡资源，最后把连接信息下发到 GPU。
 
 这是整章最"硬"的一节，我们从结构层次讲起，再讲建链过程。
 
-#### 2.7.1 全景：一条五层结构链
+#### 2.6.1 全景：一条五层结构链
 
 前面 1.5 节我们分别认识了这些结构体，现在把它们按**"逻辑 → 物理"的顺序串起来**：
 
@@ -1376,9 +1371,9 @@ ncclComm（通信器）                          ← 一个通信域的全部上
 
 > **一句话理解这个层次**：**通信器**划定"谁能和谁说话"；**通道**把数据切成几份并行处理；**连接表**用 rank 号索引"我和每个人的连接"；**连接子**描述"这一条连接"；**传输**决定"这条连接走什么物理链路"；**物理资源**才是内存里真实的句柄、地址和队列。
 
-#### 2.7.2 第一步：建通道，同时分配它的"连接表"
+#### 2.6.2 第一步：建通道，同时分配它的"连接表"
 
-阶段四算出了每个 channel 的 ring 环序，接下来按它建通道并分配连接表（`src/init.cc:791-808`）：
+阶段三算出了每个 channel 的 ring 环序，接下来按它建通道并分配连接表（`src/init.cc:791-808`）：
 
 ```cpp
 // src/init.cc:791-793（节选）
@@ -1408,7 +1403,7 @@ for (int r = 0; r < nRanks; r++) {
 - 数组元素来自 `comm->sharedRes->peers[channelId]`（**共享资源**），并用 `refCount` 计数——所以 `ncclCommSplit` 出来的子通信器能复用父通信器已分配的这些载体（呼应 1.5 节 `sharedRes` 的作用）；
 - 同一段代码还分配了 **device 侧镜像** `channel->devPeers`（`src/channel.cc:42-56`）——连接信息最终要出现在 GPU 能读到的地方，所以 host 侧和 device 侧各有一套。
 
-#### 2.7.3 第二步："登记"要建哪些连接
+#### 2.6.3 第二步："登记"要建哪些连接
 
 Ring/Tree 的建链入口会先**登记**（而不是立刻建）需要建立的连接（`src/transport/generic.cc:24-28`）：
 
@@ -1425,9 +1420,9 @@ NCCLCHECKGOTO(ncclTransportP2pSetup(comm, &comm->graphs[NCCL_ALGO_RING], 0), ret
 
 > **为什么先"登记"再"建"？** 因为建连是**成对**的：A 要连 B，B 也要连 A。先把全体要建的连接汇总成位图，才能高效地做"批量握手"（下一步的 setup/connect 会遍历这些位图，一次把同 peer 的多条连接一起处理），避免每个 channel 各自来回通信。
 
-#### 2.7.4 第三步：两段式建链 —— setup（换句柄）→ connect（映射资源）
+#### 2.6.4 第三步：两段式建链 —— setup（换句柄）→ connect（映射资源）
 
-这是整个阶段五最核心的机制，也是最容易被忽略的细节。NCCL 把"建立一条连接"拆成了**两段**，对应 `ncclTransportComm` 里的两个函数指针：
+这是整个阶段四最核心的机制，也是最容易被忽略的细节。NCCL 把"建立一条连接"拆成了**两段**，对应 `ncclTransportComm` 里的两个函数指针：
 
 | 段 | 函数 | 做什么 | 是否跨 rank 通信 |
 |----|------|--------|------------------|
@@ -1466,7 +1461,7 @@ if (conn->connected == 0) {
 
 注意 `ret == ncclInProgress` 这一分支：**建连是允许异步的**（比如某些传输的连接需要等网卡状态），所以 `ncclTransportP2pSetup` 内部会循环重试直到所有 channel 都连上。
 
-#### 2.7.5 连接子里面到底装了什么：`ncclConnInfo`
+#### 2.6.5 连接子里面到底装了什么：`ncclConnInfo`
 
 `connect` 的成果全部体现在 `connector->conn`（类型 `ncclConnInfo`，`src/include/device.h:133-151`）里。这个结构体是**内核真正使用的东西**，值得逐字段看：
 
@@ -1499,7 +1494,7 @@ send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE] / NCCL_STEPS;
 
 > 这两句就是 **"P2P 直连"的全部魔法**：`p2pMap` 把对端显存映射到了本进程的地址空间（用的是 CUDA IPC / cuMem / 或对端在同进程时直接给指针），于是 `conn.buffs[p]` 就是**一个本进程可写的、指向对端显存的地址**——之后 GPU 内核用普通的 `st.global` 指令写这个地址，数据就出现在对端显存里了。**不需要网卡、不需要 CPU 搬运**。
 
-#### 2.7.6 四类传输各自对应哪些物理资源
+#### 2.6.6 四类传输各自对应哪些物理资源
 
 | 传输（虚函数表实例） | 常量 | resources 结构 | 物理资源 | 代码位置 |
 |---------------------|------|----------------|----------|----------|
@@ -1520,7 +1515,7 @@ send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE] / NCCL_STEPS;
 
 而 NET transport 与网卡的交互完全通过 **Net Plugin API**（`src/include/plugin/nccl_net.h`，v12）：**setup** 阶段向对端提供网卡的 `handle`（内含 QP 信息），**connect** 阶段把对端 QP 置为 RTS（Ready To Send）状态——这也是"国产网卡替换"最关键的一个接口（见 2.8 节）。
 
-#### 2.7.7 第四步：收尾 —— Proxy 与运行时资源
+#### 2.6.7 第四步：收尾 —— Proxy 与运行时资源
 
 各算法/传输的建链依次完成后，还有一批"运行时资源"要初始化：
 
@@ -1537,9 +1532,9 @@ ncclProxyInit(comm);                       // ★ Proxy 线程 + 共享内存 op
 >
 > `ncclProxyInit` 是"连接层"和"运行时"的分界点：它把 5.3 节讲的 Proxy 线程和共享内存 op 池建起来，从此 GPU 内核与 Host 之间就有了数据搬运的通道。到这一步，`comm->channels[]` 里的连接**全部可用**，通信器正式"就绪"。
 
-#### 2.7.8 回看这条链：一次调用的完整旅程
+#### 2.6.8 回看这条链：一次调用的完整旅程
 
-把本章五个阶段串成一条线：
+把本章四个阶段串成一条线：
 
 ```
 ncclGetUniqueId
@@ -1549,10 +1544,10 @@ ncclCommInitRank → ncclCommInitRankDev
 ncclCommInitRankFunc（异步任务体，真正干活）
    ├─ 阶段② bootstrapInit ──────────── 建带外控制面（TCP/UDS）
    ├─ 阶段③ AllGather1【全体】 ──────── 交换 peerInfo（我是谁、我在哪）
-   ├─ 阶段④ ncclTopoGetSystem（内部含机内 XML 融合【仅机内】）
+   ├─ 阶段③ ncclTopoGetSystem（内部含机内 XML 融合【仅机内】）
    │    └─ ncclTopoCompute ─────────── 搜索 Ring/Tree/CollNet/NVLS 图（纯本地计算）
-   ├─ 阶段④ AllGather3【全体】 ──────── 交换图参数，min/max 聚合出全局一致
-   └─ 阶段⑤ setupChannel / Connect 系列
+   ├─ 阶段③ AllGather3【全体】 ──────── 交换图参数，min/max 聚合出全局一致
+   └─ 阶段④ setupChannel / Connect 系列
              ├─ channels[c].peers[]    分配连接表（按 rank 索引）
              ├─ ncclTransportP2pConnect 登记要建的连接（位图）
              ├─ setup（交换句柄 via bootstrap）
@@ -1561,7 +1556,7 @@ ncclCommInitRankFunc（异步任务体，真正干活）
    → 通信器可用，可以开始 ncclAllReduce
 ```
 
-> **这条链体现的设计哲学**：**逻辑与物理分离**。阶段四产出的是纯粹的"逻辑图"（谁和谁相邻），阶段五才把它落到具体传输和资源上。好处是：换一种物理链路（比如国产网卡、自研互联）只需要替换阶段五的 transport 实现，前面的拓扑/图逻辑完全不用动。
+> **这条链体现的设计哲学**：**逻辑与物理分离**。阶段三产出的是纯粹的"逻辑图"（谁和谁相邻），阶段四才把它落到具体传输和资源上。好处是：换一种物理链路（比如国产网卡、自研互联）只需要替换阶段四的 transport 实现，前面的拓扑/图逻辑完全不用动。
 
 ### 2.8 国产芯片适配要点
 
