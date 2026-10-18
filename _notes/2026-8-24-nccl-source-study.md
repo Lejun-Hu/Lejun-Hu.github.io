@@ -1082,7 +1082,7 @@ static ncclResult_t ncclCommInitRankFunc(struct ncclAsyncJob* job_) {
 |------|-------------|----------|------|
 | **① 入场券** | 生成全局唯一的 ID，让各 rank 能找到同一个"集会地点" | `ncclGetUniqueId` → `bootstrapGetUniqueId` | `ncclUniqueId`（含 root 的 IP:port + magic） |
 | **② 骨架 + 控制面** | 分配 `ncclComm` 空壳；各 rank 建立**不依赖 GPU 互联**的带外通道 | `ncclCommInitRankDev` 分配骨架 → `bootstrapInit` | 空的 `ncclComm` + `comm->bootstrap` |
-| **③ 信息交换** | 通过控制面做两轮 AllGather：交换各自的 peerInfo、以及图计算结果 | `bootstrapAllGather` ×2（在 `initTransportsRank` 中） | 全量 peer 信息 + 各算法的图参数 |
+| **③ 信息交换** | 通过控制面做**三次信息交换**：第 1 次（全体）交换 peerInfo；第 2 次（**仅机内**）融合同机 XML 拓扑；第 3 次（全体）交换图参数并聚合 | `bootstrapAllGather` ×2 + `bootstrapIntraNodeAllGather` ×1 | 全量 peer 信息 + 整机拓扑 + 各算法图参数 |
 | **④ 拓扑与图** | 探测本机硬件拓扑，搜索出 Ring/Tree/CollNet/NVLS 各自的通信图 | `ncclTopoGetSystem`、`ncclTopoCompute` | `comm->topo`、`comm->graphs[]`、`comm->nChannels` |
 | **⑤ 连接与资源** | 按图把 Channel → Connector → Transport 一层层建起来，映射真实物理资源；初始化 Proxy | `setupChannel`、`ncclTransportP2pSetup`、`ncclTransportRingConnect`、`ncclProxyInit` | 可用的 `comm->channels[]` |
 
@@ -1159,29 +1159,42 @@ Bootstrap 之后向上提供的原语（`src/include/bootstrap.h`）：
 
 | 原语 | 用途 |
 |------|------|
-| `bootstrapAllGather` | 所有 rank 交换数据（阶段三的主力） |
+| `bootstrapAllGather` | **全体**交换（第 1、3 次信息交换的主力） |
 | `bootstrapSend` / `bootstrapRecv` | 点对点数据交换 |
 | `bootstrapBarrier` | 全局栅栏同步 |
 | `bootstrapBroadcast` | 广播 |
-| `bootstrapIntraNodeBarrier` / `bootstrapIntraNodeAllGather` | 同节点内的优化版本（走 UDS，不绕 root） |
+| `bootstrapIntraNodeBarrier` / `bootstrapIntraNodeAllGather` | **仅机内**的优化版（走 UDS，不绕 root）——第 2 次交换（机内 XML 融合）用的就是它 |
 
 **实现思路**（`src/bootstrap.cc`）：root rank 创建 TCP 监听 socket，其余 rank 连向 root，形成**星形拓扑**；跨 rank 的 AllGather 由 root 中转。同一个节点内的 rank 之间则通过**共享文件描述符（Unix Domain Socket）**建立直连，避免都挤到 root 上。
 
 > **多 root 的意义**：`ncclCommInitRankScalable` 传的 `nId` 就是"用几个 uniqueId"，即**建多个 root**——因为在大规模集群里，让几千个 rank 都连向同一个 root 会形成瓶颈。这是"Scalable"这个名字的由来。
 
-### 2.5 阶段三：信息交换 —— 两轮 AllGather
+### 2.5 阶段三：信息交换（第 1 次）—— 全体认识彼此
 
-**职责**：把"每个 rank 只有自己的局部认知"变成"所有 rank 拥有一致的全局认知"。这一步在 `initTransportsRank`（`src/init.cc:965`）里完成，靠的就是 Bootstrap 的 AllGather。**为什么恰好是两轮？** 因为中间隔着"拓扑发现与图计算"这个必须各 rank 独立完成的步骤：
+**职责**：把"每个 rank 只认识自己"变成"所有 rank 互相认识"。这一步在 `initTransportsRank`（`src/init.cc:965`）里完成，靠的就是 Bootstrap 的 AllGather。
+
+先建立一个全局视角：**整个初始化里其实有三次信息交换**，它们的规模、范围、内容各不相同——这也是理解后面所有内容的主线：
+
+| 次序 | 范围 | 交换什么 | 时机 |
+|------|------|---------|------|
+| **第 1 次**（源码注释 AllGather1） | **全体**（跨机 + 机内） | `ncclPeerInfo`：我是谁、我在哪、我有什么能力 | 阶段③（本节） |
+| **第 2 次** | **仅机内**（同主机 rank 之间） | 各自探测出的本机 XML 拓扑 → 融合成整机图 | 阶段④内（2.6.1） |
+| **第 3 次**（源码注释 AllGather3） | **全体**（跨机 + 机内） | 各自算出的图参数 + 预设邻居 → 聚合出全局一致 | 阶段④末尾（2.6.3） |
 
 ```
-第一轮 AllGather（交换"我是谁、我在哪"）
+第 1 次交换【全体】：ncclPeerInfo ——「我是谁、我在哪、我能做什么」
       ↓
-各 rank 独立探测本机拓扑、搜索通信图（阶段四，见 2.6）
+阶段四：拓扑发现 + 图搜索（2.6）
+      ├─ 本机探测（机内，NVML/PCIe 真探测）
+      ├─ 第 2 次交换【仅机内】：同机 XML 融合成整机图
+      └─ 图搜索（纯本地计算，零通信）
       ↓
-第二轮 AllGather（交换"我算出来的图长什么样"，收敛到一致）
+第 3 次交换【全体】：allGather3Data ——「我算出的图」，聚合出全局一致参数
 ```
 
-#### 第一轮：交换 `ncclPeerInfo`（认识彼此）
+> 范围的规律值得记住：**第 1、3 次是全体**——因为要建立/对齐的是**全局认知**；**第 2 次只有机内**——因为"整机精确拓扑"只需要同主机的进程合作，远程机器反正只能当"叶子"（见 2.6.1）。
+
+#### 第 1 次交换【范围：全体】：`ncclPeerInfo` —— 认识彼此
 
 ```cpp
 // src/init.cc:1036-1037
@@ -1200,21 +1213,18 @@ bootstrapAllGather(comm->bootstrap, comm->peerInfo, sizeof(struct ncclPeerInfo))
 | `gdrSupport` / `fabricInfo` | GDR（GPU Direct RDMA）、MNNVL 等能力协商 |
 | `comm` | 回指通信器 |
 
+> **`hostHash`/`pidHash` 为什么关键**：UDS 是同主机进程间的内核级快通道（不走 TCP/IP 栈）；CUDA IPC 则让同主机的不同进程**直接读写对方的 GPU 显存**（一方 `cudaIpcGetMemHandle` 拿句柄传给对方，对方 open 后零拷贝访问）。两者都以"同主机"为前提。由于这些 hash 在 AllGather 阶段就换到手了，**NCCL 在建任何连接之前就知道每对 rank 是什么关系**，选 transport 只是查表：
+>
+> | 两 rank 的关系 | 能走的路 |
+> |---------------|---------|
+> | 同主机 + 同进程（单进程多线程管多卡） | `P2P_DIRECT`：地址空间本来就是同一体，直接指针访问（`p2p.cc:414-416`） |
+> | 同主机 + 不同进程 | CUDA IPC：把对端显存映射进自己地址空间，NVLink/PCIe 直连（`p2p.cc:248/318`） |
+> | 同主机、P2P 不通 | SHM：CPU 经共享内存搬运（`shm.cc:105`） |
+> | 跨主机 | 只剩 NET（RDMA/Socket），P2P/SHM/UDS 全部出局 |
+>
+> 判断本身就是一个宏：`P2P_SAME_PID = hostHash 相同 && pidHash 相同`（`p2p.cc:330-331`）。
+
 > 这一轮的产物是 `comm->peerInfo[]`——一个**长度为 nRanks 的数组**，之后"我能不能和 rank r 直连走 NVLink"这类判断全靠它。
-
-#### 第二轮：交换图计算结果（达成一致）
-
-```cpp
-// src/init.cc:1283 — 第二轮 AllGather：交换图计算结果
-bootstrapAllGather(comm->bootstrap, allGather3Data, sizeof(*allGather3Data));
-```
-
-交换的是各 rank **各自算出的图参数**：各算法（Ring/Tree/CollNet/NVLS）的 channel 数、带宽估计、跨 NIC 信息、拓扑排序后的 rank 序列等。之所以要再交换一轮，是因为**阶段四的拓扑探测和图搜索是"各 rank 独立算"的**：
-
-- 每台机器只看得见自己的本地拓扑（自己那几张卡、自己的网卡）；
-- 但一个集合通信图（比如 Ring 的环序、Tree 的父子关系）必须是**全局一致**的——否则 rank A 以为下一跳是 B，B 却以为下一跳是 C，通信立刻错乱。
-
-所以第二轮 AllGather 的作用是"**对答案**"：把各自的局部计算结果汇总，取全局最优/一致的方案（例如各 rank 上报自己到 NIC 的带宽，取最小值作为公共可用带宽），最终确定 `comm->nChannels` 等全局参数。
 
 ### 2.6 阶段四：拓扑发现与图搜索
 
@@ -1240,6 +1250,26 @@ ncclTopoSearchInit(comm->topo);                // 初始化搜索状态
 - **链路"名字"（用于表达路径质量）**：LOC、NVL、NVB（NVLink Bridge）、C2C、PIX（同一 PCIe Switch）、PXB（跨 PCIe Switch）、P2C、PXN（跨 CPU 但经 NVLink）、PHB、SYS、NET
 
 > 用"节点 + 加权边"表达硬件，好处是后面可以套用**通用图搜索算法**：把"带宽"当作边的代价，就能用统一的搜索框架找"总代价最低的环/树"。
+
+#### 这张"全图"分三层建成——每层范围、信息来源、精确度都不同
+
+| 层 | 范围 | 信息来源 | 精确度 |
+|----|------|---------|--------|
+| ① 本机自身 | 机内 | NVML / PCIe 实时探测（`topo.cc:1800`，注释原话："Detect only the GPU managed by this process"） | **精确** |
+| ② 同主机的其他 GPU | 机内 | **XML 融合**：同机各 rank 交换各自探测出的 XML 再融合 | **精确**（拼出来的） |
+| ③ 远程机器的 GPU | 跨机 | 只有第 1 次交换得来的 `peerInfo`（存在、busId、能力） | **粗糙**：内部接线不可知，到它的路径一律记为 NET |
+
+第 ② 层就是初始化里的**第 2 次信息交换**——范围**仅限机内**：
+
+```cpp
+// src/graph/topo.cc:1908-1924（节选）— 同机 XML 融合
+// 按 hostHash 找出同主机的 ranks，然后：
+bootstrapIntraNodeAllGather(comm->bootstrap, localRanks, ...);   // 机内交换各自的 XML
+for (int i = 0; i < nLocalRanks; i++)
+  NCCLCHECKGOTO(ncclTopoFuseXml(xml, peerXml), ret, fail);       // 逐个融合成整机图
+```
+
+**为什么第 ② 层只需机内、第 ③ 层却只能"将就"？** 整机拓扑（谁和谁用 NVLink 连着）只有同机的进程**探得到**；远程机器的内部接线谁也看不见，只能把它当"挂在网络上的叶子"。于是每台机器拿到的全图都是：**自己精确 + 同机精确（融合）+ 远程粗糙（叶子）**——机内段可以精细优化，跨机段只能按 NET 带宽近似。这也为 2.6.3 的聚合埋下伏笔：**各机的"精确部分"互不重叠，谁也没有完整真相**。
 
 #### 2.6.2 图搜索：为每种算法找一条最优路径
 
@@ -1271,6 +1301,30 @@ ncclTopoCompute(comm->topo, nvlsGraph);
 > - **CollNet / NVLS**：目标是利用交换机/NVSwitch 的**网内计算**能力，让归约在交换节点完成，减少数据往返。
 >
 > 这个阶段的本质是**"把硬件拓扑翻译成若干条候选通信路线"**，供运行时（第三、五章）根据消息大小挑选。
+
+注意：**图搜索是纯本地计算，零通信**——但它的输入里含本机网卡（只有自己知道），所以各 rank 独立算出的结果**天然可能不同**。怎么收敛成全局一致？这正是下一次交换的任务。
+
+#### 2.6.3 第 3 次交换【范围：全体】：把各自的图对齐
+
+```cpp
+// src/init.cc:1283 — 第 3 次全体交换（缓冲区就叫 allGather3Data，"3" 与 AllGather1 呼应）
+bootstrapAllGather(comm->bootstrap, allGather3Data, sizeof(*allGather3Data));
+```
+
+交换的是各 rank **各自算出的图参数**（`init.cc:1256-1281`）：每个算法的 `pattern`/`nChannels`/`sameChannels`/`bwIntra`/`bwInter`/`typeIntra`/`typeInter`/`crossNic`，加上本机网卡设备数与最小网卡带宽、CPU 架构，以及 `ncclTopoPreset` 预设的 ring/tree 邻居（`topoRanks`）。
+
+**为什么必须再交换一次？** 一个自然的疑问是："大家的输入不都一致吗，算出来的结果不应该自动一样？"——**前提就不成立**：
+
+1. **各 rank 的搜索输入并不相等**。图搜索的输入 = 全局 GPU 拓扑（一致，来自第 1 次交换）+ **本机网卡与 CPU**（不一致！）。网卡的数量、带宽、GPU-NIC 亲和是纯本地事实：异构集群里 A 机 4 张 400G、B 机 2 张 200G，两边算出的 `bwInter`、`nChannels` 天然不同。源码甚至为"网卡数不一致"准备了**报错路径**（`init.cc:1324-1344`，可用 `NCCL_IGNORE_NET_MISMATCH` 放行）——NCCL 从未假设大家算出来会一样。
+
+2. **需要全局一致的量，正确值是"聚合值"，任何单个 rank 都算不出来**：
+   - `nChannels` 取所有人的 **min**（`:1439`、`:1459`）——channel 数必须全环一致，只能就低；取完还要把 Preset 阶段多复制的 channel 搬回去（`:1460-1466`）；
+   - 带宽估计取 **min**（`:1440-1442`）——图的真实性能由**最慢一跳**决定，而"最慢一跳在哪"只有把所有人的数据摆在一起才知道；
+   - 能力类（`typeIntra`/`crossNic`）取 **max** = 最保守降级（`:1443-1445`）——只要有一个人不支持，整条 channel 就不能按那个模式建。
+
+3. **一些全局结构只能从汇总数据里"长出来"**：比如"这个通信域有几个节点、每个节点由哪些 rank 组成"（`nNodes`/`rankToNode`，`:1291-1301`）要看到所有人的 `topoRanks.ringRecv[0]` 才能划分；ring/tree 的最终邻居也是 `ncclTopoPostset` 用所有人的 Preset 结果拼装的（`:1480`）。
+
+> 顺带修正一个容易产生的误解：Ring 的相邻关系**不靠"各自以为"**——阶段⑤建连时每对 prev/next 要直接握手确认，接错了根本连不上。真正需要全局对齐的是**结构参数**：否则会出现"有人建 8 条 channel、有人建 6 条""同一 channel 上收发双方对带宽/协议的预期不一致"这类握手之后才发现的错位。
 
 ### 2.7 阶段五：连接与资源 —— Channel / Connector / Transport 是怎么落地的
 
@@ -1476,10 +1530,10 @@ ncclCommInitRank → ncclCommInitRankDev
    → 分配 ncclComm 空壳（含 abortFlag、魔数哨兵）
 ncclCommInitRankFunc（异步任务体，真正干活）
    ├─ 阶段② bootstrapInit ──────────── 建带外控制面（TCP/UDS）
-   ├─ 阶段③ 第一轮 AllGather ───────── 交换 peerInfo（我是谁、我在哪）
-   ├─ 阶段④ ncclTopoGetSystem + ncclTopoCompute
-   │         ──────────────────────── 探测拓扑 → 搜索 Ring/Tree/CollNet/NVLS 图
-   ├─ 阶段③ 第二轮 AllGather ───────── 交换图计算结果（全局达成一致）
+   ├─ 阶段③ AllGather1【全体】 ──────── 交换 peerInfo（我是谁、我在哪）
+   ├─ 阶段④ ncclTopoGetSystem（内部含机内 XML 融合【仅机内】）
+   │    └─ ncclTopoCompute ─────────── 搜索 Ring/Tree/CollNet/NVLS 图（纯本地计算）
+   ├─ 阶段④ AllGather3【全体】 ──────── 交换图参数，min/max 聚合出全局一致
    └─ 阶段⑤ setupChannel / Connect 系列
              ├─ channels[c].peers[]    分配连接表（按 rank 索引）
              ├─ ncclTransportP2pConnect 登记要建的连接（位图）
