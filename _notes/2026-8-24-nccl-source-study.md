@@ -1086,7 +1086,14 @@ static ncclResult_t ncclCommInitRankFunc(struct ncclAsyncJob* job_) {
 | **④ 拓扑与图** | 探测本机硬件拓扑，搜索出 Ring/Tree/CollNet/NVLS 各自的通信图 | `ncclTopoGetSystem`、`ncclTopoCompute` | `comm->topo`、`comm->graphs[]`、`comm->nChannels` |
 | **⑤ 连接与资源** | 按图把 Channel → Connector → Transport 一层层建起来，映射真实物理资源；初始化 Proxy | `setupChannel`、`ncclTransportP2pSetup`、`ncclTransportRingConnect`、`ncclProxyInit` | 可用的 `comm->channels[]` |
 
-> **为什么必须先有"控制面"（阶段②③）才能做后面的？** 因为一个典型的先有鸡还是先有蛋问题：GPU 之间的高速链路（NVLink/RDMA）要建立连接，双方必须先交换各自的**地址/句柄信息**（比如对端显存的 IPC handle、网卡的 QP 号）。可这些信息怎么交换？此时 GPU 链路还不存在——所以 NCCL 先用最朴素可靠的 **TCP socket**（同机则用 Unix Domain Socket）建一条"带外通道"，用它把该交换的信息交换完，再据此建立高速链路。这就是阶段②③存在的意义。
+> **为什么必须先有"控制面"（阶段②③）？** 换个角度看：高性能数据面网络（NVLink 拓扑、RDMA QP、IPC 显存句柄）的建立过程，本身需要**大量的元信息交换与协商**——拓扑探测结果、每个 rank 的设备与网卡信息、对端显存的 IPC handle、QP 号、内存注册句柄……这些消息**小、杂、多**，而且建网期间数据面还不存在。
+>
+> 所以 NCCL 的做法是：**先用带外网络（TCP socket，同机用 Unix Domain Socket）建一个轻量的"管理小网络"（Bootstrap），专职负责建网期间的一切元信息交换**。这样分工带来两个好处：
+>
+> - **管理面足够简单可靠**：TCP 天然有序、可靠、跨机通用，用它传"建网指令"几乎不会出错，同机走 UDS 更是零成本；
+> - **数据面的建立因此变得高效且可编排**：元信息交换有了专属通道，建网流程可以按"探测 → 交换 → 建连"的固定节奏推进，不必为传几个小消息专门依赖任何高性能链路。
+>
+> 换句话说，**阶段②③先搭的这个小网络，为后面那个更高效、更专一的高性能数据面网络创造了建立的可能性**。数据面建好之后，它就退居幕后，只继续承担少量控制消息（如错误通知、abort）。
 
 ### 2.3 阶段一：入场券 —— `ncclGetUniqueId`
 
@@ -1111,7 +1118,8 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId* out) {
 > **几个值得注意的点**：
 > - `ncclUniqueId` 本质是 **bootstrap handle 的拷贝**——整个结构只有三个字段（`src/include/bootstrap.h:14-18`）：`uint64_t magic`（校验值，`bootstrap.cc:446` 写入 `NCCL_MAGIC`）、`union ncclSocketAddress addr`（root 的地址，即 IP:端口）、`int nRanks`。所以它**不包含任何 GPU 信息**，只是个"集会地点 + 规模"的描述。
 > - 它必须能塞进 128 字节：`nccl.h.in:40-41` 定义 `NCCL_UNIQUE_ID_BYTES = 128`，并由 `static_assert(sizeof(ncclBootstrapHandle) <= sizeof(ncclUniqueId))` 在**编译期**保证装得下（`bootstrap.h:19-20`）。由于两者大小/对齐不同，函数里先 `memset` 清零再 `memcpy`，避免残留的未初始化数据被当作有效内容。
-> - 它**必须早于** `ncclCommInitRank` 调用，且同一个 ID 可以被**多个** communicator 使用（每次 init 会各自建一套连接）。
+> - 它**必须早于** `ncclCommInitRank` 调用，且**每个通信域都要用新生成的 ID**——同一个 ID **不能**发起第二次 init。原因：ID 里的 bootstrap root 是**一次性的"报名处"**，第一次 init 全体 rank 报到后监听 socket 就关闭了（`bootstrap.cc:392-396`），再连只会被拒。所以 split/grow 派生新通信器时，都会生成**新** ID + **新** root（`bootstrap.cc:448-456`），从不复用。真正"每次 init 各自建一套"的是**数据面连接**（QP / IPC handle），通信器之间的隔离由"随机 magic + `commHash` 身份"保证。
+> - 日志里那行 `TRACE_CALL(... getHash(...))` 是在打印这个 ID 的**指纹**。`getHash` 是 NCCL 通用的 64 位哈希（`src/include/bitops.h:539`），意义在于：uniqueId 是 128 字节二进制块，没法读也没法比对，哈希成短代号后，**同一个 ID 在任何 rank 上指纹相同**，排查"各 rank 是不是拿着同一个 ID"一眼可辨；且日志只留指纹、不留原文——拿到原文就等于能加入通信域。这个函数影响面很广：**通信器的身份标识 `commHash` 就是用它算的**（`init.cc:1905`），你在日志和 NVTX 里反复看到的 `commHash` 源头即此，`hostHash`、MNNVL 的 `cliqueId` 同理。
 
 ### 2.4 阶段二：骨架 + 控制面
 
@@ -1130,6 +1138,8 @@ comm->startMagic = comm->endMagic = NCCL_MAGIC; // Used to detect comm corruptio
 ```
 
 > 注意 `startMagic`/`endMagic` 在这里就被设为 `NCCL_MAGIC`（还记得 1.5 节讲的"魔数哨兵"吗？就是这里写入的）。而 `abortFlag` 之所以要准备 **host 和 device 两份**，是因为 NCCL 允许"一个 rank 出错时通知所有 rank 的内核提前退出"——这个标志必须能被 CPU 写、被 GPU 读，所以要分配在**页锁定（pinned）主机内存**上（`ncclCudaHostCalloc`）。
+>
+> 初读容易疑惑：第 ① 行已经把整个 `ncclComm` calloc 出来了，为什么还要对它内部字段再 calloc？因为 `abortFlag`/`abortFlagDev` 在结构体里只是**指针字段**（`comm.h:650-652`）——第一次分配只给了"装指针的槽位"（清零为 NULL），真正的标志位内存必须**另行分配**再把地址填进去。这么做有两个原因：一是 `abortFlagDev` 必须是 pinned 内存（GPU 可见），只能走 CUDA 分配器，没法内嵌在普通堆里；二是 `abortFlag` 会被多个通信器**共享**——子通信器直接指向父通信器的同一份标志（配合 `abortFlagRefCount` 引用计数），"指针 + 独立分配 + 引用计数"才能实现这种多对一共享：abort 一个通信器，所有共享该标志的通信器同时被通知，内存由最后一个使用者释放。
 
 注意此时 comm 里**还什么都没有**：没有拓扑、没有 channel、没有连接。这些都要在后面的阶段逐步填充。
 
