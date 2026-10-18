@@ -1311,7 +1311,25 @@ ncclTopoCompute(comm->topo, nvlsGraph);
 bootstrapAllGather(comm->bootstrap, allGather3Data, sizeof(*allGather3Data));
 ```
 
-交换的是各 rank **各自算出的图参数**（`init.cc:1256-1281`）：每个算法的 `pattern`/`nChannels`/`sameChannels`/`bwIntra`/`bwInter`/`typeIntra`/`typeInter`/`crossNic`，加上本机网卡设备数与最小网卡带宽、CPU 架构，以及 `ncclTopoPreset` 预设的 ring/tree 邻居（`topoRanks`）。
+交换的是各 rank **各自算出的图参数**（`init.cc:1256-1281`），缓冲区结构 `allGatherInfo`（`init.cc:994-1007`）把内容分成三类：
+
+| 类别 | 字段 | 含义 |
+|------|------|------|
+| **图参数** | `graphInfo[算法]`：`pattern` / `nChannels` / `sameChannels` / `bwIntra` / `bwInter` / `typeIntra` / `typeInter` / `crossNic` | 我为每种算法搜出的图长什么样、值多少带宽 |
+| **预设邻居** | `topoRanks`：`ringRecv`/`ringSend`/`ringPrev`/`ringNext`、`treeToParent`/`treeToChild0/1`、`nvlsHeads`（各 `MAXCHANNELS` 条） | 基于我的图，我认为我在这条 channel 上的上/下一跳是谁（`graph.h:195-206`） |
+| **本地事实** | `cpuArch`/`cpuVendor`、`localNetDeviceCount`/`Bw`、`localCollNetCount`、`minNetBw`、`isAllNvlink`、`p2pnChannelsPerPeer`/`p2pMaxPeers` | 只有我自己知道的机器事实 |
+
+AllGather 之后，聚合按字段逐个进行（`init.cc:1291-1316`、`1435-1451`），**产出正好是阶段⑤建连所需的全部全局参数**：
+
+| 聚合 | 规则 | 产出（交给阶段⑤） |
+|------|------|------------------|
+| 图参数 | `nChannels`/`sameChannels`/`bw*` → **min**；`type*`/`crossNic` → **max** | 全局统一的 `comm->nChannels` → 阶段⑤建几条 channel；带宽 → `computeBuffSizes` 定各协议（LL/LL128/Simple）缓冲区大小 |
+| `topoRanks` | `ncclTopoPostset`（`:1480`）把所有人的预设**拼装** | 最终 `rings[]`（每 channel 完整环序）→ `setupChannel` 按它建连接表；`ring.prev/next`、`tree.up/down` → 阶段⑤按它们与邻居握手 |
+| `ringRecv[0]` | 相同者归为同一**节点** | `nNodes` / `rankToNode` / 各节点 `localRanks` 布局（`:1291-1301`）——"哪些 rank 同机"由此划定 |
+| 本地设备数 | min / max 对比 | 不一致 → WARN 甚至报错（`NCCL_IGNORE_NET_MISMATCH`，`:1324-1344`） |
+| 能力与带宽 | `isAllNvlink` 取 AND；`minNetBw` 取 min | 运行时调优表；CollNet/NVLS 若聚合后 channel 数为 0 则整体禁用（`:1452-1453`） |
+
+一句话：**第 3 次交换的产物 = "阶段⑤建连所需的全部全局参数"**——建几条 channel、每条环序如何、每对邻居是谁、缓冲区多大、NVLS/CollNet 开不开。没有它，阶段⑤的每一步都会因为"各说各话"而失败。
 
 **为什么必须再交换一次？** 一个自然的疑问是："大家的输入不都一致吗，算出来的结果不应该自动一样？"——**前提就不成立**：
 
