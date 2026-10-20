@@ -1306,6 +1306,8 @@ ncclTopoCompute(comm->topo, nvlsGraph);
 bootstrapAllGather(comm->bootstrap, allGather3Data, sizeof(*allGather3Data));
 ```
 
+> 注意这次调用**没有"参与者名单"参数**——"全体"的范围由第一个参数 `comm->bootstrap`（`bootstrapState`）决定，它在阶段②建控制面时就定型了：记录着本通信域的 `rank`/`nranks` 和环上邻居连接。实现上就是沿 bootstrap 环转圈（`bootstrap.cc:1144`，注释原话 "Simple ring based AllGather"）：数据每步前进一格，`nranks-1` 步后人人拿到全员数据——**能参与这个环的，就是全体成员**。对照第 2 次交换的 `bootstrapIntraNodeAllGather` 需要显式传 rank 名单，反证了不带名单的 `bootstrapAllGather` 范围就是全体。
+
 交换的是各 rank **各自算出的图参数**（`init.cc:1256-1281`），缓冲区结构 `allGatherInfo`（`init.cc:994-1007`）把内容分成三类：
 
 | 类别 | 字段 | 含义 |
