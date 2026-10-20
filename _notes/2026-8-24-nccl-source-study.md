@@ -1326,6 +1326,11 @@ AllGather 之后，聚合按字段逐个进行（`init.cc:1291-1316`、`1435-145
 | 本地设备数 | min / max 对比 | 不一致 → WARN 甚至报错（`NCCL_IGNORE_NET_MISMATCH`，`:1324-1344`） |
 | 能力与带宽 | `isAllNvlink` 取 AND；`minNetBw` 取 min | 运行时调优表；CollNet/NVLS 若聚合后 channel 数为 0 则整体禁用（`:1452-1453`） |
 
+> **表中前两行最抽象，以 2 机 × 4 卡为例展开**：
+>
+> - **`topoRanks` = 每人申报"我这一段"**：图搜索给出的 `intra` 是本机机内链序，Preset（`connect.cc:20-93`）让每个 rank 申报 `ringRecv/Send`（本机链的**入口/出口**）、`ringPrev/Next`（机内我的**前/后**）、`treeToParent/Child0/1`（本机树段的父/子）——**跨机那段谁也没申报**。Postset 收齐后缝合（`connect.cc:103-110`）：节点 n 的入口的 prev ← 上一节点的出口、出口的 next ← 下一节点的入口，再把缝好的 prev/next 写回各 rank 的 `channel->ring`，产出 `rings[]` 交给 `setupChannel`。例：A 机报"链 A1→A2→A3→A4"、B 机报"B1→…→B4"，缝合后全局环 A1→…→A4→B1→…→B4→A1，跨机边只有 A4→B1、B4→A1 两条。
+> - **`ringRecv[0]` = 节点指纹**：它是本机链的入口 rank；同机所有 rank 必然报同一个值，不同机器几乎必然不同 → **值相同的一组 = 同一节点**（`init.cc:1291-1301`），组内第一个 rank 即 `nodesFirstRank[node]`（缝合时的节点锚点）。不用 hostHash 划分，是因为这里的"节点"是图意义概念——"环上连续的一段"，与缝合所需锚点是同一个量。
+
 一句话：**第 3 次交换的产物 = "阶段四建连所需的全部全局参数"**——建几条 channel、每条环序如何、每对邻居是谁、缓冲区多大、NVLS/CollNet 开不开。没有它，阶段四的每一步都会因为"各说各话"而失败。
 
 **为什么必须再交换一次？** 一个自然的疑问是："大家的输入不都一致吗，算出来的结果不应该自动一样？"——**前提就不成立**：
