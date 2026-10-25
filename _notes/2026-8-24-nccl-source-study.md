@@ -1585,7 +1585,7 @@ if (i - done == maxPeers || i == comm->nRanks - 1) {      // ① 攒满一轮对
 
 - **`connect` 的输入是对端交换数据**：`sendData[p] + offset` 就是第二步从对端 bootstrap 收到的 `ncclConnect`（对端 `setup` 的产物）；`connect` 用它完成真正的资源映射——P2P 映射显存、NET 激活 QP、SHM attach 共享内存；
 - **`connected` 标志 + 整轮重扫**：`ncclInProgress` 不算错误，只表示"该连接尚未就绪"——`while` 会重扫本轮全部连接，直到每一条都 `connected == 1`；
-- **host / device 双份连接信息**：host 侧 `conn->conn` 填好后，`cudaMemcpyAsync` 把 `ncclConnInfo` 拷到 device 侧 `devPeers`——GPU 内核运行时读的是 device 份（为什么两套见 2.6.2）。
+- **host / device 双份连接信息**：GPU 内核只能读取 device 可访问的内存，host 侧那份 `conn->conn` 是普通堆内存，内核物理上读不到——内核运行时需要的参数（对端缓冲区基址、fifo、协议类型）必须放进 device 侧的 `devPeers`。host 份也不能省：`connect` 过程本身、proxy 线程和后续的资源释放都在 host 侧操作它。连接信息在建连后不再变化，所以建连结束时一次 `cudaMemcpyAsync` 同步两份即可，此后各司其职——host 管理生命周期与进度，device 供内核读取。
 
 > 另外注意 `:286-299` 有一段进度打印：`NCCL_REPORT_CONNECT_PROGRESS` 开启且 rank 0 时，每秒输出一次"P2p connect: xx% Remaining ..."——大集群建连时你在日志里看到的进度条就是它。
 
