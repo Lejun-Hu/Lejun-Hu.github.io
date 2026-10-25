@@ -1611,6 +1611,12 @@ setupChannel（全部 channel 建连接表）
 | `ncclTransportTreeConnect` | 每 channel 两次登记：先"以 `tree.down` 为 recv、`tree.up` 为 send"，再反向一次（树的父子要双向各建一条） |
 | `ncclTransportPatConnect` | 仅 `maxLocalRanks == 1`（单卡节点）专用：按 `mask = 1, 2, 4…` 的二进制距离逐对登记，ReduceScatter / AllGather 两个方向各登记一次、各跑一次 P2pSetup |
 
+> **PAT 是什么？** PAT = **Parallel Aggregated Trees**（NVIDIA 在 NCCL 2.23 引入的算法，论文 arXiv:2506.20252），**只用于 AllGather / ReduceScatter** 两种集合操作。它是 **Bruck 算法的变体**（NVIDIA 官方博客原话），按 rank 执行"偏移二项树"，与递归翻倍类算法相比的优势是**可在任意数量的 rank 上运行**（不要求 2 的幂）。核心特征：**网络交换步数只有 log₂(节点数)**——每一步与距离 `2^k` 的对端交换，而 Ring 需要线性步数；官方预期**小到中消息**场景收益最大。这也解释了它的连接模式：`mask = 1, 2, 4…` 正是二项树的每一步，`±mask` 距离的对端就是该步的交换对象；ReduceScatter（全量收敛到分片）与 AllGather（分片扩展到全量）是互逆的两个方向，所以各建一套连接。
+>
+> **为什么当前仅单 GPU 节点（`maxLocalRanks == 1`）？** 启用检查在 `ncclPatEnable`（`tuning.cc:216-223`），源码注释原话就是 `// PAT only supports 1 GPU per node`（条件 `nNodes != nRanks` 则禁用）。这是当前实现的**阶段性边界**——PAT 把每个节点当作一个参与者做节点间对数步交换，节点内的聚合/分发尚未覆盖；并非算法原理上不能支持多 GPU 节点。另外两个附加条件：`minCompCap >= 60`（内核用到 CUDA atomics）、不支持 net device offload。
+>
+> **这个限制的实际影响**：多 GPU 节点用户完全不受影响——`ncclPatEnable` 返回 0 后调优器直接跳过 PAT，AllGather/ReduceScatter 照常走 Ring/NVLS（由延迟模型决定，`tuning.cc:429-433`：PAT 的模型是 `log2(节点数)` 次网络往返 + 线性项，带宽打 75 折）。它面向的目标场景是**大规模单卡节点集群**（rank 数 = 节点数，PAT 提供对数步数选项）；是否真用由调优器按拓扑与消息大小自动决定。
+
 **分工总结**：**拓扑知识（连谁）在各 Connect 变体里，执行流程（怎么连）在 P2pSetup 里**。新增一种拓扑只需写一个 Connect 变体登记邻居，P2pSetup 一行不改——这是"逻辑与物理分离"在连接阶段的又一次体现。
 
 > 补充：`comm->runtimeConn`（cuMem 支持且参数开启）时走另一条路——只做 `setupChannel` + NVLS/CollNet，P2P 连接推迟到运行时建立（`init.cc:1552-1560`），这里不展开。
