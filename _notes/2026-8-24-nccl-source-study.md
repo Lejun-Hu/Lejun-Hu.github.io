@@ -1438,8 +1438,6 @@ channel->peers[r] = &sharedRes->peers[channelId][ topParentRanks[r] ];
 
 **这样设计的意义**：同一通信域内，"指向同一个对端"的所有引用收敛到**同一份 `ncclChannelPeer`**——无论多少个 comm、多少个 channel 引用它，连接状态只有一份（single source of truth），不会出现两份副本不一致；`refCount` 记录"有多少个目录条目指向它"，最后一个使用者退出时才释放（`init.cc:333-338` 里对 `sharedRes->peers[c]` 的 free 就发生在共享引用归零后）。
 
-打个比方：`sharedRes->peers[channelId]` 是**机房总台账**（按全局工号装订的记录册），`channel->peers` 是**本小组的通讯录**（按组内序号排的指针页），`topParentRanks[r]` 是"组内序号 → 全局工号"的翻译，`refCount` 则是每页被多少本通讯录引用——全退了才撕页。
-
 #### 2.6.3 第二步："登记"要建哪些连接
 
 Ring/Tree 的建链入口会先**登记**（而不是立刻建）需要建立的连接（`src/transport/generic.cc:24-28`）：
