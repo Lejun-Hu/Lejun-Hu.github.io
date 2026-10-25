@@ -1520,6 +1520,69 @@ a {
   }
 }
 
+// ============================================
+// 12c. 代码语法高亮（Rouge token 配色，GitHub Dark 风格）
+// ============================================
+// Jekyll/Rouge 会给带语言标注的代码块自动打 token 标签（.k 关键字、.nf 函数名等），
+// 这里定义各类 token 的颜色。代码块背景两种主题下均为深色，故用 GitHub Dark 配色。
+
+.highlight {
+  // 注释：灰色斜体
+  .c, .cd, .cm, .cs, .c1, .ch, .cp, .cpf, .ge {
+    color: #8b949e;
+    font-style: italic;
+  }
+
+  // 关键字：红色加粗（if/for/return/class/struct/define ...）
+  .k, .kc, .kd, .kf, .kn, .kp, .kr, .kt, .kv, .ow {
+    color: #ff7b72;
+    font-weight: 600;
+  }
+
+  // 函数/方法名：紫色
+  .nf, .fm {
+    color: #d2a8ff;
+  }
+
+  // 类名/命名空间/属性/装饰器：橙色
+  .nc, .ne, .nn, .na, .nb, .nd, .ni, .nl {
+    color: #ffa657;
+  }
+
+  // 数字/常量：蓝色
+  .m, .mb, .mf, .mh, .mi, .il, .mo, .no {
+    color: #79c0ff;
+  }
+
+  // 字符串：浅蓝
+  .s, .sa, .sb, .sc, .dl, .sd, .s2, .se, .sh, .si, .sx, .sr, .s1, .ss {
+    color: #a5d6ff;
+  }
+
+  // 变量：橙黄
+  .nv, .vc, .vg, .vi, .vm, .nx {
+    color: #ffa657;
+  }
+
+  // 标签（HTML/XML tag）：绿色
+  .nt {
+    color: #7ee787;
+  }
+
+  // 运算符/标点/普通标识符：默认文字色
+  .o, .p, .n, .w {
+    color: var(--color-code-text);
+  }
+
+  // diff / 错误
+  .gd { color: #ff7b72; }
+  .gi { color: #7ee787; }
+  .gh { color: #79c0ff; font-weight: 600; }
+  .gu { color: #8b949e; }
+  .gs { font-weight: 600; }
+  .err { color: #ff7b72; }
+}
+
 .note-nav {
   max-width: 900px;
   margin: var(--space-xl) auto 0;
