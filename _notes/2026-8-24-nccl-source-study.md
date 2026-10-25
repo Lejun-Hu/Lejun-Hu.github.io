@@ -1094,6 +1094,8 @@ static ncclResult_t ncclCommInitRankFunc(struct ncclAsyncJob* job_) {
 >
 > 换句话说，**阶段②③先搭的这个小网络，为后面那个更高效、更专一的高性能数据面网络创造了建立的可能性**。数据面建成之后，bootstrap 不再参与数据面，只继续承担少量控制消息（如错误通知、abort）。
 
+下面按 ① → ④ 的顺序，把每个阶段逐一展开。
+
 ### 2.3 阶段一：生成唯一 ID —— `ncclGetUniqueId`
 
 **职责**：生成一个全局唯一 ID，让分处不同进程/机器的所有 rank 获知彼此属于同一个通信域。它是初始化流程里**唯一需要用户自己做一次跨进程分发**的东西（通常由 rank 0 生成，再通过 MPI/文件/env 广播给其他 rank）。
@@ -1119,6 +1121,8 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId* out) {
 > - 它必须能塞进 128 字节：`nccl.h.in:40-41` 定义 `NCCL_UNIQUE_ID_BYTES = 128`，并由 `static_assert(sizeof(ncclBootstrapHandle) <= sizeof(ncclUniqueId))` 在**编译期**保证装得下（`bootstrap.h:19-20`）。由于两者大小/对齐不同，函数里先 `memset` 清零再 `memcpy`，避免残留的未初始化数据被当作有效内容。
 > - 它**必须早于** `ncclCommInitRank` 调用，且**每个通信域都要用新生成的 ID**——同一个 ID **不能**发起第二次 init。原因：ID 里的 bootstrap root 是**一次性的集中登记服务**，第一次 init 全体 rank 上报地址后监听 socket 即关闭（`bootstrap.cc:392-396`），再连只会被拒。所以 split/grow 派生新通信器时，都会生成**新** ID + **新** root（`bootstrap.cc:448-456`），从不复用。真正"每次 init 各自建一套"的是**数据面连接**（QP / IPC handle），通信器之间的隔离由"随机 magic + `commHash` 身份"保证。
 > - 日志里那行 `TRACE_CALL(... getHash(...))` 是在打印这个 ID 的**指纹**。`getHash` 是 NCCL 通用的 64 位哈希（`src/include/bitops.h:539`），意义在于：uniqueId 是 128 字节二进制块，没法读也没法比对，哈希成短代号后，**同一个 ID 在任何 rank 上指纹相同**，排查"各 rank 是不是拿着同一个 ID"一眼可辨；且日志只留指纹、不留原文——拿到原文就等于能加入通信域。这个函数影响面很广：**通信器的身份标识 `commHash` 就是用它算的**（`init.cc:1905`），你在日志和 NVTX 里反复看到的 `commHash` 源头即此，`hostHash`、MNNVL 的 `cliqueId` 同理。
+
+ID 生成并分发到位后，初始化的控制权回到 NCCL 内部——阶段二开始：先建骨架，再建控制面。
 
 ### 2.4 阶段二：骨架 + 控制面
 
@@ -1170,7 +1174,7 @@ Bootstrap 之后向上提供的原语（`src/include/bootstrap.h`）：
 
 ### 2.5 阶段三：信息交换与全局拓扑 —— 从交换成员信息到生成通信图
 
-**职责**：把"每个 rank 只掌握本地信息"变成"掌握全体成员信息"，再据此把硬件画成拓扑图、搜出各算法的通信路线，最后聚合成全局一致的参数。这一步在 `initTransportsRank`（`src/init.cc:965`）里完成，靠的就是 Bootstrap 的 AllGather。
+**职责**：把"每个 rank 只掌握本地信息"变成"掌握全体成员信息"，再据此把硬件画成拓扑图、搜出各算法的通信路线，最后聚合成全局一致的参数。这一步在 `initTransportsRank`（`src/init.cc:965`）里完成，靠的就是阶段二建好的 Bootstrap 通道。
 
 先建立一个全局视角：**这个阶段里其实有三次信息交换**，它们的规模、范围、内容各不相同——这也是理解后面所有内容的主线：
 
@@ -1268,7 +1272,7 @@ for (int i = 0; i < nLocalRanks; i++)
 
 #### 2.5.3 图搜索：为每种算法找一条最优路径
 
-以 AllReduce 为例，NCCL 会为 Ring、Tree 两种算法**各算一份图**（还有可选的 CollNet、NVLS）：
+整机拓扑图就绪后，下一步是在它上面为每种算法搜出一条通信路线。以 AllReduce 为例，NCCL 会为 Ring、Tree 两种算法**各算一份图**（还有可选的 CollNet、NVLS）：
 
 ```cpp
 // src/init.cc:1173-1217（节选）
@@ -1695,7 +1699,7 @@ send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE] / NCCL_STEPS;
 | `P2P_IPC` | 同主机不同进程，用传统 CUDA IPC 共享显存 |
 | `P2P_CUMEM` | 用 cuMem API（CUDA 12+ 虚拟地址管理，支持 MNNVL 多节点 NVLink） |
 
-而 NET transport 与网卡的交互完全通过 **Net Plugin API**（`src/include/plugin/nccl_net.h`，v12）：**setup** 阶段向对端提供网卡的 `handle`（内含 QP 信息），**connect** 阶段把对端 QP 置为 RTS（Ready To Send）状态——这也是"国产网卡替换"最关键的一个接口（见 2.8 节）。
+而 NET transport 与网卡的交互完全通过 **Net Plugin API**（`src/include/plugin/nccl_net.h`，v12）：**setup** 阶段向对端提供网卡的 `handle`（内含 QP 信息），**connect** 阶段把对端 QP 置为 RTS（Ready To Send）状态——这也是"国产网卡替换"最关键的一个接口（见 2.7 节）。
 
 #### 2.6.7 第四步：收尾 —— Proxy 线程、调优器与 device 侧镜像
 
@@ -1749,7 +1753,9 @@ ncclCommInitRankFunc（异步任务体，真正干活）
 
 > **这条链体现的设计哲学**：**逻辑与物理分离**。阶段三产出的是纯粹的"逻辑图"（谁和谁相邻），阶段四才把它落到具体传输和资源上。好处是：换一种物理链路（比如国产网卡、自研互联）只需要替换阶段四的 transport 实现，前面的拓扑/图逻辑完全不用动。
 
-### 2.8 国产芯片适配要点
+顺着这个思路，本章最后一节把这些"可替换点"逐一列出。
+
+### 2.7 国产芯片适配要点
 
 > 本节梳理了 NCCL 中 NV 闭源组件对应的抽象层，以及可能的替换策略，供国产芯片适配时参考。
 
