@@ -91,19 +91,31 @@
     <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-python.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js"></script>
     <script>
+      // Prism 增强着色（带三重兜底：任何加载不完整的情况都不动 DOM，保留 Rouge 高亮）
       (function () {
-        // ① 扩展 C/C++ 语法：NCCL/CUDA/NVSHMEM 等自有 API 前缀按独立配色
+        // ① Prism 没加载成功 → 保留 Rouge 高亮
+        if (typeof Prism === 'undefined') return;
+        // ② 语言组件不齐全 → 保留 Rouge 高亮（防止 Prism 把代码块剥成纯文本）
+        var required = ['c', 'cpp', 'python', 'bash'];
+        for (var i = 0; i < required.length; i++) {
+          if (!Prism.languages[required[i]]) return;
+        }
+        // ③ 扩展语法：自有 API 前缀 + 成员访问
         ['cpp', 'c'].forEach(function (lang) {
-          if (!Prism.languages[lang]) return;
           Prism.languages.insertBefore(lang, 'function', {
             'local-api': /\b(?:nccl|nvshmem|cuda|cuMem|nvml|ibv|torch)[A-Za-z0-9_]*\b/
           });
-          // ② 成员访问：-> 或 . 之后的标识符按"属性"着色（lookbehind 让箭头本身保持原色）
           Prism.languages.insertBefore(lang, 'operator', {
             'member': { pattern: /(->|\.)[a-zA-Z_]\w*/, lookbehind: true, alias: 'property' }
           });
         });
-        Prism.highlightAll();
+        // ④ 逐块重着色：只动"语法已加载"的块，其余保留 Rouge 结果
+        document.querySelectorAll('pre code[class*="language-"]').forEach(function (el) {
+          var m = /language-([\w-]+)/.exec(el.className);
+          var lang = m && m[1].toLowerCase();
+          if (!lang || !Prism.languages[lang]) return;   // 语法缺失 → 不动，保留 Rouge
+          Prism.highlightElement(el);
+        });
       })();
     </script>
   </body>
