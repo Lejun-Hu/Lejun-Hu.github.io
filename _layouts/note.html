@@ -82,5 +82,29 @@
     </div>
 
     <script src="{{ '/assets/js/main.js' | relative_url }}"></script>
+
+    <!-- Prism 客户端语法高亮增强（在 Rouge 之上：函数调用/成员访问/自有 API 前缀着色） -->
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-clike.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-c.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-cpp.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-python.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js"></script>
+    <script>
+      (function () {
+        // ① 扩展 C/C++ 语法：NCCL/CUDA/NVSHMEM 等自有 API 前缀按独立配色
+        ['cpp', 'c'].forEach(function (lang) {
+          if (!Prism.languages[lang]) return;
+          Prism.languages.insertBefore(lang, 'function', {
+            'local-api': /\b(?:nccl|nvshmem|cuda|cuMem|nvml|ibv|torch)[A-Za-z0-9_]*\b/
+          });
+          // ② 成员访问：-> 或 . 之后的标识符按"属性"着色（lookbehind 让箭头本身保持原色）
+          Prism.languages.insertBefore(lang, 'operator', {
+            'member': { pattern: /(->|\.)[a-zA-Z_]\w*/, lookbehind: true, alias: 'property' }
+          });
+        });
+        Prism.highlightAll();
+      })();
+    </script>
   </body>
 </html>

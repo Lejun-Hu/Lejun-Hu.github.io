@@ -1583,6 +1583,25 @@ a {
   .err { color: #ff7b72; }
 }
 
+// Prism（客户端增强）token 配色 —— VS Code Dark+ 风格
+// Prism 会在页面加载时用更丰富的规则（函数调用/成员访问/自有 API）重新着色，
+// 以下 token 类覆盖 Rouge 的结果；无 JS 时仍回落到上面的 Rouge 配色。
+.token.keyword { color: #569cd6; }
+.token.preprocessor { color: #c586c0; }
+.token.function, .token.fm { color: #dcdcaa; }
+.token.class-name, .token.builtin { color: #4ec9b0; }
+.token.number { color: #b5cea8; }
+.token.constant { color: #4fc1ff; }
+.token.string, .token.char { color: #ce9178; }
+.token.comment { color: #6a9955; font-style: italic; }
+.token.operator { color: #d4d4d4; }
+.token.punctuation { color: #d4d4d4; }
+.token.variable, .token.property, .token.parameter, .token.attr-name { color: #9cdcfe; }
+.token.local-api { color: #4ec9b0; }
+.token.tag { color: #569cd6; }
+.token.attr-value { color: #ce9178; }
+.token.boolean { color: #569cd6; }
+
 .note-nav {
   max-width: 900px;
   margin: var(--space-xl) auto 0;
