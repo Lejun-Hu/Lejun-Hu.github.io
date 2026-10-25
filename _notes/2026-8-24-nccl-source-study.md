@@ -1410,6 +1410,36 @@ for (int r = 0; r < nRanks; r++) {
 - 数组元素来自 `comm->sharedRes->peers[channelId]`（**共享资源**），并用 `refCount` 计数——所以 `ncclCommSplit` 出来的子通信器能复用父通信器已分配的这些载体（呼应 1.5 节 `sharedRes` 的作用）；
 - 同一段代码还分配了 **device 侧镜像** `channel->devPeers`（`src/channel.cc:42-56`）——连接信息最终要出现在 GPU 能读到的地方，所以 host 侧和 device 侧各有一套。
 
+**那行指针运算到底在做什么？** 关键是看清这里其实有**两级表**：
+
+**第一级：全局共享表 `sharedRes->peers[channelId]`**（`channel.cc:32-34`）
+
+```cpp
+ncclCalloc(sharedRes->peers + channelId, sharedRes->tpNRanks);
+// = 给 channel channelId 分配一块连续内存，装 tpNRanks 个 ncclChannelPeer 结构体
+//    下标 = 顶层（父）通信器的全局 rank
+```
+
+这是**真正的连接状态存储**：按"顶层全局 rank"索引、每 channel 一份。它挂在 `sharedRes` 上而不是挂在单个 comm 上（源码注释原话：*"this can be shared between communicators hence should not be tied to comm"*）——父通信器和共享资源的子通信器（split 时 `shareResources`）看到的是**同一份**；`if (... == NULL)` 的判断保证**第一个到达的 comm 分配、后来者直接复用**。
+
+**第二级：本 channel 的"指针目录" `channel->peers`**（`channel.cc:35`）
+
+`ncclMemoryStackAlloc` 分配的只是 **nPeers 个指针**——注意它是"指针的数组"，不是结构体数组。
+
+于是那行赋值就是一次"**编号翻译 + 指针定位**"：
+
+```cpp
+channel->peers[r] = sharedRes->peers[channelId] + comm->topParentRanks[r];
+// 等价于
+channel->peers[r] = &sharedRes->peers[channelId][ topParentRanks[r] ];
+```
+
+含义：本 channel 里"我视角下的第 r 个对端"，指向全局表里下标为 `topParentRanks[r]` 的那条记录。为什么要翻译、不能直接用 `r` 做下标？因为**子通信器（split 出来的）的 rank 编号从 0 重排过**，与顶层全局 rank 对不上；共享表按全局 rank 索引，必须经 `topParentRanks[r]`（本子通信器 rank r 在顶层通信器里的编号）做一次映射。
+
+**这样设计的意义**：同一通信域内，"指向同一个对端"的所有引用收敛到**同一份 `ncclChannelPeer`**——无论多少个 comm、多少个 channel 引用它，连接状态只有一份（single source of truth），不会出现两份副本不一致；`refCount` 记录"有多少个目录条目指向它"，最后一个使用者退出时才释放（`init.cc:333-338` 里对 `sharedRes->peers[c]` 的 free 就发生在共享引用归零后）。
+
+打个比方：`sharedRes->peers[channelId]` 是**机房总台账**（按全局工号装订的记录册），`channel->peers` 是**本小组的通讯录**（按组内序号排的指针页），`topParentRanks[r]` 是"组内序号 → 全局工号"的翻译，`refCount` 则是每页被多少本通讯录引用——全退了才撕页。
+
 #### 2.6.3 第二步："登记"要建哪些连接
 
 Ring/Tree 的建链入口会先**登记**（而不是立刻建）需要建立的连接（`src/transport/generic.cc:24-28`）：
