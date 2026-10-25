@@ -1455,7 +1455,92 @@ NCCLCHECKGOTO(ncclTransportP2pSetup(comm, &comm->graphs[NCCL_ALGO_RING], 0), ret
 
 > **为什么先"登记"再"建"？** 因为建连是**成对**的：A 要连 B，B 也要连 A。先把全体要建的连接汇总成位图，才能高效地做"批量握手"（下一步的 setup/connect 会遍历这些位图，一次把同 peer 的多条连接一起处理），避免每个 channel 各自来回通信。
 
-#### 2.6.4 第三步：两段式建链 —— setup（换句柄）→ connect（映射资源）
+#### 2.6.4 调度中枢：`ncclTransportP2pSetup` 把登记变成连接
+
+上一节的登记只写了两个位图；真正把登记变成连接的，是**所有拓扑共用**的执行器 `ncclTransportP2pSetup`（`src/transport.cc:123-287`）。Ring/Tree/PAT 三种拓扑最终都调用它，区别只在登记内容（位图）和传入的 `graph`。
+
+```cpp
+// src/transport.cc:123-130（节选）
+ncclResult_t ncclTransportP2pSetup(struct ncclComm* comm, struct ncclTopoGraph* graph, int connIndex) {
+  struct ncclConnect** data;      // 每个"距离对"的 send/recv 交换数据
+  ...
+  int maxPeers = ncclParamConnectRoundMaxPeers();   // 每轮处理的对端数上限
+```
+
+**第一步：选路与 setup**（`transport.cc:149-186`）——按与对端的"距离"遍历，逐 channel 选传输：
+
+```cpp
+// src/transport.cc:149-185（节选）
+for (int i = 1; i < comm->nRanks; i++) {                    // 按距离遍历所有对端（先近后远）
+  int recvPeer = (comm->rank - i + comm->nRanks) % comm->nRanks;
+  int sendPeer = (comm->rank + i) % comm->nRanks;
+  uint64_t recvMask = comm->connectRecv[recvPeer];           // ← 登记阶段留下的位图
+  uint64_t sendMask = comm->connectSend[sendPeer];
+  ...
+  for (int c = 0; c < MAXCHANNELS; c++) {
+    if (recvMask & (1ULL << c)) {                            // 该 channel 与该对端有 recv 连接
+      NCCLCHECKGOTO(selectTransport<0>(comm, graph, recvData[p] + recvChannels++, c, recvPeer, connIndex, &type), ret, fail);
+    }
+  }
+  ...                                                        // send 方向同理
+}
+```
+
+`selectTransport`（`transport.cc:20-41`）就是"按优先级选路 + 现场调 setup"：
+
+```cpp
+// src/transport.cc:27-37（节选）
+for (int t = 0; t < NTRANSPORTS; t++) {                      // 顺序：P2P → SHM → NET → CollNet
+  struct ncclTransport* transport = ncclTransports[t];
+  int ret = 0;
+  NCCLCHECK(transport->canConnect(&ret, comm, graph, myInfo, peerInfo));   // 这对 rank 之间走不走得通？
+  if (ret) {
+    connector->transportComm = transportComm;                // ① 定下这条连接用哪套传输
+    NCCLCHECK(transportComm->setup(comm, graph, myInfo, peerInfo, connect, connector, channelId, connIndex));
+    //                                                       ↑ ② 调它的 setup，产出 ncclConnect 交换数据
+    return ncclSuccess;
+  }
+}
+```
+
+**第二步：经 bootstrap 交换连接信息**（`transport.cc:188-221`）——与每个对端互换各自的 `ncclConnect`：
+
+```cpp
+// src/transport.cc:201-219（节选）
+if (recvChannels) bootstrapSend(comm->bootstrap, recvPeer, tag, recvData[p], ...);   // 把"连我的方式"发给对端
+if (sendChannels) bootstrapSend(comm->bootstrap, sendPeer, tag, sendData[p], ...);   // 把"我要连你的方式"发出去
+if (sendChannels) bootstrapRecv(comm->bootstrap, sendPeer, tag, sendData[p], ...);   // 收回对端"允许我连入的方式"
+if (recvChannels) bootstrapRecv(comm->bootstrap, recvPeer, tag, recvData[p], ...);
+// tag = (i << 8) + graph->id + 1 —— 不同拓扑轮次的交换数据互不混淆
+```
+
+**第三步：connect 落地 + 下发 GPU**（`transport.cc:224-287`）——按轮次（每轮 `maxPeers` 个对端）逐 (channel, 对端) 调用对端信封对应的 `connect`，成功即 `connected = 1` 并把 `ncclConnInfo` 异步拷贝到 device 侧；返回 `ncclInProgress` 则标记未完成、`while` 循环重试。这一步的具体代码就是下一小节引用的那段。
+
+**各拓扑是怎么组织起来的**（`init.cc:1561-1594`，`ncclCommInitRankFunc` 阶段四）：
+
+```
+setupChannel（全部 channel 建连接表）
+→ ncclTransportRingConnect    // 每 channel 登记 ring.prev / ring.next → P2pSetup(graph=RING)
+→ ncclTransportTreeConnect    // 每 channel 登记两轮（子连父、父收子）→ P2pSetup(graph=TREE)
+→ ncclTransportPatConnect     // 仅单 GPU 节点：按 mask=1,2,4… 登记距离对 → 正反两个方向各一次 P2pSetup
+→ ncclNvlsSetup / ncclNvlsTreeConnect
+→ CollNet setup（若启用）
+→ 连接本地 NET proxy（SharedInit）
+```
+
+三个 Connect 变体（`src/transport/generic.cc`）没有公共逻辑要复用，**差异只在"登记哪些邻居"**：
+
+| 拓扑 | 登记内容 |
+|------|---------|
+| `ncclTransportRingConnect` | 每 channel 一对邻居：`ring.prev` / `ring.next` |
+| `ncclTransportTreeConnect` | 每 channel 两次登记：先"以 `tree.down` 为 recv、`tree.up` 为 send"，再反向一次（树的父子要双向各建一条） |
+| `ncclTransportPatConnect` | 仅 `maxLocalRanks == 1`（单卡节点）专用：按 `mask = 1, 2, 4…` 的二进制距离逐对登记，ReduceScatter / AllGather 两个方向各登记一次、各跑一次 P2pSetup |
+
+**分工总结**：**拓扑知识（连谁）在各 Connect 变体里，执行流程（怎么连）在 P2pSetup 里**。新增一种拓扑只需写一个 Connect 变体登记邻居，P2pSetup 一行不改——这是"逻辑与物理分离"在连接阶段的又一次体现。
+
+> 补充：`comm->runtimeConn`（cuMem 支持且参数开启）时走另一条路——只做 `setupChannel` + NVLS/CollNet，P2P 连接推迟到运行时建立（`init.cc:1552-1560`），这里不展开。
+
+#### 2.6.5 第三步：两段式建链 —— setup（换句柄）→ connect（映射资源）
 
 这是整个阶段四最核心的机制，也是最容易被忽略的细节。NCCL 把"建立一条连接"拆成了**两段**，对应 `ncclTransportComm` 里的两个函数指针：
 
@@ -1495,42 +1580,6 @@ if (conn->connected == 0) {
 ```
 
 注意 `ret == ncclInProgress` 这一分支：**建连是允许异步的**（比如某些传输的连接需要等网卡状态），所以 `ncclTransportP2pSetup` 内部会循环重试直到所有 channel 都连上。
-
-#### 2.6.5 调度中枢：`ncclTransportP2pSetup` 把登记变成连接
-
-上一节 `ncclTransportP2pConnect` 只做登记；真正把登记变成连接的，是**所有拓扑共用**的执行器 `ncclTransportP2pSetup`（`src/transport.cc:123-287`）。Ring/Tree/PAT 三种拓扑最终都调用它，区别只在前面登记的内容不同。
-
-**它的输入**：`comm->connectRecv[]` / `comm->connectSend[]` 两个位图数组（各拓扑的 Connect 函数登记的"哪个 channel 连哪个对端"），外加一个 `graph` 参数（告诉选路逻辑当前是哪张图）。
-
-**执行分三步**：
-
-1. **选路与 setup**（`transport.cc:149-186`）：按与对端的"距离" `i = 1..nRanks-1` 遍历（先近后远：`recvPeer = rank-i`、`sendPeer = rank+i`）；对每个对端按位图逐 channel 调用 `selectTransport`——按 **P2P → SHM → NET** 的优先级依次用各 transport 的 `canConnect` 试探，选中者立即执行自己的 `setup`，产出 `ncclConnect` 交换数据；
-2. **经 bootstrap 交换**（`transport.cc:188-221`）：与每个对端 `bootstrapSend`/`bootstrapRecv` 互换 `ncclConnect`。注意 tag = `(i << 8) + graph->id + 1`——不同拓扑轮次的交换数据互不混淆；
-3. **connect 落地 + 下发 GPU**（`transport.cc:224-287`）：按轮次（每轮 `maxPeers` 个对端）逐 (channel, 对端) 调用 `conn->transportComm->connect(...)`；成功则 `connected = 1`，并把 `ncclConnInfo` 异步拷贝到 device 侧（`devPeers`）；返回 `ncclInProgress` 则标记未完成，`while` 循环继续重试，直到全部 channel × 全部对端连完。
-
-**各拓扑是怎么组织起来的**（`init.cc:1561-1594`，`ncclCommInitRankFunc` 阶段四的调用序列）：
-
-```
-setupChannel（全部 channel 建连接表）
-→ ncclTransportRingConnect    // 每 channel 登记 ring.prev / ring.next → P2pSetup(graph=RING)
-→ ncclTransportTreeConnect    // 每 channel 登记两轮（子连父、父收子）→ P2pSetup(graph=TREE)
-→ ncclTransportPatConnect     // 仅单 GPU 节点：按 mask=1,2,4… 登记距离对 → 正反两个方向各一次 P2pSetup
-→ ncclNvlsSetup / ncclNvlsTreeConnect
-→ CollNet setup（若启用）
-→ 连接本地 NET proxy（SharedInit）
-```
-
-三个 Connect 变体（`src/transport/generic.cc`）没有公共逻辑要复用，**差异只在"登记哪些邻居"**：
-
-| 拓扑 | 登记内容 |
-|------|---------|
-| `ncclTransportRingConnect` | 每 channel 一对邻居：`ring.prev` / `ring.next` |
-| `ncclTransportTreeConnect` | 每 channel 两次登记：先"以 `tree.down` 为 recv、`tree.up` 为 send"，再反向一次（树的父子要双向各建一条） |
-| `ncclTransportPatConnect` | 仅 `maxLocalRanks == 1`（单卡节点）专用：按 `mask = 1, 2, 4…` 的二进制距离逐对登记，且 ReduceScatter / AllGather 两个方向各登记一次、各跑一次 P2pSetup |
-
-**分工总结**：**拓扑知识（连谁）在各 Connect 变体里，执行流程（怎么连）在 P2pSetup 里**。新增一种拓扑只需写一个 Connect 变体登记邻居，P2pSetup 一行不改——这是"逻辑与物理分离"在连接阶段的又一次体现。
-
-> 补充：`comm->runtimeConn`（cuMem 支持且参数开启）时走另一条路——只做 `setupChannel` + NVLS/CollNet，P2P 连接推迟到运行时建立（`init.cc:1552-1560`），这里不展开。
 
 #### 2.6.6 连接子里面到底装了什么：`ncclConnInfo`
 
