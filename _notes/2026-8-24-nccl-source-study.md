@@ -1546,7 +1546,50 @@ if (recvChannels) bootstrapRecv(comm->bootstrap, recvPeer, tag, recvData[p], ...
 // tag = (i << 8) + graph->id + 1 —— 不同拓扑轮次的交换数据互不混淆
 ```
 
-**第三步：connect 落地 + 下发 GPU**（`transport.cc:224-287`）——按轮次（每轮 `maxPeers` 个对端）逐 (channel, 对端) 调用对端信封对应的 `connect`，成功即 `connected = 1` 并把 `ncclConnInfo` 异步拷贝到 device 侧；返回 `ncclInProgress` 则标记未完成、`while` 循环重试。这一步的具体代码就是下一小节引用的那段。
+**第三步：connect 落地 + 下发 GPU**（`transport.cc:224-287`）——骨架是"**攒满一轮对端 → 按位图逐连接落地 → 存在进行中就整轮重扫**"：
+
+```cpp
+// src/transport.cc:224-287（节选）
+if (i - done == maxPeers || i == comm->nRanks - 1) {      // ① 攒满一轮对端（或已到最后一个）
+  bool allChannelsConnected = false;
+  while (!allChannelsConnected) {                          // ② 存在 inProgress 就整轮重扫
+    allChannelsConnected = true;
+    for (int j = done + 1; j <= i; j++) {                  // ③ 本轮内的每个对端
+      ...
+      for (int c = 0; c < MAXCHANNELS; c++) {              // ④ 逐 channel
+        if (sendMask & (1ULL << c)) {                      //    位图登记过才连
+          struct ncclConnector* conn = comm->channels[c].peers[sendPeer]->send + connIndex;
+          if (conn->connected == 0) {                      //    尚未连上
+            NCCLCHECKGOTO(conn->transportComm->connect(comm, sendData[p] + sendDataOffset, 1, comm->rank, conn), ret, fail);
+            if (ret == ncclSuccess) {
+              conn->connected = 1;                         //    ⑤ connect 成功，标记已连
+              CUDACHECKGOTO(cudaMemcpyAsync(&comm->channels[c].devPeersHostPtr[sendPeer]->send[connIndex],
+                                            &conn->conn, sizeof(struct ncclConnInfo),
+                                            cudaMemcpyHostToDevice, hostStream), ret, fail);   // ⑥ 连接信息同步下发 GPU
+            } else if (ret == ncclInProgress) {
+              allChannelsConnected = false;                //    该连接异步进行中 → 整轮重扫
+            }
+          }
+          sendDataOffset++;
+        }
+      }
+      ...                                                  // recv 方向同理（recvMask / recvData / recvPeer）
+    }
+    ...
+  }
+  done = i;                                                // ⑦ 本轮全部完成，推进已处理边界
+}
+```
+
+读这段代码的三个要点：
+
+- **`connect` 的输入是对端交换数据**：`sendData[p] + offset` 就是第二步从对端 bootstrap 收到的 `ncclConnect`（对端 `setup` 的产物）；`connect` 用它完成真正的资源映射——P2P 映射显存、NET 激活 QP、SHM attach 共享内存；
+- **`connected` 标志 + 整轮重扫**：`ncclInProgress` 不算错误，只表示"该连接尚未就绪"——`while` 会重扫本轮全部连接，直到每一条都 `connected == 1`；
+- **host / device 双份连接信息**：host 侧 `conn->conn` 填好后，`cudaMemcpyAsync` 把 `ncclConnInfo` 拷到 device 侧 `devPeers`——GPU 内核运行时读的是 device 份（为什么两套见 2.6.2）。
+
+> 另外注意 `:286-299` 有一段进度打印：`NCCL_REPORT_CONNECT_PROGRESS` 开启且 rank 0 时，每秒输出一次"P2p connect: xx% Remaining ..."——大集群建连时你在日志里看到的进度条就是它。
+
+两段式建链里 `setup` 与 `connect` 各自的职责，见下一小节。
 
 **各拓扑是怎么组织起来的**（`init.cc:1561-1594`，`ncclCommInitRankFunc` 阶段四）：
 
