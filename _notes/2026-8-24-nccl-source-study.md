@@ -1459,6 +1459,15 @@ NCCLCHECKGOTO(ncclTransportP2pSetup(comm, &comm->graphs[NCCL_ALGO_RING], 0), ret
 
 上一节的登记只写了两个位图；真正把登记变成连接的，是**所有拓扑共用**的执行器 `ncclTransportP2pSetup`（`src/transport.cc:123-287`）。Ring/Tree/PAT 三种拓扑最终都调用它，区别只在登记内容（位图）和传入的 `graph`。
 
+它是"**两段式建链**"的执行者。NCCL 把"建立一条连接"拆成**两段**，对应 `ncclTransportComm` 里的两个函数指针：
+
+| 段 | 函数 | 做什么 | 是否跨 rank 通信 |
+|----|------|--------|------------------|
+| **setup** | `transportComm->setup(...)` | 生成"**让对方能连上我**"的连接信息（交换数据），并创建 `transportResources`（物理资源容器） | ✅ 交换（用阶段二的控制面） |
+| **connect** | `transportComm->connect(...)` | 拿到对端的连接信息后，**真正完成映射/连接**，把结果填进 `connector->conn` | 部分（如 NET 需改 QP 状态） |
+
+下面的三步流程正好对应这两段：**第一步执行 setup 段，第二步交换两段之间的连接信息，第三步执行 connect 段**。
+
 ```cpp
 // src/transport.cc:123-130（节选）
 ncclResult_t ncclTransportP2pSetup(struct ncclComm* comm, struct ncclTopoGraph* graph, int connIndex) {
@@ -1535,6 +1544,17 @@ for (int t = 0; t < NTRANSPORTS; t++) {                      // 顺序：P2P →
 >
 > 一句话：`canConnect` 的语义是"**这对 peer 之间能否走该传输**"（依据 2.5.1 换来的 `peerInfo` 与拓扑判断）；`selectTransport` 对每个 Connector 独立做一次"选最优"。而"多路径"的需求，被 NCCL 拆成了"多 channel / 多 connIndex / 多 peer"三个正交维度，而不是在一个 Connector 里塞多种传输。
 
+setup 产出的连接信息是一个**不透明缓冲区**：
+
+```cpp
+// src/include/transport.h:70-72
+struct ncclConnect {
+  char data[CONNECT_SIZE];   // 内容由各 transport 自己解释
+};
+```
+
+> 为什么设计成不透明缓冲区？因为不同传输要交换的东西完全不同：P2P 交换的是**显存缓冲区的 IPC/cuMem 句柄**，NET 交换的是**网卡 handle（含 QP 信息）**，SHM 交换的是**共享内存 IPC 描述符**。用固定大小的 `char[]` 统一交换格式，传输层就能横向插拔——这正是 4 种 transport 能共用一套流程的原因。
+
 **第二步：经 bootstrap 交换连接信息**（`transport.cc:188-221`）——与每个对端互换各自的 `ncclConnect`：
 
 ```cpp
@@ -1589,8 +1609,6 @@ if (i - done == maxPeers || i == comm->nRanks - 1) {      // ① 攒满一轮对
 
 > 另外注意 `:286-299` 有一段进度打印：`NCCL_REPORT_CONNECT_PROGRESS` 开启且 rank 0 时，每秒输出一次"P2p connect: xx% Remaining ..."——大集群建连时你在日志里看到的进度条就是它。
 
-两段式建链里 `setup` 与 `connect` 各自的职责，见下一小节。
-
 **各拓扑是怎么组织起来的**（`init.cc:1561-1594`，`ncclCommInitRankFunc` 阶段四）：
 
 ```
@@ -1621,48 +1639,7 @@ setupChannel（全部 channel 建连接表）
 
 > 补充：`comm->runtimeConn`（cuMem 支持且参数开启）时走另一条路——只做 `setupChannel` + NVLS/CollNet，P2P 连接推迟到运行时建立（`init.cc:1552-1560`），这里不展开。
 
-#### 2.6.5 第三步：两段式建链 —— setup（换句柄）→ connect（映射资源）
-
-这是整个阶段四最核心的机制，也是最容易被忽略的细节。NCCL 把"建立一条连接"拆成了**两段**，对应 `ncclTransportComm` 里的两个函数指针：
-
-| 段 | 函数 | 做什么 | 是否跨 rank 通信 |
-|----|------|--------|------------------|
-| **setup** | `transportComm->setup(...)` | 生成"**让对方能连上我**"的连接信息（交换数据），并通过 **bootstrap** 与对端交换；同时创建 `transportResources`（物理资源容器） | ✅ 交换（用阶段二的控制面） |
-| **connect** | `transportComm->connect(...)` | 拿到对端的连接信息后，**真正完成映射/连接**，把结果填进 `connector->conn` | 部分（如 NET 需改 QP 状态） |
-
-两段之间传递的连接信息是一个**不透明缓冲区**：
-
-```cpp
-// src/include/transport.h:70-72
-struct ncclConnect {
-  char data[CONNECT_SIZE];   // 内容由各 transport 自己解释
-};
-```
-
-> 为什么设计成不透明缓冲区？因为不同传输要交换的东西完全不同：P2P 交换的是**显存缓冲区的 IPC/cuMem 句柄**，NET 交换的是**网卡 handle（含 QP 信息）**，SHM 交换的是**共享内存 IPC 描述符**。用固定大小的 `char[]` 统一交换格式，传输层就能横向插拔——这正是 4 种 transport 能共用一套流程的原因。
-
-**connect 之后，连接信息会被下发到 GPU**（`src/transport.cc:242-253`）：
-
-```cpp
-// src/transport.cc:242-253（节选）
-struct ncclConnector* conn = comm->channels[c].peers[sendPeer]->send + connIndex;
-if (conn->connected == 0) {
-  NCCLCHECKGOTO(conn->transportComm->connect(comm, sendData[p] + sendDataOffset, 1, comm->rank, conn), ret, fail);
-  if (ret == ncclSuccess) {
-    conn->connected = 1;
-    /* comm->channels[c].devPeers[sendPeer]->send[connIndex] is a device memory access. */
-    CUDACHECKGOTO(cudaMemcpyAsync(&comm->channels[c].devPeersHostPtr[sendPeer]->send[connIndex],
-                                  &conn->conn, sizeof(struct ncclConnInfo), cudaMemcpyHostToDevice, hostStream),
-                  ret, fail);
-  } else if (ret == ncclInProgress) {
-    allChannelsConnected = false;   // ← 连接可能异步进行，未完成则稍后重试
-  }
-}
-```
-
-注意 `ret == ncclInProgress` 这一分支：**建连是允许异步的**（比如某些传输的连接需要等网卡状态），所以 `ncclTransportP2pSetup` 内部会循环重试直到所有 channel 都连上。
-
-#### 2.6.6 连接子里面到底装了什么：`ncclConnInfo`
+#### 2.6.5 连接子里面到底装了什么：`ncclConnInfo`
 
 `connect` 的成果全部体现在 `connector->conn`（类型 `ncclConnInfo`，`src/include/device.h:133-151`）里。这个结构体是**内核真正使用的东西**，值得逐字段看：
 
@@ -1695,7 +1672,7 @@ send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE] / NCCL_STEPS;
 
 > 这两句就是 **"P2P 直连"的全部魔法**：`p2pMap` 把对端显存映射到了本进程的地址空间（用的是 CUDA IPC / cuMem / 或对端在同进程时直接给指针），于是 `conn.buffs[p]` 就是**一个本进程可写的、指向对端显存的地址**——之后 GPU 内核用普通的 `st.global` 指令写这个地址，数据就出现在对端显存里了。**不需要网卡、不需要 CPU 搬运**。
 
-#### 2.6.7 四类传输各自对应哪些物理资源
+#### 2.6.6 四类传输各自对应哪些物理资源
 
 | 传输（虚函数表实例） | 常量 | resources 结构 | 物理资源 | 代码位置 |
 |---------------------|------|----------------|----------|----------|
@@ -1716,7 +1693,7 @@ send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE] / NCCL_STEPS;
 
 而 NET transport 与网卡的交互完全通过 **Net Plugin API**（`src/include/plugin/nccl_net.h`，v12）：**setup** 阶段向对端提供网卡的 `handle`（内含 QP 信息），**connect** 阶段把对端 QP 置为 RTS（Ready To Send）状态——这也是"国产网卡替换"最关键的一个接口（见 2.8 节）。
 
-#### 2.6.8 第四步：收尾 —— Proxy 与运行时资源
+#### 2.6.7 第四步：收尾 —— Proxy 与运行时资源
 
 各算法/传输的建链依次完成后，还有一批"运行时资源"要初始化：
 
@@ -1733,7 +1710,7 @@ ncclProxyInit(comm);                       // ★ Proxy 线程 + 共享内存 op
 >
 > `ncclProxyInit` 是"连接层"和"运行时"的分界点：它把 5.3 节讲的 Proxy 线程和共享内存 op 池建起来，从此 GPU 内核与 Host 之间就有了数据搬运的通道。到这一步，`comm->channels[]` 里的连接**全部可用**，通信器正式"就绪"。
 
-#### 2.6.9 回看这条链：一次调用的完整旅程
+#### 2.6.8 回看这条链：一次调用的完整旅程
 
 把本章四个阶段串成一条线：
 
