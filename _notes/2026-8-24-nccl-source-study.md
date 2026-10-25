@@ -1528,6 +1528,10 @@ for (int t = 0; t < NTRANSPORTS; t++) {                      // 顺序：P2P →
 }
 ```
 
+> **顺带一提：`ncclTransports[]` 里其实还有第 5 个成员 `profilerTransport`，但选路循环根本不会碰它。** 数组声明是 `NTRANSPORTS + 1` 项，而 `selectTransport` 只遍历前 `NTRANSPORTS` 项（P2P/SHM/NET/CollNet）；且它的 `canConnect` 干脆是 NULL——整个结构里只实现了 `recv` 侧的 `profilerProxyConnect` / `profilerProxyProgress` 两个函数（`src/transport/profiler.cc:57-61`），没有 `setup`、没有 `connect`，不参与任何数据搬运。
+>
+> **它存在的目的是复用 Proxy 框架来轮询 Profiler 插件的计数器**。计数器需要被周期性读取并上报，而"周期性后台轮询 + 生命周期管理 + 错误处理"正是 Proxy 线程已经解决的问题。NCCL 的做法是：借用 Transport 的结构外壳，把这两个函数挂在 proxy 槽位上——于是计数器轮询就成了一种特殊的 proxy op，完全复用既有的线程管理与调度（呼应 5.3 节）。代价是多了一个不参与通信的伪传输，换来的是无需另造一套轮询机制。
+
 > **为什么找到第一个可用的就直接返回，不继续比较后面的？** 这是"静态选最优、不维护多路径"的设计决策，分三层理解：
 >
 > **① 选路粒度决定了"一种"**。选路的粒度是 `(peer, channel, connIndex) → 一个 Connector → 一种 Transport`（`NCCL_MAX_CONNS = 2`，`device.h:231`，即每个 peer 的 send/recv 各只有 connIndex 0/1 两个槽位）。设备内核通过 `connector->transportComm` 这一个指针调用收发函数，**只能指向一种传输**——同一个 Connector 同时挂多种传输在结构上就不成立。
