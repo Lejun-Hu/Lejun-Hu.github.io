@@ -1083,7 +1083,7 @@ static ncclResult_t ncclCommInitRankFunc(struct ncclAsyncJob* job_) {
 | **① 唯一 ID 生成** | 生成全局唯一的 ID，让所有 rank 定位到同一个引导服务（root） | `ncclGetUniqueId` → `bootstrapGetUniqueId` | `ncclUniqueId`（含 root 的 IP:port + magic） |
 | **② 骨架 + 控制面** | 分配 `ncclComm` 空壳；各 rank 建立**不依赖 GPU 互联**的带外通道 | `ncclCommInitRankDev` 分配骨架 → `bootstrapInit` | 空的 `ncclComm` + `comm->bootstrap` |
 | **③ 信息交换与拓扑图** | 三次信息交换：第 1 次（全体）交换 peerInfo；第 2 次（**仅机内**）融合同机 XML 拓扑；探测本机拓扑并搜索 Ring/Tree/CollNet/NVLS 通信图；第 3 次（全体）交换图参数并聚合出全局一致 | `bootstrapAllGather` ×2 + `bootstrapIntraNodeAllGather` ×1 + `ncclTopoGetSystem` / `ncclTopoCompute` | 全量 peer 信息 + 整机拓扑 + 各算法图参数 + `comm->nChannels` |
-| **④ 连接与资源** | 按图把 Channel → Connector → Transport 一层层建起来，映射真实物理资源；初始化 Proxy | `setupChannel`、`ncclTransportP2pSetup`、`ncclTransportRingConnect`、`ncclProxyInit` | 可用的 `comm->channels[]` |
+| **④ 连接与资源** | 按图把 Channel → Connector → Transport 一层层建起来，映射真实物理资源；启动 Proxy 线程 | `setupChannel`、`ncclTransportP2pSetup`、`ncclTransportRingConnect`、`ncclProxyCreate` | 可用的 `comm->channels[]` |
 
 > **为什么必须先有"控制面"（阶段②③）？** 换个角度看：高性能数据面网络（NVLink 拓扑、RDMA QP、IPC 显存句柄）的建立过程，本身需要**大量的元信息交换与协商**——拓扑探测结果、每个 rank 的设备与网卡信息、对端显存的 IPC handle、QP 号、内存注册句柄……这些消息**小、杂、多**，而且建网期间数据面还不存在。
 >
@@ -1697,22 +1697,30 @@ send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE] / NCCL_STEPS;
 
 而 NET transport 与网卡的交互完全通过 **Net Plugin API**（`src/include/plugin/nccl_net.h`，v12）：**setup** 阶段向对端提供网卡的 `handle`（内含 QP 信息），**connect** 阶段把对端 QP 置为 RTS（Ready To Send）状态——这也是"国产网卡替换"最关键的一个接口（见 2.8 节）。
 
-#### 2.6.7 第四步：收尾 —— Proxy 与运行时资源
+#### 2.6.7 第四步：收尾 —— Proxy 线程、调优器与 device 侧镜像
 
-各算法/传输的建链依次完成后，还有一批"运行时资源"要初始化：
+先澄清一个容易混淆的点：**connect 完成的只是 rank 之间的互联，它不等于"通信器可用"**。connect 结束后还有几件**本 rank 内部**的收尾工作；而且时序和直觉不同——Proxy 线程其实在建链**之前**就启动了（`init.cc:1519-1696`）：
+
+**① Proxy 线程先于建链启动**（`init.cc:1524-1530`）：
 
 ```cpp
-ncclTransportP2pSetup(comm, NULL, 1);      // P2P 连接（connIndex=1，点对点 Send/Recv 用）
-ncclTransportRingConnect(comm);            // Ring 连接（connIndex=0，集合通信用）
-ncclTransportTreeConnect(comm);            // Tree 连接（connIndex=0）
-ncclCollNetSetup(comm, parent, graphs);    // CollNet 网内计算资源（若启用）
-ncclNvlsBufferSetup(comm);                 // NVLS Multicast 缓冲区（若支持）
-ncclProxyInit(comm);                       // ★ Proxy 线程 + 共享内存 op 池
+// Launch proxy service thread, after this, the proxy calls can be used.
+NCCLCHECKGOTO(ncclProxyCreate(comm), ret, fail);   // ← 在 setupChannel / Connect 系列之前
 ```
 
-> **注意这里 `connIndex` 的差异**：`0` 给集合通信（Ring/Tree/CollNet 共用），`1` 给点对点 Send/Recv——这正是 1.5 节里 `NCCL_MAX_CONNS = 2` 的由来。
->
-> `ncclProxyInit` 是"连接层"和"运行时"的分界点：它把 5.3 节讲的 Proxy 线程和共享内存 op 池建起来，从此 GPU 内核与 Host 之间就有了数据搬运的通道。到这一步，`comm->channels[]` 里的连接**全部可用**，通信器正式"就绪"。
+原因：接下来的建连过程就要用到它——NET transport 连接完成后要立刻通过 proxy 做 `SharedInit`（把 `p2pnChannels` 等共享参数注册给 proxy，`init.cc:1590-1593`）。Proxy 是本 rank 的常驻服务（host↔GPU 数据搬运），与"和哪个 rank 建链"无关，所以先起服务、再建链。
+
+**② Connect 系列**（connIndex=0，rank 间互联）：Ring → Tree → PAT（单卡节点）→ NVLS → CollNet；随后 NET 通过 proxy 做 SharedInit。若开启 NVB preconnect，还会用 `ncclTransportP2pSetup(comm, NULL, 1)` 预连一批点对点连接（connIndex=1，`:1607-1632`，可选路径）。
+
+**③ 建链全部完成后的本 rank 收尾**（均不涉及对端交互）：
+
+- **调优器就位**（`:1638-1644`）：加载 tuner 插件，`ncclTopoTuneModel` 把各算法/协议的延迟与带宽模型算好——运行时选算法/协议靠它；
+- **`devCommSetup`**（`:1690`）：把 `ncclComm` 的关键结构镜像到 GPU 显存（`devComm`）——GPU 内核运行时读的是 device 份；
+- **机内 barrier**（`:1694`）：同机 rank 互相同步一次，确认所有缓冲区分配完毕。
+
+到 `devCommSetup` + 机内 barrier 完成，通信器才正式"就绪"。
+
+> **connIndex 的分配**：`0` 给集合通信连接（Ring/Tree/CollNet 共用），`1` 给点对点 Send/Recv——这正是 1.5 节 `NCCL_MAX_CONNS = 2` 的由来。
 
 #### 2.6.8 回看这条链：一次调用的完整旅程
 
@@ -1729,12 +1737,13 @@ ncclCommInitRankFunc（异步任务体，真正干活）
    ├─ 阶段③ ncclTopoGetSystem（内部含机内 XML 融合【仅机内】）
    │    └─ ncclTopoCompute ─────────── 搜索 Ring/Tree/CollNet/NVLS 图（纯本地计算）
    ├─ 阶段③ AllGather3【全体】 ──────── 交换图参数，min/max 聚合出全局一致
-   └─ 阶段④ setupChannel / Connect 系列
+   └─ 阶段④ Connect 系列与收尾
+             ├─ ncclProxyCreate        起 Proxy 线程（建链期间就要用）
              ├─ channels[c].peers[]    分配连接表（按 rank 索引）
              ├─ ncclTransportP2pConnect 登记要建的连接（位图）
              ├─ setup（交换句柄 via bootstrap）
              ├─ connect（映射显存/QP，填 conn，下发到 device）
-             └─ ncclProxyInit           建 Proxy 线程与 op 池
+             └─ 调优器 + devCommSetup + 机内 barrier
    → 通信器可用，可以开始 ncclAllReduce
 ```
 
@@ -2246,7 +2255,7 @@ Proxy 是一个典型的 **Host/Device 协作机制**，两侧代码分布如下
 - `ncclProxyArgs`（`proxy.h:185`）：一批 Proxy 操作参数，带 `progress` 函数指针，传递给 Proxy 线程；
 - `ncclProxyState`（`proxy.h:333`）：Proxy 全局状态，含线程句柄、连接池、op 池等。
 
-Proxy 机制在 `ncclTransportP2pSetup` 完成后初始化（`ncclProxyInit`），其生命周期与通信器绑定。
+Proxy 线程在建链开始**之前**就由 `ncclProxyCreate` 启动（`init.cc:1524-1530`，建连期间 NET 的 SharedInit 就需要它），其生命周期与通信器绑定。
 
 ### 5.4 算法与协议的选择
 
