@@ -1486,6 +1486,22 @@ for (int i = 1; i < comm->nRanks; i++) {                    // 按距离遍历�
 }
 ```
 
+> **这两行为什么要这样写？** `recvPeer`/`sendPeer` 是沿 rank 编号环的正反两个方向各走 `i` 步：
+>
+> ```c
+> int recvPeer = (comm->rank - i + comm->nRanks) % comm->nRanks;   // 反方向走 i 步
+> int sendPeer = (comm->rank + i) % comm->nRanks;                  // 正方向走 i 步
+> ```
+>
+> `+ nRanks` 防止 `rank - i` 变负，`% nRanks` 保证结果落在 `[0, nRanks-1]`。`i` 从 1 扫到 `nRanks-1`，两个方向合起来恰好枚举除自己外的全部 rank（以 rank 3、nRanks=8 为例：i=1 → send 4 / recv 2，i=2 → send 5 / recv 1……i=4 → send = recv = 7，即"正对面"，由 `:189` 的 `sendPeer == recvPeer` 分支合并收发）。
+>
+> **按距离逐轮处理，而不是一次性连所有 peer**，原因有二：
+>
+> - **对称轮次防死锁**：同一轮里，rank x 的 `sendPeer` 是 x+i，而 x+i 这一轮的 `recvPeer` 恰是 x——双方在同一轮互为对端、同时收发，bootstrap 的 send/recv 严格配对；若各 rank 以任意顺序互连，`bootstrapRecv` 可能阻塞在一个还没进行到该轮的对端上，造成互相等待；
+> - **枚举与实际连接解耦**：`send`/`recv` 的命名来自 Ring 的数据流向，但这里只充当**枚举顺序**——真正连谁由登记位图（`connectRecv`/`connectSend`）决定：Ring 只连相邻、Tree 的父子可能相距很远、NVLS/P2P Direct 任意，距离枚举保证任何距离的对端都会被处理到，位图为空的组合自然跳过。
+>
+> 这也解释了 tag 为什么含 `i`（`(i << 8) + graph->id + 1`）：每一轮距离独立编号，bootstrap 消息不会跨轮混淆。
+
 `selectTransport`（`transport.cc:20-41`）就是"按优先级选路 + 现场调 setup"：
 
 ```cpp
@@ -1502,6 +1518,22 @@ for (int t = 0; t < NTRANSPORTS; t++) {                      // 顺序：P2P →
   }
 }
 ```
+
+> **为什么找到第一个可用的就直接返回，不继续比较后面的？** 这是"静态选最优、不维护多路径"的设计决策，分三层理解：
+>
+> **① 选路粒度决定了"一种"**。选路的粒度是 `(peer, channel, connIndex) → 一个 Connector → 一种 Transport`（`NCCL_MAX_CONNS = 2`，`device.h:231`，即每个 peer 的 send/recv 各只有 connIndex 0/1 两个槽位）。设备内核通过 `connector->transportComm` 这一个指针调用收发函数，**只能指向一种传输**——同一个 Connector 同时挂多种传输在结构上就不成立。
+>
+> **② 不维护多路径：收益为零、代价显著**。初始化时拓扑已定：P2P 可用就选 P2P（带宽最高），不可用才降级 SHM、NET——最优链路已经确定且够用，运行时不存在"换路"的需求。而若同一对 peer 并行建多条传输：要付出双份资源（QP、缓冲区），内核热路径上要做路径选择，接收端还要处理多路径乱序——全是开销，没有收益。
+>
+> **③ "多种连接"体现在其他维度，而不是同一个 Connector 里**：
+>
+> | 维度 | 效果 |
+> |------|------|
+> | 不同 **channel** | 可绑不同物理链路（如不同网卡），形成 channel 级并行 |
+> | 同一 peer 的两个 **connIndex** | 0 = 集合通信、1 = 点对点，两者**各自独立选路**，可走不同 transport |
+> | 不同 **peer** | 各自独立判断——同机走 P2P/SHM，跨机走 NET |
+>
+> 一句话：`canConnect` 的语义是"**这对 peer 之间能否走该传输**"（依据 2.5.1 换来的 `peerInfo` 与拓扑判断）；`selectTransport` 对每个 Connector 独立做一次"选最优"。而"多路径"的需求，被 NCCL 拆成了"多 channel / 多 connIndex / 多 peer"三个正交维度，而不是在一个 Connector 里塞多种传输。
 
 **第二步：经 bootstrap 交换连接信息**（`transport.cc:188-221`）——与每个对端互换各自的 `ncclConnect`：
 
