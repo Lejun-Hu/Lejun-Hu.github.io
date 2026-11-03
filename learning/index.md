@@ -11,46 +11,47 @@ permalink: /learning/
 
 ## 🗓 学习计划
 
-| 计划 | 状态 | 周期 | 说明 |
-|------|:----:|------|------|
-| [NCCL 源码精读](/notes/2026-8-24-nccl-source-study/) | 进行中 | 2026.08 — | 从 ncclCommInitRank 入口出发，逐层读通初始化、Channel/连接建立与运行时通信路径，笔记持续更新中。 |
-| CUDA Kernel 开发进阶 | 进行中 | 2026 — | 围绕 Tensor Core、WMMA 与性能调优，补齐从 CUDA C++ 到高吞吐 kernel 的工程细节。 |
-| RDMA / verbs 深入 | 计划中 | — | 从 ibverbs API 到 RoCEv2 网络行为，理解 QP、MR、Completion 语义，以及 NCCL NET 插件与它们的对接方式。 |
-| LLM 推理系统 | 计划中 | — | 以 vLLM 为切入点，梳理 PagedAttention、Continuous Batching 与分布式推理的工程实现。 |
+以下是计划中的学习主题（状态会随学习进度更新）：
 
-## 📘 官方文档
+### 集合通信与网络
 
-| 资料 | 说明 | 标签 |
-|------|------|------|
-| [NCCL 官方文档](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/index.html) | User Guide 与 API 参考，理解语义与调优参数的第一手资料。 | NVIDIA |
-| [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/) | CUDA 编程模型与运行时行为的权威参考。 | NVIDIA |
-| [rdma-core](https://github.com/linux-rdma/rdma-core) | ibverbs / RDMA 用户态 API 的参考实现，学 RDMA 绕不开的源码。 | Linux |
+| 主题 | 状态 |
+|------|:----:|
+| NCCL 源码精读1：Ring/Tree 搜索算法、Channel 与 Connector 机制、协议选择（LL/LL128/Simple） | 计划中 |
+| NCCL 源码精读2：P2P/SHM/NET 三种 Transport 的连接建立与数据路径 | 计划中 |
+| DeepEP 源码精读：对 NCCL 的依赖以及创新 | 计划中 |
+| 集合通信算法与拓扑实现的基础量化分析，例如各种 allreduce 实现的开销以及 BUF（Bandwidth Utilization Factor） | 计划中 |
+| GIN（GPU Initiated Network）机制详解与国产芯片适配 | 计划中 |
+| RDMA / InfiniBand / RoCEv2 协议栈与 Verbs 编程 | 计划中 |
+| 在网计算（SHARP / CollNet）的原理与实现 | 计划中 |
+| 国产集合通信库（HCCL 等）与 NCCL 的对比分析 | 计划中 |
 
-## 📄 论文
+### 加速器架构与 CUDA
 
-| 资料 | 说明 | 标签 |
-|------|------|------|
-| [PAT — Parallel Aggregated Trees（arXiv:2506.20252）](https://arxiv.org/abs/2506.20252) | NCCL 2.23 新增的 AllGather / ReduceScatter 算法，Bruck 变体，对数级网络步数（笔记 2.6.4 有解读）。 | 集合通信 |
-| [Megatron-LM（arXiv:1909.08053）](https://arxiv.org/abs/1909.08053) | 张量并行与数据并行组合训练大模型的开山之作。 | 分布式训练 |
-| [PagedAttention / vLLM（arXiv:2309.06180）](https://arxiv.org/abs/2309.06180) | LLM 推理显存管理的分页设计，理解 KV Cache 工程化的起点。 | LLM 推理 |
+| 主题 | 状态 |
+|------|:----:|
+| CUDA kernel 优化：Memory Coalescing、Shared Memory、Warp 调度 | 计划中 |
+| Tensor Core 编程模型与矩阵乘优化 | 计划中 |
+| 国产 AI 芯片架构（昇腾达芬奇 / 寒武纪 / 壁仞等）的软硬件协同 | 计划中 |
 
-## 🧩 源码仓库
+### 大模型分布式系统
 
-| 资料 | 说明 | 标签 |
-|------|------|------|
-| [NVIDIA/nccl](https://github.com/NVIDIA/nccl) | 本笔记的精读对象——集合通信库的参考实现。 | C++ |
-| [NVIDIA/gdrcopy](https://github.com/NVIDIA/gdrcopy) | CPU 直读显存的用户态库，NCCL GDRCopy 路径的底层依赖。 | CUDA |
-| [pytorch/pytorch](https://github.com/pytorch/pytorch) | ProcessGroupNCCL 是观察"框架如何使用 NCCL"的最佳样本。 | C++/Python |
+| 主题 | 状态 |
+|------|:----:|
+| 张量并行 / 流水线并行 / 数据并行 / 专家并行的通信模式拆解 | 计划中 |
+| 通信-计算重叠（overlap）与通算融合技术 | 计划中 |
+| 大模型训练/推理中的通信瓶颈分析与优化 | 计划中 |
 
-## 🎓 课程 & 视频
+> 计划会随着学习和工作重心的变化不断调整，欢迎通过邮件交流指正。
 
-| 资料 | 说明 | 标签 |
-|------|------|------|
-| [GPU MODE（原 CUDA MODE）](https://www.youtube.com/@GPUMODE) | 社区驱动的 GPU 编程系列讲座，覆盖 Triton、PTX 与性能调优实战。 | 视频 |
-
-## 📚 书籍
+## 🖥 算力卡 & 选型
 
 | 资料 | 说明 | 标签 |
 |------|------|------|
-| Programming Massively Parallel Processors（4th Ed.） | GPU 体系结构与 CUDA 编程的经典教材，适合系统性打底。 | 书籍 |
-| Computer Architecture: A Quantitative Approach | 理解互联、缓存一致性与存储墙的底层视角。 | 体系结构 |
+| [MirrorFrog — AI 算力卡百科](https://mirrorfrog.com/) | 收录 233 款 AI 芯片的规格对比与排行，覆盖 NVIDIA / AMD / 昇腾 / 寒武纪 等，附路线图与 TCO 计算器。 | 选型 |
+
+## 📖 在线书
+
+| 资料 | 说明 | 标签 |
+|------|------|------|
+| [How to Scale Your Model（JAX Scaling Book）](https://jax-ml.github.io/scaling-book/) | Google DeepMind 出品的大规模 LLM 训练系统教程：Roofline 分析、TPU 原理、sharding 与各类并行策略、LLaMA 3 训练/服务成本估算，含 GPU 专题章。 | 分布式训练 |

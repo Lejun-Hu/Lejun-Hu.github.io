@@ -22,34 +22,7 @@
 | [CUDA 软件栈全路径拆解与国产 AI 芯片生态兼容分析](https://lejun-hu.github.io/notes/cuda-ecosystem-compatibility/) | 从框架到硬件的 CUDA 编译执行链路，及国产芯片兼容策略 |
 | [NCCL 源码学习笔记](https://lejun-hu.github.io/notes/nccl-source-study/) | NCCL 源码的初始化、执行路径与 GIN 机制（持续完善中） |
 
-## 将来的学习计划
-
-以下是计划中的学习主题（状态会随学习进度更新）：
-
-### 集合通信与网络
-
-- [ ] NCCL 源码精读1：Ring/Tree 搜索算法、Channel 与 Connector 机制、协议选择（LL/LL128/Simple）
-- [ ] NCCL 源码精读2：P2P/SHM/NET 三种 Transport 的连接建立与数据路径
-- [ ] DeepEP 源码精读：对NCCL的依赖以及创新
-- [ ] 集合通信算法与拓扑实现的基础量化分析，例如各种allreduce 实现的开销以及BUF(Bandwidth Utilization Factor)
-- [ ] GIN（GPU Initiated Network）机制详解与国产芯片适配
-- [ ] RDMA / InfiniBand / RoCEv2 协议栈与 Verbs 编程
-- [ ] 在网计算（SHARP / CollNet）的原理与实现
-- [ ] 国产集合通信库（HCCL 等）与 NCCL 的对比分析
-
-### 加速器架构与 CUDA
-
-- [ ] CUDA kernel 优化：Memory Coalescing、Shared Memory、Warp 调度
-- [ ] Tensor Core 编程模型与矩阵乘优化
-- [ ] 国产 AI 芯片架构（昇腾达芬奇 / 寒武纪 / 壁仞等）的软硬件协同
-
-### 大模型分布式系统
-
-- [ ] 张量并行 / 流水线并行 / 数据并行 / 专家并行的通信模式拆解
-- [ ] 通信-计算重叠（overlap）与通算融合技术
-- [ ] 大模型训练/推理中的通信瓶颈分析与优化
-
-> 计划会随着学习和工作重心的变化不断调整，欢迎通过邮件交流指正。
+学习计划已迁移至网站"学习资料 & 计划"页面维护。
 
 ## 快速开始
 
