@@ -1350,6 +1350,67 @@ a {
   font-size: 1.1rem;
 }
 
+// ============================================
+// 12b. 学习资料 & 计划页面
+// ============================================
+
+.hero-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-top: var(--space-lg);
+}
+
+.learning-category {
+  margin-bottom: var(--space-2xl);
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+
+  .section-title {
+    font-size: 1.4rem;
+    margin-bottom: var(--space-lg);
+  }
+}
+
+.plan-status {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 500;
+
+  &.status-ongoing {
+    background: var(--color-green-tag-bg);
+    border: 1px solid var(--color-green-tag-border);
+    color: #10b981;
+  }
+
+  &.status-planned {
+    background: var(--color-tag-bg);
+    border: 1px solid var(--color-tag-border);
+    color: var(--color-primary);
+  }
+
+  &.status-done {
+    background: var(--color-gray-tag-bg);
+    border: 1px solid var(--color-gray-tag-border);
+    color: var(--color-text-light);
+  }
+}
+
+.resource-card .ext-arrow {
+  font-size: 0.85em;
+  color: var(--color-text-light);
+  margin-left: 4px;
+}
+
+.resource-card .note-title a:hover .ext-arrow {
+  color: var(--color-primary);
+}
+
 // 笔记详情页
 .note-header {
   padding: var(--space-2xl) 0 var(--space-xl);

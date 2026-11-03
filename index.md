@@ -43,6 +43,9 @@ description: Egan的详细个人简历，包含工作经历、技能专长和项
         <a href="{{ '/notes/' | relative_url }}" class="btn btn-secondary">
           📚 学习笔记
         </a>
+        <a href="{{ '/learning/' | relative_url }}" class="btn btn-secondary">
+          📋 学习资料 &amp; 计划
+        </a>
       </div>
     </div>
 

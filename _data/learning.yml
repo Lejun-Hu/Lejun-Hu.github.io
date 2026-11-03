@@ -1,0 +1,107 @@
+# ============================================
+# 学习资料 & 计划 页面数据
+# ============================================
+
+# 学习计划：status 取值 ongoing（进行中）/ planned（计划中）/ done（已完成）
+plans:
+  - name: NCCL 源码精读
+    status: ongoing
+    status-text: 进行中
+    period: 2026.08 —
+    desc: 从 ncclCommInitRank 入口出发，逐层读通初始化、Channel/连接建立与运行时通信路径，笔记持续更新中。
+    link: /notes/2026-8-24-nccl-source-study/
+    tags: [NCCL, C++, 集合通信]
+
+  - name: CUDA Kernel 开发进阶
+    status: ongoing
+    status-text: 进行中
+    period: 2026 —
+    desc: 围绕 Tensor Core、WMMA 与性能调优，补齐从 CUDA C++ 到高吞吐 kernel 的工程细节。
+    tags: [CUDA, GPU]
+
+  - name: RDMA / verbs 深入
+    status: planned
+    status-text: 计划中
+    desc: 从 ibverbs API 到 RoCEv2 网络行为，理解 QP、MR、Completion 语义，以及 NCCL NET 插件与它们的对接方式。
+    tags: [RDMA, 网络]
+
+  - name: LLM 推理系统
+    status: planned
+    status-text: 计划中
+    desc: 以 vLLM 为切入点，梳理 PagedAttention、Continuous Batching 与分布式推理的工程实现。
+    tags: [LLM, 推理]
+
+# 学习资料：按类别分组
+resources:
+  - category: 官方文档
+    icon: 📘
+    items:
+      - name: NCCL 官方文档
+        desc: User Guide 与 API 参考，理解语义与调优参数的第一手资料。
+        url: https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/index.html
+        tag: NVIDIA
+
+      - name: CUDA C++ Programming Guide
+        desc: CUDA 编程模型与运行时行为的权威参考。
+        url: https://docs.nvidia.com/cuda/cuda-c-programming-guide/
+        tag: NVIDIA
+
+      - name: rdma-core
+        desc: ibverbs / RDMA 用户态 API 的参考实现，学 RDMA 绕不开的源码。
+        url: https://github.com/linux-rdma/rdma-core
+        tag: Linux
+
+  - category: 论文
+    icon: 📄
+    items:
+      - name: PAT — Parallel Aggregated Trees（arXiv:2506.20252）
+        desc: NCCL 2.23 新增的 AllGather / ReduceScatter 算法，Bruck 变体，对数级网络步数（笔记 2.6.4 有解读）。
+        url: https://arxiv.org/abs/2506.20252
+        tag: 集合通信
+
+      - name: Megatron-LM（arXiv:1909.08053）
+        desc: 张量并行与数据并行组合训练大模型的开山之作。
+        url: https://arxiv.org/abs/1909.08053
+        tag: 分布式训练
+
+      - name: PagedAttention / vLLM（arXiv:2309.06180）
+        desc: LLM 推理显存管理的分页设计，理解 KV Cache 工程化的起点。
+        url: https://arxiv.org/abs/2309.06180
+        tag: LLM 推理
+
+  - category: 源码仓库
+    icon: 🧩
+    items:
+      - name: NVIDIA/nccl
+        desc: 本笔记的精读对象——集合通信库的参考实现。
+        url: https://github.com/NVIDIA/nccl
+        tag: C++
+
+      - name: NVIDIA/gdrcopy
+        desc: CPU 直读显存的用户态库，NCCL GDRCopy 路径的底层依赖。
+        url: https://github.com/NVIDIA/gdrcopy
+        tag: CUDA
+
+      - name: pytorch/pytorch
+        desc: ProcessGroupNCCL 是观察"框架如何使用 NCCL"的最佳样本。
+        url: https://github.com/pytorch/pytorch
+        tag: C++/Python
+
+  - category: 课程 & 视频
+    icon: 🎓
+    items:
+      - name: GPU MODE（原 CUDA MODE）
+        desc: 社区驱动的 GPU 编程系列讲座，覆盖 Triton、PTX 与性能调优实战。
+        url: https://www.youtube.com/@GPUMODE
+        tag: 视频
+
+  - category: 书籍
+    icon: 📚
+    items:
+      - name: Programming Massively Parallel Processors（4th Ed.）
+        desc: GPU 体系结构与 CUDA 编程的经典教材，适合系统性打底。
+        tag: 书籍
+
+      - name: Computer Architecture: A Quantitative Approach
+        desc: 理解互联、缓存一致性与存储墙的底层视角。
+        tag: 体系结构
