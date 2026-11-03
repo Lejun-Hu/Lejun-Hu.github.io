@@ -1351,7 +1351,7 @@ a {
 }
 
 // ============================================
-// 12b. 学习资料 & 计划页面
+// 12b. 学习资料 & 计划页面（Markdown 表格版）
 // ============================================
 
 .hero-actions {
@@ -1362,53 +1362,65 @@ a {
   margin-top: var(--space-lg);
 }
 
-.learning-category {
-  margin-bottom: var(--space-2xl);
+.learning-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--space-2xl) var(--space-lg) var(--space-2xl);
 
-  &:last-child {
-    margin-bottom: 0;
-  }
-
-  .section-title {
-    font-size: 1.4rem;
+  h1 {
+    font-size: 1.9rem;
+    text-align: center;
     margin-bottom: var(--space-lg);
   }
-}
 
-.plan-status {
-  display: inline-block;
-  padding: 2px 10px;
-  border-radius: 20px;
-  font-size: 0.75rem;
-  font-weight: 500;
-
-  &.status-ongoing {
-    background: var(--color-green-tag-bg);
-    border: 1px solid var(--color-green-tag-border);
-    color: #10b981;
+  h2 {
+    font-size: 1.35rem;
+    margin: var(--space-2xl) 0 var(--space-md);
+    padding-bottom: var(--space-xs);
+    border-bottom: 1px solid var(--color-border);
   }
 
-  &.status-planned {
-    background: var(--color-tag-bg);
-    border: 1px solid var(--color-tag-border);
-    color: var(--color-primary);
-  }
-
-  &.status-done {
-    background: var(--color-gray-tag-bg);
-    border: 1px solid var(--color-gray-tag-border);
+  > p {
     color: var(--color-text-light);
+    font-size: 1.05rem;
+    line-height: 1.8;
+    margin-bottom: var(--space-md);
   }
-}
 
-.resource-card .ext-arrow {
-  font-size: 0.85em;
-  color: var(--color-text-light);
-  margin-left: 4px;
-}
+  table {
+    width: 100%;
+    margin-bottom: var(--space-md);
+    border-collapse: collapse;
+    font-size: 0.92rem;
 
-.resource-card .note-title a:hover .ext-arrow {
-  color: var(--color-primary);
+    th, td {
+      border: 1px solid var(--color-border);
+      padding: 10px 14px;
+      text-align: left;
+      vertical-align: middle;
+      line-height: 1.6;
+    }
+
+    th {
+      background: var(--color-bg-alt);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    tr:nth-child(even) td {
+      background: var(--color-bg-alt);
+    }
+
+    a {
+      color: var(--color-primary);
+      font-weight: 500;
+
+      &:hover {
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+    }
+  }
 }
 
 // 笔记详情页
