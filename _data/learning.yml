@@ -102,6 +102,6 @@ resources:
         desc: GPU 体系结构与 CUDA 编程的经典教材，适合系统性打底。
         tag: 书籍
 
-      - name: Computer Architecture: A Quantitative Approach
+      - name: "Computer Architecture: A Quantitative Approach"
         desc: 理解互联、缓存一致性与存储墙的底层视角。
         tag: 体系结构
