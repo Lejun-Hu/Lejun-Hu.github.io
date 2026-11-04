@@ -1900,7 +1900,20 @@ while (true) {                                                    // 一轮启�
 
 ### 3.2 任务分组与 Planner
 
-3.1 里反复出现的"隐式 Group""depth 归零"，机制在这里展开。任务分组由两部分组成：**Group 攒批机制**（决定哪些调用一起启动）和 **`ncclKernelPlanner`**（决定任务以什么形态被组织、调度）。
+**本节目的**：回答 3.1 留下的两个问题——"调用被登记进了哪里""什么时候统一启动"。一次 `ncclAllReduce` 不会直接跑起来，而是先变成 `comm->planner` 里的一个 task；多个调用（或嵌套 Group）攒在一起，由最外层 Group 边界统一启动。本节拆两半：**Group 攒批机制**（谁决定"一起启动"）和 **`ncclKernelPlanner`**（任务以什么形态被组织）。
+
+**本节在整条链上的位置**：
+
+```
+taskAppend（登记到 planner）
+      │  （若干次调用，可能被用户 Group 包裹）
+      ▼
+ncclGroupEndInternal → groupLaunch          ← 最外层边界统一启动
+                          ├─ ncclPrepareTasks（选算法/协议）
+                          └─ doLaunches → ncclLaunchPrepare（task → plan）
+```
+
+3.1 里反复出现的"隐式 Group""depth 归零"，机制在 3.2.1 展开；任务到 plan 的组织在 3.2.2。
 
 #### 3.2.1 Group 攒批：`ncclGroupDepth` 全景
 
@@ -1982,34 +1995,67 @@ if ((--ncclGroupDepth) > 0) goto exit;    // 还没退到最外层 → 直接返
 
 ### 3.3 Kernel Launch 与 Device 侧调度
 
-**Host 侧 Launch**：`ncclLaunchKernel`（`src/enqueue.cc`）将 `ncclKernelPlan` 中的 kernel 函数指针和参数启动为 CUDA Kernel。
+**本节目的**：3.2 结束时，`ncclKernelPlan` 已经备好（挂在 `unlaunchedPlansHead`）。这一节追"最后一公里"：plan 里的内核函数指针 + 参数，怎么变成 GPU 上一个正在跑的内核；内核启动后，又怎么找到"该干的那份活"。分两端看：Host 侧启动、Device 侧调度。
 
-**Device 侧入口**：
+**Host 侧：`ncclLaunchKernel`（`src/enqueue.cc:1753`）**
 
 ```cpp
-// src/device/common.cu:23-25 — 统一内核入口
-__global__ void ncclDevKernel_Generic(ncclDevKernelArgs4K ... args4K) {
+void* sym = plan->kernelFn;                      // 编译期特化好的内核符号
+dim3 grid  = {(unsigned)countOneBits(plan->channelMask), 1, 1};  // 每个 channel 一个 block
+dim3 block = {(unsigned)plan->threadPerBlock, 1, 1};
+cudaLaunchKernel(..., sym, grid, block, plan->kernelArgs, ...);  // ← 真正的启动点
+```
+
+三个要点：
+
+- **grid.x = 参与本次的 channel 数**：一个 block 负责一个 channel——channel 是并行执行的最小单元；
+- **`kernelFn` 是"特化"出来的**：`DEFINE_ncclDevKernel(suffix, coll, redop, ty, algo, proto, ...)`（`device/common.h:438-441`）为每种 (集合操作, 数据类型, 规约, 算法, 协议) 组合都生成了一个内核入口，启动前就定死了，而不是运行时 if/else；
+- 启动前后各有一步：`ncclLaunchKernelBefore_NoUncapturedCuda`（`uploadWork`，把 work 写进 device 侧的 FIFO，`enqueue.cc:1740`）和 `ncclLaunchKernelAfter_NoCuda`（收尾）。
+
+**Device 侧：从 `ncclDevKernel_Generic` 到 `ncclKernelMain`**
+
+统一入口（`src/device/common.cu:23`）：
+
+```cpp
+__global__ void ncclDevKernel_Generic(ncclDevKernelArgs4K args4K) {
   ncclKernelMain<-1, RunWorkNop>(&args4K.args);
 }
 ```
 
-`ncclKernelMain` 是设备侧的核心调度函数（位于设备头文件中）：
+`ncclKernelMain`（`device/common.h:355`）三步：
 
-1. 读取 Work FIFO 中的 Work 项
-2. 根据 Work 类型分发到对应的函数（AllReduce/ReduceScatter/AllGather/Broadcast/SendRecv/P2P 等）
-3. 每种集合操作的实现使用 C++ 模板，根据算法（Ring/Tree）、协议（LL/LL128/SIMPLE）、数据类型和 Reduction 操作进行编译期特化
+1. **映射 block → channel**：按 `channelMask` 找第 n 个置位 bit，`blockIdx.x == n` 的那个 block 接管 channel（`common.h:370-373`）；
+2. **把 comm / channel / work 搬进共享内存**：前两个 warp 加载 `ncclKernelComm` / `ncclDevChannel`，其余 warp 用 `loadWorkBatchToShmem` 从 work FIFO 读本 channel 的 work（`common.h:382-414`）；
+3. **按 `funcId` 分发，并循环处理 work**（`common.h:417-431`）：
 
-**协议选择**（`src/enqueue.cc` 和 `device/prims_*.h`）：
+```cpp
+while (ncclShmem.aborted == 0) {
+  if (0 <= SpecializedFnId && ncclShmem.funcId == SpecializedFnId)
+    SpecializedRunWorkBatch().run();        // 特化入口直接跑
+  else
+    ncclDevFuncTable[ncclShmem.funcId]();    // 通用入口：查函数表分发
+  if (ncclShmem.nextBatchIx == -1) break;    // 没有下一批 work → 退出
+  loadWorkBatchToShmem(tid, tn, args, batchIx);  // 加载下一批
+}
+```
+
+**`funcId` 决定"跑哪个集合操作"**：`ncclDevFuncTable` 是函数指针数组，每个元素由宏 `DEFINE_ncclDevFunc(suffix, coll, redop, ty, algo, proto)`（`common.h:446-449`）生成，内部调 `RunWorkBatch<coll, ty, redop<ty>, algo, proto>().run()`。`funcId` 是 host 侧 `ncclPrepareTasks` 选好算法/协议后编码进 work 的——于是"算法/协议选择"这一步，最终落成"取函数表哪个下标"。
+
+**协议表**（协议在 host 侧选好、以模板参数固化进内核，列出来是为了理解"为什么有这么多内核变体"）：
 
 | 协议 | 适用数据量 | 特征 |
 |------|-----------|------|
 | LL | 极小消息 | 单线程处理，低延迟；8 字节对齐（`NCCL_LL_ALIGNMENT_PER_THREAD`） |
-| LL128 | 小到中等 | 单 Warp 处理，128 字节粒度的流水线；480 字节 Warp 对齐 |
+| LL128 | 小到中等 | 单 Warp 处理，128 字节粒度流水线；480 字节 Warp 对齐 |
 | SIMPLE | 大消息 | 多 CTA 并行，利用全部带宽；16 × Warp × 8 × 16 对齐 |
+
+> 一句话：**Host 把"算法 / 协议 / 类型"在编译期特化成一个内核符号，用 grid/block/args 启动它；内核内按 `funcId` 查 `ncclDevFuncTable` 分发到对应集合操作的模板实现**。协议表不是运行时的 if/else，而是"到底生成了多少个内核变体"的根源。
 
 ### 3.4 Transport 层数据路径
 
-设备端的集合操作代码（如 `src/device/all_reduce.h`）在完成本地计算后，通过以下方式将数据发送到对端：
+**本节目的**：前 3 节追的是"任务怎么从一次调用变成 GPU 上正在跑的内核"——到 3.3 结束时内核已经启动，但**数据还没有真正流动**。这一节补上最后一块：内核跑起来之后，字节到底怎么从这块 GPU 走到那块 GPU。它把第二章建好的连接在这一刻"用起来"——`ncclConnector` 里的 `conn`/`connFifo`、head/tail 进度指针、P2P 映射、NET QP，前面都是"建好了但没用"，这里就是它们被内核消费的地方。换句话说：**3.1~3.3 是"控制流"（怎么调度），3.4 是"数据流"（怎么搬运）**，两者合起来才是一条完整的集合通信执行路径。
+
+内核侧的搬运统一由 `Primitives`（`src/device/prims_simple.h`）封装：它持有 `ncclConnInfo`（`conn`）和 `ncclConnFifo`（`connFifo`），进度靠 `conn->head`/`conn->tail` 两个指针推进（`st_relaxed_sys_global(connStepPtr, step)`），数据本身分两条路：**同机 P2P 直写**、**跨机经 Proxy 走 NET**。
 
 **P2P Transport**（NVLink/PCIe）：
 
