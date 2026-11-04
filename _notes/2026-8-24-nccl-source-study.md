@@ -1820,76 +1820,7 @@ NCCLCHECK(ncclGroupEndInternal());                         // ③ depth: 1 → 0
 
 所以"在不在 Group 内"只决定 **depth 何时归零**：用户自己写了 `ncclGroupStart/End`，任务先攒着，等用户的 `ncclGroupEnd` 让 depth 归零；没写，本次调用的 ③ 就让 depth 归零、立即启动。**两种情况的后续代码路径完全一致**。
 
-##### 补：`ncclGroupDepth` 的全景用法
-
-`ncclGroupDepth` 是 **thread_local 计数器**（`group.cc:27`，注释原话 "depth of ncclGroupStart nesting"），全仓**只有两个函数**会改它：
-
-```cpp
-// 自增：src/include/group.h:87-90
-inline ncclResult_t ncclGroupStartInternal() { ncclGroupDepth++; return ncclSuccess; }
-
-// 自减：src/group.cc:788
-if ((--ncclGroupDepth) > 0) goto exit;    // 还没退到最外层 → 直接返回，不启动
-```
-
-**谁在加减**：
-
-| 调用方 | 加减时机 |
-|--------|---------|
-| 用户 `ncclGroupStart()` / `ncclGroupEnd()` | 显式开 / 关 Group |
-| `ncclEnqueueCheck`（`:3137` / `:3164`） | **每次独立 API 调用**的隐式包装 |
-| `ncclCommInitRankConfig`（`init.cc:2667` / `:2679`） | 初始化通信器也走 Group 攒批 |
-| 框架 / 库内部包装 | 与用户 Group 形成嵌套 |
-
-**为什么需要 depth，而不能只用一个 bool**
-
-1. **嵌套安全**：Group 可以嵌套，而 NCCL 自己就在制造嵌套（`ncclCommInitRankConfig` 内部就包了一层）。若内层 `End` 也启动，就会把外层**尚未登记完**的批次提前 launch，破坏"一批一起启动"的语义。
-2. **单发与批量共用一条路径**：单发调用是 `0→1→0`，立即启动；用户 Group 内是 `1→2→1`，不启动，等外层 `1→0` 统一启动。同一套代码覆盖两种用法，无需维护两个分支。
-3. **攒批是正确性要求，不只是性能**：所有 rank 必须在同一个 Group 边界把任务登记完再一起启动——否则会出现"某 rank 的内核已经在等对端，另一 rank 的任务还没下发"的错位（p2p 任务对此尤其敏感）。
-
-**`== 0` 的意义：唯一允许"启动"的状态**
-
-0 表示"当前线程不在任何 Group 内"。这个判断在代码里出现在四处，构成完整语义：
-
-| 位置 | `depth == 0` 时做什么 |
-|------|----------------------|
-| `ncclGroupEndInternal`（`group.cc:788`） | 自减后归零 → 越过最外层边界 → **构造 groupJob、触发 `groupLaunch`** |
-| `ncclAsyncLaunch`（`group.cc:40`） | 不在 Group 内 → 异步任务**直接同步执行**，不入队 |
-| `ncclGroupErrCheck`（`group.h:96-100`） | `depth > 0` 时把错误**暂存**进 `ncclGroupError`，等 End 时统一处理——错误也要攒批 |
-| `ncclGroupEndInternal`（`:775`） | 在 0 处再 End → 配对错误，`WARN("ncclGroupEnd: not in a group call.")` |
-
-**配对规则**：每次 Start 必然对应一次 End，轨迹完全对称。忘记 End 会让 depth 单调增长、任务永远不启动；多调 End 则在 0 处报警。所以隐式 Group 的三段式必须严格成对写：`GroupStartInternal → taskAppend → GroupEndInternal`。
-
-**"到处都在 Start" 的真相：每一层都成对、互相抵消**
-
-源码里到处是 `ncclGroupStartInternal()`，容易被误解成"反复开批、只 End 一次"。实际上每次都有配对的 End：
-
-| Start 位置 | 配对 End | 净效果 |
-|-----------|---------|--------|
-| 用户 `ncclGroupStart()` | 用户 `ncclGroupEnd()` | **真正决定攒批窗口的就是这一对** |
-| `ncclEnqueueCheck`（`:3137`） | `ncclEnqueueCheck`（`:3164`，fail 路径也会走到） | 单发时 `0→1→0`，立即启动 |
-| `ncclCommInitRankConfig`（`:2667`） | 同函数（`:2679`） | 同理 |
-
-**深度轨迹**：
-
-```
-单发一次 ncclAllReduce
-  ncclEnqueueCheck: Start   0 → 1
-  taskAppend                      （登记）
-  ncclEnqueueCheck: End     1 → 0    → 立即启动
-
-用户写 Group，内含两个 allreduce
-  ncclGroupStart             0 → 1        ← 外层攒批生效
-    ncclAllReduce #1        1 → 2 → 1     （内层抵消，不启动）
-    ncclAllReduce #2        1 → 2 → 1     （内层抵消，不启动）
-  ncclGroupEnd               1 → 0        ← 两个 task 一起 launch
-```
-
-**为什么每个 API 都要自己包一层**：为了让"单发"和"批内调用"复用同一段代码，而不是写 `if (在组内) 只登记; else 登记 + 启动;` 两套分支——包一层之后**照常登记、照常 End**，是否此刻启动由"End 后 depth 是否为 0"自动决定，调用方无需知道自己是否在批内。这也是 `ncclCommInitRankConfig` 自带一对 Start/End 的原因：否则 depth 恒为 0，`ncclAsyncLaunch` 会直接同步执行，非阻塞初始化能力就失效了。
-
-**为什么必须是计数器而不是 bool**：要支持嵌套。若用 `bool inGroup`，内层 End 会把它清成 `false`，可外层还开着——再进来的调用就会误判"可以启动"，把尚未登记完的批次提前 launch。计数器天然支持"层数抵消"。
-
-**结论**：**攒批窗口 = 最外层那一对 Start/End 的生命周期**；中间所有 Start/End 都是局部守卫，进出抵消。
+> 隐式 Group 的完整机制——`depth` 怎么增减、`== 0` 为什么是唯一启动点、为什么单次调用也走 Group——放到 **3.2 节**和 Planner 一起讲（它本就和"任务分组"是一体的）。这里只需记住：**`ncclEnqueueCheck` 是"登记入口"，真正启动发生在 `ncclGroupEndInternal` 里。**
 
 ② 的 `taskAppend`（`:3014`）按操作类型分派，集合通信走 `collTaskAppend`（`:2690`）。它做的事就是"登记"，具体是**按数据量排序插入**：
 
@@ -1965,24 +1896,89 @@ while (true) {                                                    // 一轮启�
                         CUDA Kernel（设备端执行）
 ```
 
-> **为什么单次调用也要走 Group？** 因为 Group 是"攒批"的统一载体：用户写 Group 时是一批调用共享一次 launch；不写时就是"一批只有一个"。机制统一之后，launch 路径只剩一条，不需要维护"单发/批量"两套代码。
+> 关于"为什么单次调用也要走 Group"、depth 语义与配对规则，见 **3.2 节**。
 
 ### 3.2 任务分组与 Planner
 
-**`ncclGroupStart` / `ncclGroupEnd`**（`src/group.cc`）实现对多个集合操作的批处理。
+3.1 里反复出现的"隐式 Group""depth 归零"，机制在这里展开。任务分组由两部分组成：**Group 攒批机制**（决定哪些调用一起启动）和 **`ncclKernelPlanner`**（决定任务以什么形态被组织、调度）。
 
-Group 深度由线程局部变量 `ncclGroupDepth` 控制（`src/group.cc:27`）：
+#### 3.2.1 Group 攒批：`ncclGroupDepth` 全景
 
-- `ncclGroupStart()` 递增深度
-- 在 Group 内的集合操作调用通过 `ncclAsyncLaunch` 将任务加入 `ncclAsyncJobs` 队列
-- `ncclGroupEnd()` 递减深度，深度归零时执行全部累积任务
+`ncclGroupDepth` 是 **thread_local 计数器**（`group.cc:27`，注释原话 "depth of ncclGroupStart nesting"），全仓**只有两个函数**会改它：
 
-**`ncclKernelPlanner`**（`src/include/comm.h:429-502`）是任务调度核心：
+```cpp
+// 自增：src/include/group.h:87-90
+inline ncclResult_t ncclGroupStartInternal() { ncclGroupDepth++; return ncclSuccess; }
+
+// 自减：src/group.cc:788
+if ((--ncclGroupDepth) > 0) goto exit;    // 还没退到最外层 → 直接返回，不启动
+```
+
+**谁在加减**：
+
+| 调用方 | 加减时机 |
+|--------|---------|
+| 用户 `ncclGroupStart()` / `ncclGroupEnd()` | 显式开 / 关 Group |
+| `ncclEnqueueCheck`（`:3137` / `:3164`） | **每次独立 API 调用**的隐式包装 |
+| `ncclCommInitRankConfig`（`init.cc:2667` / `:2679`） | 初始化通信器也走 Group 攒批 |
+| 框架 / 库内部包装 | 与用户 Group 形成嵌套 |
+
+**为什么需要 depth，而不能只用一个 bool**
+
+1. **嵌套安全**：Group 可以嵌套，而 NCCL 自己就在制造嵌套（`ncclCommInitRankConfig` 内部就包了一层）。若内层 `End` 也启动，就会把外层**尚未登记完**的批次提前 launch，破坏"一批一起启动"的语义。
+2. **单发与批量共用一条路径**：单发调用是 `0→1→0`，立即启动；用户 Group 内是 `1→2→1`，不启动，等外层 `1→0` 统一启动。同一套代码覆盖两种用法，无需维护两个分支。
+3. **攒批是正确性要求，不只是性能**：所有 rank 必须在同一个 Group 边界把任务登记完再一起启动——否则会出现"某 rank 的内核已经在等对端，另一 rank 的任务还没下发"的错位（p2p 任务对此尤其敏感）。
+
+**`== 0` 的意义：唯一允许"启动"的状态**
+
+0 表示"当前线程不在任何 Group 内"。这个判断在代码里出现在四处，构成完整语义：
+
+| 位置 | `depth == 0` 时做什么 |
+|------|----------------------|
+| `ncclGroupEndInternal`（`group.cc:788`） | 自减后归零 → 越过最外层边界 → **构造 groupJob、触发 `groupLaunch`** |
+| `ncclAsyncLaunch`（`group.cc:40`） | 不在 Group 内 → 异步任务**直接同步执行**，不入队 |
+| `ncclGroupErrCheck`（`group.h:96-100`） | `depth > 0` 时把错误**暂存**进 `ncclGroupError`，等 End 时统一处理——错误也要攒批 |
+| `ncclGroupEndInternal`（`:775`） | 在 0 处再 End → 配对错误，`WARN("ncclGroupEnd: not in a group call.")` |
+
+**"到处都在 Start" 的真相：每一层都成对、互相抵消**
+
+| Start 位置 | 配对 End | 净效果 |
+|-----------|---------|--------|
+| 用户 `ncclGroupStart()` | 用户 `ncclGroupEnd()` | **真正决定攒批窗口的就是这一对** |
+| `ncclEnqueueCheck`（`:3137`） | `ncclEnqueueCheck`（`:3164`） | 单发时 `0→1→0`，立即启动 |
+| `ncclCommInitRankConfig`（`:2667`） | 同函数（`:2679`） | 同理 |
+
+深度轨迹（单发 vs 用户 Group）：
+
+```
+单发一次 ncclAllReduce
+  ncclEnqueueCheck: Start   0 → 1
+  taskAppend                      （登记）
+  ncclEnqueueCheck: End     1 → 0    → 立即启动
+
+用户写 Group，内含两个 allreduce
+  ncclGroupStart             0 → 1        ← 外层攒批生效
+    ncclAllReduce #1        1 → 2 → 1     （内层抵消，不启动）
+    ncclAllReduce #2        1 → 2 → 1     （内层抵消，不启动）
+  ncclGroupEnd               1 → 0        ← 两个 task 一起 launch
+```
+
+**为什么每个 API 都要自己包一层**：为了让"单发"和"批内调用"复用同一段代码，而不是写 `if (在组内) 只登记; else 登记 + 启动;` 两套分支——包一层之后**照常登记、照常 End**，是否此刻启动由"End 后 depth 是否为 0"自动决定，调用方无需知道自己是否在批内。这也是 `ncclCommInitRankConfig` 自带一对 Start/End 的原因：否则 depth 恒为 0，`ncclAsyncLaunch` 会直接同步执行，非阻塞初始化能力就失效了。
+
+**为什么必须是计数器而不是 bool**：要支持嵌套。若用 `bool inGroup`，内层 End 会把它清成 `false`，可外层还开着——再进来的调用就会误判"可以启动"，把尚未登记完的批次提前 launch。计数器天然支持"层数抵消"。
+
+> **一个容易混淆的点：一个 Group 里可以装两类东西，走两条队列。** 初始化类任务通过 `ncclAsyncLaunch` 进 **`ncclAsyncJobs`** 队列（`group.cc:31`，init / preconnect 等异步 job）；集合通信任务则通过 `taskAppend` 进各自的 **`comm->planner`**（见 3.2.2）。二者共享同一个 depth 计数器和 `groupLaunch` 启动入口，但队列、任务类型、处理路径都不同——这正是"初始化网络"和"allreduce"会在代码上"重合"的原因：它们只是复用同一套攒批机制，不会混进同一批。
+
+#### 3.2.2 `ncclKernelPlanner`：任务的调度核心
+
+`ncclKernelPlanner`（`src/include/comm.h:429-502`）是**每个 comm 各自一个**的调度核心，负责把"已登记的 task"组织成"可启动的 plan"：
 
 - `peers[R]`：按 Peer 组织的 P2P 任务队列（send/recv/bcast）
-- `collSorter`：按数据量排序的集合任务
+- `collSorter`：按数据量排序的集合任务（就是 3.1 里 `collTaskAppend` 写入的那个）
 - `wipPlan.channels[C]`：每个 Channel 的进行中 Plan 状态
 - `planQueue`：已完成的 Kernel Plan 队列，等待 Launch
+
+它与 3.1 的衔接关系：`taskAppend` 把 task 写进 `collSorter` / `peers[]` → `ncclPrepareTasks` 做算法/协议选择 → `ncclLaunchPrepare` 里的 `scheduleCollTasksToPlan` 把 task 装进 `ncclKernelPlan` → 挂 `planQueue` → `doLaunches` 逐个启动。
 
 ### 3.3 Kernel Launch 与 Device 侧调度
 
