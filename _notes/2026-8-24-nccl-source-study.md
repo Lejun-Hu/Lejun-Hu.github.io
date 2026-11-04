@@ -1855,6 +1855,37 @@ if ((--ncclGroupDepth) > 0) goto exit;    // 还没退到最外层 → 直接返
 
 **配对规则**：每次 Start 必然对应一次 End，轨迹完全对称。忘记 End 会让 depth 单调增长、任务永远不启动；多调 End 则在 0 处报警。所以隐式 Group 的三段式必须严格成对写：`GroupStartInternal → taskAppend → GroupEndInternal`。
 
+**"到处都在 Start" 的真相：每一层都成对、互相抵消**
+
+源码里到处是 `ncclGroupStartInternal()`，容易被误解成"反复开批、只 End 一次"。实际上每次都有配对的 End：
+
+| Start 位置 | 配对 End | 净效果 |
+|-----------|---------|--------|
+| 用户 `ncclGroupStart()` | 用户 `ncclGroupEnd()` | **真正决定攒批窗口的就是这一对** |
+| `ncclEnqueueCheck`（`:3137`） | `ncclEnqueueCheck`（`:3164`，fail 路径也会走到） | 单发时 `0→1→0`，立即启动 |
+| `ncclCommInitRankConfig`（`:2667`） | 同函数（`:2679`） | 同理 |
+
+**深度轨迹**：
+
+```
+单发一次 ncclAllReduce
+  ncclEnqueueCheck: Start   0 → 1
+  taskAppend                      （登记）
+  ncclEnqueueCheck: End     1 → 0    → 立即启动
+
+用户写 Group，内含两个 allreduce
+  ncclGroupStart             0 → 1        ← 外层攒批生效
+    ncclAllReduce #1        1 → 2 → 1     （内层抵消，不启动）
+    ncclAllReduce #2        1 → 2 → 1     （内层抵消，不启动）
+  ncclGroupEnd               1 → 0        ← 两个 task 一起 launch
+```
+
+**为什么每个 API 都要自己包一层**：为了让"单发"和"批内调用"复用同一段代码，而不是写 `if (在组内) 只登记; else 登记 + 启动;` 两套分支——包一层之后**照常登记、照常 End**，是否此刻启动由"End 后 depth 是否为 0"自动决定，调用方无需知道自己是否在批内。这也是 `ncclCommInitRankConfig` 自带一对 Start/End 的原因：否则 depth 恒为 0，`ncclAsyncLaunch` 会直接同步执行，非阻塞初始化能力就失效了。
+
+**为什么必须是计数器而不是 bool**：要支持嵌套。若用 `bool inGroup`，内层 End 会把它清成 `false`，可外层还开着——再进来的调用就会误判"可以启动"，把尚未登记完的批次提前 launch。计数器天然支持"层数抵消"。
+
+**结论**：**攒批窗口 = 最外层那一对 Start/End 的生命周期**；中间所有 Start/End 都是局部守卫，进出抵消。
+
 ② 的 `taskAppend`（`:3014`）按操作类型分派，集合通信走 `collTaskAppend`（`:2690`）。它做的事就是"登记"，具体是**按数据量排序插入**：
 
 ```cpp
