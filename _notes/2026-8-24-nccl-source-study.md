@@ -1778,15 +1778,20 @@ ncclCommInitRankFunc（异步任务体，真正干活）
 
 ```
 ncclAllReduce
-  → ncclEnqueueCheck           隐式 GroupStart → taskAppend → 隐式 GroupEnd
-  → groupLaunch                （group.cc：一次 Group 的启动器）
-      ├─ ncclPrepareTasks        选算法/协议、切 channel、产 proxy op
-      ├─ ncclTasksRegAndEnqueue  注册 buffer、写 work
-      └─ doLaunches
-          ├─ ncclLaunchPrepare   task → ncclKernelPlan（含 work batch）
-          └─ ncclLaunchKernel    ← cudaLaunchKernel，内核真正跑起来
+  → ncclEnqueueCheck                     （enqueue.cc）
+      ├─ ncclGroupStartInternal()        隐式 GroupStart，depth 0→1
+      ├─ taskAppend → collTaskAppend     task 入 planner（只是登记）
+      └─ ncclGroupEndInternal()          隐式 GroupEnd，depth 1→0
+          └─ groupLaunch                 ← 启动器（group.cc）
+              ├─ ncclPrepareTasks        选算法/协议、切 channel、产 proxy op
+              ├─ ncclTasksRegAndEnqueue  注册 buffer、写 work
+              └─ doLaunches
+                  ├─ ncclLaunchPrepare   task → ncclKernelPlan（含 work batch）
+                  └─ ncclLaunchKernel    ← cudaLaunchKernel，内核真正跑起来
   → Device Kernel
 ```
+
+> 注意 `groupLaunch` **不是** `ncclAllReduce` 直接调用的——它藏在 `ncclGroupEndInternal` 里：阻塞分支在当前线程直接调用（`group.cc:862`）；非阻塞分支先起后台线程，由 `groupLaunchNonBlocking`（`:762`）再调。
 
 **Step 1: API 入口**
 
