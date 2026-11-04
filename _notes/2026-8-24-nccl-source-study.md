@@ -1884,7 +1884,7 @@ while (true) {                                                    // 一轮启�
 
 到这里，"一次 `ncclAllReduce` 的调用"才真正变成"一个在 GPU 上跑的 kernel"。
 
-**小结：三个对象、两次翻译**
+**小结**
 
 ```
 用户调用 ──taskAppend──▶ ncclTaskColl（参数登记，按流量排序）
@@ -1895,6 +1895,8 @@ while (true) {                                                    // 一轮启�
                               ▼
                         CUDA Kernel（设备端执行）
 ```
+
+一次调用要经过两级中间对象才落到内核：先由 `taskAppend` 登记成 `ncclTaskColl`，再经 `ncclLaunchPrepare` 打包成 `ncclKernelPlan`，最后由 `doLaunches` 启动为 CUDA Kernel。
 
 > 关于"为什么单次调用也要走 Group"、depth 语义与配对规则，见 **3.2 节**。
 
