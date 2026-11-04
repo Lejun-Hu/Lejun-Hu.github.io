@@ -1777,7 +1777,15 @@ ncclCommInitRankFunc（异步任务体，真正干活）
 以 AllReduce 为例的完整执行链：
 
 ```
-ncclAllReduce → ncclEnqueueCheck → ncclGroupStart/End → ncclLaunchPrepare → ncclLaunchKernel → Device Kernel
+ncclAllReduce
+  → ncclEnqueueCheck           隐式 GroupStart → taskAppend → 隐式 GroupEnd
+  → groupLaunch                （group.cc：一次 Group 的启动器）
+      ├─ ncclPrepareTasks        选算法/协议、切 channel、产 proxy op
+      ├─ ncclTasksRegAndEnqueue  注册 buffer、写 work
+      └─ doLaunches
+          ├─ ncclLaunchPrepare   task → ncclKernelPlan（含 work batch）
+          └─ ncclLaunchKernel    ← cudaLaunchKernel，内核真正跑起来
+  → Device Kernel
 ```
 
 **Step 1: API 入口**
@@ -1792,29 +1800,96 @@ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count, n
 
 所有集合操作 API 都遵循相同模式：构造 `ncclInfo` 结构体，然后调用 `ncclEnqueueCheck`。
 
-**Step 2: ncclEnqueueCheck**（`src/enqueue.cc`）核心逻辑：
+**Step 2: `ncclEnqueueCheck` —— 隐式 Group + 任务登记**（`src/enqueue.cc:3124-3172`）
 
-- 参数校验（`src/misc/argcheck.cc`）
-- 若在 Group 内（`ncclGroupDepth > 0`），将任务添加到 `ncclKernelPlanner` 的任务队列
-- 若不在 Group 内，立即完成 Schedule → Launch 全流程
-
-**Step 3: Schedule 阶段**（`ncclPrepareTasks`，`src/enqueue.cc`）：
-
-- 选择算法（RING/TREE/COLLNET/NVLS/PAT）和协议（LL/LL128/SIMPLE）
-- 划分数据块到各 Channel（`nChannels`）
-- 为每个 Channel 创建 `ncclProxyOp` 描述数据搬运方式
-- 构建 Work Batch 描述设备端执行单元
-
-**Step 4: Launch 阶段**（`src/group.cc` 的 `ncclGroupEndInternal` 中）：
+先纠正一个容易误解的点：**NCCL 里并没有"不在 Group 就直接执行"的独立分支**。每次独立的集合调用，都会给自己包一层"隐式 Group"：
 
 ```cpp
-// 将任务转换为 KernelPlan
-ncclLaunchPrepare(comm);
-// 启动 CUDA Kernel
-ncclLaunchKernel(comm, plan);
-// 清理
-ncclLaunchFinish(comm);
+// src/enqueue.cc（节选）
+NCCLCHECK(ncclGroupStartInternal());                       // ① depth: 0 → 1
+...
+NCCLCHECKGOTO(taskAppend(info->comm, info), ret, fail);    // ② 把这次调用登记成一个 task
+...
+NCCLCHECK(ncclGroupEndInternal());                         // ③ depth: 1 → 0，在这里触发 launch
 ```
+
+所以"在不在 Group 内"只决定 **depth 何时归零**：用户自己写了 `ncclGroupStart/End`，任务先攒着，等用户的 `ncclGroupEnd` 让 depth 归零；没写，本次调用的 ③ 就让 depth 归零、立即启动。**两种情况的后续代码路径完全一致**。
+
+② 的 `taskAppend`（`:3014`）按操作类型分派，集合通信走 `collTaskAppend`（`:2690`）。它做的事就是"登记"，具体是**按数据量排序插入**：
+
+```cpp
+// src/enqueue.cc:2725-2748（节选）
+struct ncclTaskColl* t = ncclMemoryPoolAlloc<struct ncclTaskColl>(&comm->memPool_ncclTaskColl, ...);
+t->func = info->coll;      t->sendbuff = info->sendbuff;
+t->recvbuff = info->recvbuff;  t->count = info->count;   // 填齐参数
+...
+planner->nTasksColl += 1;
+ncclTaskCollSorterInsert(&planner->collSorter, t, t->trafficBytes);   // 按流量大小有序插入
+```
+
+注意最后一行：task 不是简单追加到队尾，而是**按 `trafficBytes` 有序插入 sorter**——后面的调度会优先处理流量大的任务。
+
+**此刻什么都没启动**，只是 `comm->planner` 里多了一个 task。
+
+**Step 3: `ncclGroupEndInternal` → `groupLaunch`：task 变 plan**（`src/group.cc:766` / `:598`）
+
+depth 归零后进入 `ncclGroupEndInternal`；在默认的 blocking 分支里，它在**当前线程**调用 `groupLaunch`，依次做三件事：
+
+| 顺序 | 调用 | 阶段 | 做什么 |
+|------|------|------|--------|
+| ① | `ncclPrepareTasksAndCollPreconnect`（`:674`）→ `ncclPrepareTasks`（`:574`） | **schedule** | 遍历 planner 里的 task：选算法（RING/TREE/COLLNET/NVLS/PAT）与协议（LL/LL128/SIMPLE）、把数据切到各 channel、为每个 channel 生成 `ncclProxyOp`；若某条连接尚未建立，顺手发起建连异步任务 |
+| ② | `ncclTasksRegAndEnqueue`（`:690`） | 注册 + 入队 | 按需注册用户 buffer，把 work 描述写进 FIFO |
+| ③ | `doLaunches`（`:723`） | **launch** | 把 plan 变成真正的 kernel 启动（见 Step 4） |
+
+真正把 task 翻译成 `ncclKernelPlan` 的，是 ③ 里的 `ncclLaunchPrepare`（`enqueue.cc:1568`）：
+
+```cpp
+// src/enqueue.cc:1586-1639（节选）
+struct ncclKernelPlan* plan = ncclMemoryPoolAlloc<struct ncclKernelPlan>(...);   // 新建一个 plan
+...
+NCCLCHECKGOTO(scheduleCollTasksToPlan(comm, plan, &budget), result, failure);    // 从 sorter 里"取任务填 plan"
+NCCLCHECKGOTO(scheduleP2pTasksToPlan(comm, &p2pEpoch, &p2pRound, plan, &budget), ...);
+finishPlan(comm, plan);                                                          // 收尾
+ncclIntruQueueEnqueue(&planner->planQueue, plan);                                // 挂到 plan 队列
+...
+planner->unlaunchedPlansHead = planHead;    // 已备好、待启动的链表头
+```
+
+一个关键设计：**plan 按"预算"切分**（`budget`）——不是所有 task 都塞进同一个 plan，而是按 work 大小分批，切出多少个 plan 就启动多少轮 kernel（`enqueue.cc:1612-1615` 的注释还解释了为什么必须先排空 coll 任务：否则切分点会因 rank 而异）。
+
+**Step 4: `doLaunches` —— 逐个 plan 启动 kernel**（`group.cc:309-384`）
+
+```cpp
+// 每个 comm：先把 task 全部转成 plan
+NCCLCHECKGOTO(ncclLaunchPrepare(comm), result, failure);          // :323
+
+while (true) {                                                    // 一轮启动一个 plan
+  struct ncclKernelPlan* plan = comm->planner.unlaunchedPlansHead; // :353 取出一个待启动的 plan
+  if (plan != nullptr) {
+    comm->planner.unlaunchedPlansHead = plan->next;
+    ncclLaunchKernelBefore_NoUncapturedCuda(comm, plan);          // :357 前置准备（barrier 等）
+    ncclLaunchKernel(comm, plan);                                 // :363 ← cudaLaunchKernel 在这里
+    ncclLaunchKernelAfter_NoCuda(comm, plan);                     // :369 收尾
+  }
+  if (!moreRounds) ncclLaunchFinish(comm);                        // :374 最后一轮：清空 planner
+}
+```
+
+到这里，"一次 `ncclAllReduce` 的调用"才真正变成"一个在 GPU 上跑的 kernel"。
+
+**小结：三个对象、两次翻译**
+
+```
+用户调用 ──taskAppend──▶ ncclTaskColl（参数登记，按流量排序）
+                              │ ncclLaunchPrepare + scheduleCollTasksToPlan
+                              ▼
+                        ncclKernelPlan（work batch 集合，按预算分批）
+                              │ doLaunches 逐轮启动
+                              ▼
+                        CUDA Kernel（设备端执行）
+```
+
+> **为什么单次调用也要走 Group？** 因为 Group 是"攒批"的统一载体：用户写 Group 时是一批调用共享一次 launch；不写时就是"一批只有一个"。机制统一之后，launch 路径只剩一条，不需要维护"单发/批量"两套代码。
 
 ### 3.2 任务分组与 Planner
 
