@@ -1699,7 +1699,7 @@ send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE] / NCCL_STEPS;
 | `P2P_IPC` | 同主机不同进程，用传统 CUDA IPC 共享显存 |
 | `P2P_CUMEM` | 用 cuMem API（CUDA 12+ 虚拟地址管理，支持 MNNVL 多节点 NVLink） |
 
-而 NET transport 与网卡的交互完全通过 **Net Plugin API**（`src/include/plugin/nccl_net.h`，v12）：**setup** 阶段向对端提供网卡的 `handle`（内含 QP 信息），**connect** 阶段把对端 QP 置为 RTS（Ready To Send）状态——这也是"国产网卡替换"最关键的一个接口（见 2.7 节）。
+而 NET transport 与网卡的交互完全通过 **Net Plugin API**（`src/include/plugin/nccl_net.h`，v12）：**setup** 阶段向对端提供网卡的 `handle`（内含 QP 信息），**connect** 阶段把对端 QP 置为 RTS（Ready To Send）状态——自研 RDMA 协议栈也是通过这个接口接入的。
 
 #### 2.6.7 第四步：收尾 —— Proxy 线程、调优器与 device 侧镜像
 
@@ -1752,30 +1752,6 @@ ncclCommInitRankFunc（异步任务体，真正干活）
 ```
 
 > **这条链体现的设计哲学**：**逻辑与物理分离**。阶段三产出的是纯粹的"逻辑图"（谁和谁相邻），阶段四才把它落到具体传输和资源上。好处是：换一种物理链路（比如国产网卡、自研互联）只需要替换阶段四的 transport 实现，前面的拓扑/图逻辑完全不用动。
-
-顺着这个思路，本章最后一节把这些"可替换点"逐一列出。
-
-### 2.7 国产芯片适配要点
-
-> 本节梳理了 NCCL 中 NV 闭源组件对应的抽象层，以及可能的替换策略，供国产芯片适配时参考。
-
-| NV 闭源组件 | NCCL 中的抽象层 | 替换策略 |
-|-------------|-----------------|----------|
-| **NVLink** | `TRANSPORT_P2P`（`src/transport/p2p.cc`），通过 `cudaDeviceEnablePeerAccess` 建立 P2P | 若国产芯片提供类似 P2P Direct Access API，在 `p2pTransport.canConnect` 中判断拓扑后返回 true，在 `setup` 中调用对应 API 建立直连 |
-| **NVSwitch** | `ncclTopoNode` 中的 `NVS` 类型，NVLS (NVLink SHARP) 算法 | 走 NET transport fallback；若自研交换机提供 SHARP 类网内计算能力，通过 `TRANSPORT_COLLNET` 接入 |
-| **InfiniBand / ConnectX** | `TRANSPORT_NET`（`src/transport/net.cc` + `net_ib/`），Net Plugin API v12（`src/include/plugin/nccl_net.h`） | **关键替换点**：实现自定义 Net Plugin（实现 `ncclNet_v12_t` 接口），在 `devices()`、`listen()`、`connect()`、`regMr()`、`isend()`、`irecv()` 等接口中对接自研 RDMA 协议栈 |
-| **GDRCopy** | `src/misc/gdrwrap.cc`，GPU 内存 CPU 端直接读写 | 若自研芯片支持 CPU 直接访问设备内存，实现等效的 GDR API 包装 |
-| **Broadcom Tomahawk**（Scale-out 交换机） | `TRANSPORT_NET` | Tomahawk 是标准 Ethernet 交换机，走 RoCEv2 路径；只需确保 Net Plugin 的 RoCE 实现与 Tomahawk 兼容。若需网内计算，通过 `TRANSPORT_COLLNET` 和 CollNet Plugin 接入 |
-| **GIN (GPU Initiated Network)** | `src/gin/` + GIN Plugin API（`src/include/plugin/nccl_gin.h`） | 可实现三种 Backend 之一：GPI（芯片支持 GPU 直接注入网络包）/ GDAKI（通过 DOCA GPUNetIO 等框架）/ Proxy（最通用，Host 侧代理线程） |
-
-**最小适配路径：**
-
-1. 实现 Net Plugin（最关键）：对接自研 RDMA 协议栈和交换机
-2. 适配拓扑发现：提供等效 NVML 的 API 来查询芯片间互联拓扑
-3. 实现 P2P transport：如果芯片支持片间直连
-4. GIN 可先走 Proxy backend，后续升级到 GPI
-
-NCCL 的插件架构设计良好，`ncclNet_t`、`ncclGin_t`、`ncclTuner_t` 均已通过版本化的虚函数表定义了清晰的 API 边界。
 
 ---
 
