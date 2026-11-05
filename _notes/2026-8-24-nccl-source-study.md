@@ -623,7 +623,7 @@ NCCL 提供了四种实例，分别对应四类链路：
 【执行层】ncclCommInitRankFunc(job)     ← 真正干活：本章 2.3~2.6 的四个阶段全在它体内
 ```
 
-**各层职责一句话**：
+**各层职责**：
 
 | 层 | 代表函数 | 只负责 | 外部可见 |
 |----|----------|--------|----------|
@@ -665,7 +665,7 @@ ncclResult_t ncclCommInitRank(ncclComm_t* newcomm, int nranks, ncclUniqueId comm
 
 > 这两点最能体现"门面"性质：**（1）** 它把"当前是哪个设备""用什么配置"这些**上下文信息**补全后传下去（因为 `ncclCommInitRank` 的签名里根本没有 device 参数，它默认用当前设备）；**（2）** 它把 `__func__`（调用者函数名）一路传下去，让下层在出错时能报出"是哪个 API 调用的"。
 
-##### 顺带解释：`ncclInitEnv()` 与 `ncclInit()` 到底在做什么
+##### `ncclInitEnv()` / `ncclInit()`：进程级一次性初始化
 
 这两个函数你在后面每个公共 API 入口都会反复看到，这里讲一次，后续不再重复。
 
@@ -722,7 +722,7 @@ B 机 RDMA 网卡 ──④ 反向 DMA──▶ B 机 GPU 显存
 | 有 GDRDMA（NCCL 置 `NCCL_DIRECT_NIC`，`device.h:122`） | GPU 显存 --(网卡 DMA)--> 网卡 | 0 次 |
 | 无 GDRDMA | GPU 显存 → 系统内存 → 网卡 | 多 1 次 |
 
-**GDRCopy 为什么不在这条链上**：它不搬 payload，只是让 CPU（proxy 线程）低延迟读到 GPU 写的标志位（`workFifo` 在 `init.cc:631-634`；`gdcSync`/`gdcFlush` 在 `net.cc:966-970`、`1137-1140`、`1658`）。一句话分工：**搬数据靠网卡，看状态靠 GDRCopy，两者都依赖 BAR 映射**。实现上是 `pin` 住显存再映射进用户态，CPU 直接 load/store 约**几百纳秒**，远快于 `cudaMemcpy` 的**微秒**级。
+**GDRCopy 为什么不在这条链上**：它不搬 payload，只是让 CPU（proxy 线程）低延迟读到 GPU 写的标志位（`workFifo` 在 `init.cc:631-634`；`gdcSync`/`gdcFlush` 在 `net.cc:966-970`、`1137-1140`、`1658`）。分工可以概括为：**搬数据靠网卡，看状态靠 GDRCopy，两者都依赖 BAR 映射**。实现上是 `pin` 住显存再映射进用户态，CPU 直接 load/store 约**几百纳秒**，远快于 `cudaMemcpy` 的**微秒**级。
 
 > 内核组件：GPUDirect RDMA 依赖 `nvidia-peermem`（NCCL 在 `src/transport/net_ib/gdr.cc:18-20` 检查），GDRCopy 依赖 `gdrcopy.ko` + `libgdrapi.so`，可同时启用。GDRCopy 默认关闭，需 `NCCL_GDRCOPY_ENABLE=1`，不满足条件会自动降级回 host 内存（`gdrwrap.h:287-293`）。
 
@@ -765,7 +765,7 @@ static ncclResult_t ncclInit() {
 > - 写成 `NCCL_API(ncclResult_t, ncclCommInitRank, ...)` 的是**导出符号**，外部可调用；
 > - 写成 `static ncclResult_t ncclCommInitRankDev(...)` 的是**内部函数**——`static` 意味着**文件作用域**，链接期外部根本找不到它（所以框架想调也调不到）。
 >
-> 顺带看清 `NCCL_API` 宏本身（`src/include/core.h:16-27`）——它并不是简单的导出标记：
+> 再看 `NCCL_API` 宏本身（`src/include/core.h:16-27`）——它并不是简单的导出标记：
 >
 > ```cpp
 > // src/include/core.h:16-27（Linux 分支节选）
@@ -994,7 +994,7 @@ ncclResult_t ncclCommEnsureReady(ncclComm_t comm) {
 
 **换句话说**：轮询这件事不是"可选的性能优化"，而是**非阻塞模式下的强制契约**——要么你自己轮询到 `ncclSuccess`，要么你就会被 `ncclCommEnsureReady` 挡在门外。
 
-##### 顺带把 Group 机制的作用讲清楚
+##### Group 机制的作用
 
 到这儿可以回头理解 Group 到底为什么存在了。`ncclGroupStart()` / `ncclGroupEnd()` 的本质是**"攒批 + 统一启动"**：
 
@@ -1010,7 +1010,7 @@ ncclResult_t ncclCommEnsureReady(ncclComm_t comm) {
 
 不设 `blocking = 0`（即默认 `blocking = 1`）时，同样由 `ncclGroupEndInternal` 统一启动，但走的是另一个分支：**不另起线程，而是在当前线程里把 `groupLaunch` 跑完才返回**（`group.cc:858-866`）。
 
-所以两者的区别，本质就一句话：
+所以两者的区别在于：
 
 > **阻塞 = "启动后在调用线程等待结果"；非阻塞 = "启动后立即返回，结果通过 `asyncResult` 异步通知"。**
 
@@ -1025,7 +1025,7 @@ ncclResult_t ncclCommEnsureReady(ncclComm_t comm) {
 
 > ⚠️ 一个约束：**同一个 Group 里不允许混用阻塞和非阻塞 comm**（`group.cc:60-63` 有明确检查，违反直接返回 `ncclInvalidArgument`）。
 
-（顺带一提：阻塞模式下 `asyncResult` 不会被更新——因为"函数返回"本身就是完成信号，不需要第二个通知渠道。它靠分配时清零即等于 `ncclSuccess`，所以后续 `ncclCommEnsureReady` 也不会误拦。）
+（补充：阻塞模式下 `asyncResult` 不会被更新——因为"函数返回"本身就是完成信号，不需要第二个通知渠道。它靠分配时清零即等于 `ncclSuccess`，所以后续 `ncclCommEnsureReady` 也不会误拦。）
 
 > 补充一句：`ncclCommInitRankConfig` 自己内部就包了一层 `ncclGroupStartInternal()` / `ncclGroupEndInternal()`（`init.cc:2667` / `init.cc:2679`）。所以即便用户代码里没有写 `ncclGroupStart`，走进 `ncclAsyncLaunch` 时 `ncclGroupDepth` 也已经是 1 —— 这就是为什么它一定会经过"入队 → 统一启动"这条路，而不是直接同步执行。
 
@@ -1335,7 +1335,7 @@ AllGather 之后，聚合按字段逐个进行（`init.cc:1291-1316`、`1435-145
 > - **`topoRanks` = 每人申报"我这一段"**：图搜索给出的 `intra` 是本机机内链序，Preset（`connect.cc:20-93`）让每个 rank 申报 `ringRecv/Send`（本机链的**入口/出口**）、`ringPrev/Next`（机内我的**前/后**）、`treeToParent/Child0/1`（本机树段的父/子）——**跨机那段谁也没申报**。Postset 收齐后缝合（`connect.cc:103-110`）：节点 n 的入口的 prev ← 上一节点的出口、出口的 next ← 下一节点的入口，再把缝好的 prev/next 写回各 rank 的 `channel->ring`，产出 `rings[]` 交给 `setupChannel`。例：A 机报"链 A1→A2→A3→A4"、B 机报"B1→…→B4"，缝合后全局环 A1→…→A4→B1→…→B4→A1，跨机边只有 A4→B1、B4→A1 两条。
 > - **`ringRecv[0]` = 节点指纹**：它是本机链的入口 rank；同机所有 rank 必然报同一个值，不同机器几乎必然不同 → **值相同的一组 = 同一节点**（`init.cc:1291-1301`），组内第一个 rank 即 `nodesFirstRank[node]`（缝合时的节点锚点）。不用 hostHash 划分，是因为这里的"节点"是图意义概念——"环上连续的一段"，与缝合所需锚点是同一个量。
 
-一句话：**第 3 次交换的产物 = "阶段四建连所需的全部全局参数"**——建几条 channel、每条环序如何、每对邻居是谁、缓冲区多大、NVLS/CollNet 开不开。没有它，阶段四的每一步都会因为"各说各话"而失败。
+**第 3 次交换的产物，就是阶段四建连所需的全部全局参数**——建几条 channel、每条环序如何、每对邻居是谁、缓冲区多大、NVLS/CollNet 开不开。没有它，阶段四的每一步都会因为"各说各话"而失败。
 
 **为什么必须再交换一次？** 一个自然的疑问是："大家的输入不都一致吗，算出来的结果不应该自动一样？"——**前提就不成立**：
 
@@ -1348,7 +1348,7 @@ AllGather 之后，聚合按字段逐个进行（`init.cc:1291-1316`、`1435-145
 
 3. **一些全局结构只能从汇总数据里"长出来"**：比如"这个通信域有几个节点、每个节点由哪些 rank 组成"（`nNodes`/`rankToNode`，`:1291-1301`）要看到所有人的 `topoRanks.ringRecv[0]` 才能划分；ring/tree 的最终邻居也是 `ncclTopoPostset` 用所有人的 Preset 结果拼装的（`:1480`）。
 
-> 顺带修正一个容易产生的误解：Ring 的相邻关系**不靠"各自以为"**——阶段四建连时每对 prev/next 要直接握手确认，接错了根本连不上。真正需要全局对齐的是**结构参数**：否则会出现"有人建 8 条 channel、有人建 6 条""同一 channel 上收发双方对带宽/协议的预期不一致"这类握手之后才发现的错位。
+> 这里也澄清一个容易产生的误解：Ring 的相邻关系**不靠"各自以为"**——阶段四建连时每对 prev/next 要直接握手确认，接错了根本连不上。真正需要全局对齐的是**结构参数**：否则会出现"有人建 8 条 channel、有人建 6 条""同一 channel 上收发双方对带宽/协议的预期不一致"这类握手之后才发现的错位。
 
 ### 2.6 阶段四：连接与资源 —— Channel / Connector / Transport 是怎么落地的
 
@@ -1380,7 +1380,7 @@ ncclComm（通信器）                          ← 一个通信域的全部上
 | **⑤ 传输虚函数表** | `ncclTransportComm` | 这条连接用**哪类**物理链路（P2P/SHM/NET/CollNet）及其操作集 | 全局 4 种实例 | `transport.h:117-134` |
 | **⑥ 物理资源** | `p2pResources` / `shm*Resources` / `sendNetResources` … | 真正的东西：显存映射、主机内存、网卡 QP | 每条连接一份 | 各 `transport/*.cc` |
 
-> **一句话理解这个层次**：**通信器**划定"谁能和谁说话"；**通道**把数据切成几份并行处理；**连接表**用 rank 号索引"我和每个人的连接"；**连接子**描述"这一条连接"；**传输**决定"这条连接走什么物理链路"；**物理资源**才是内存里真实的句柄、地址和队列。
+> **这个层次的职责分工**：**通信器**划定"谁能和谁说话"；**通道**把数据切成几份并行处理；**连接表**用 rank 号索引"我和每个人的连接"；**连接子**描述"这一条连接"；**传输**决定"这条连接走什么物理链路"；**物理资源**才是内存里真实的句柄、地址和队列。
 
 #### 2.6.2 第一步：建通道，同时分配它的"连接表"
 
@@ -1532,7 +1532,7 @@ for (int t = 0; t < NTRANSPORTS; t++) {                      // 顺序：P2P →
 }
 ```
 
-> **顺带一提：`ncclTransports[]` 里其实还有第 5 个成员 `profilerTransport`，但选路循环根本不会碰它。** 数组声明是 `NTRANSPORTS + 1` 项，而 `selectTransport` 只遍历前 `NTRANSPORTS` 项（P2P/SHM/NET/CollNet）；且它的 `canConnect` 干脆是 NULL——整个结构里只实现了 `recv` 侧的 `profilerProxyConnect` / `profilerProxyProgress` 两个函数（`src/transport/profiler.cc:57-61`），没有 `setup`、没有 `connect`，不参与任何数据搬运。
+> **补充：`ncclTransports[]` 里其实还有第 5 个成员 `profilerTransport`，但选路循环根本不会碰它。** 数组声明是 `NTRANSPORTS + 1` 项，而 `selectTransport` 只遍历前 `NTRANSPORTS` 项（P2P/SHM/NET/CollNet）；且它的 `canConnect` 干脆是 NULL——整个结构里只实现了 `recv` 侧的 `profilerProxyConnect` / `profilerProxyProgress` 两个函数（`src/transport/profiler.cc:57-61`），没有 `setup`、没有 `connect`，不参与任何数据搬运。
 >
 > **它存在的目的是复用 Proxy 框架来轮询 Profiler 插件的计数器**。计数器需要被周期性读取并上报，而"周期性后台轮询 + 生命周期管理 + 错误处理"正是 Proxy 线程已经解决的问题。NCCL 的做法是：借用 Transport 的结构外壳，把这两个函数挂在 proxy 槽位上——于是计数器轮询就成了一种特殊的 proxy op，完全复用既有的线程管理与调度（呼应 5.3 节）。代价是多了一个不参与通信的伪传输，换来的是无需另造一套轮询机制。
 
@@ -1550,7 +1550,7 @@ for (int t = 0; t < NTRANSPORTS; t++) {                      // 顺序：P2P →
 > | 同一 peer 的两个 **connIndex** | 0 = 集合通信、1 = 点对点，两者**各自独立选路**，可走不同 transport |
 > | 不同 **peer** | 各自独立判断——同机走 P2P/SHM，跨机走 NET |
 >
-> 一句话：`canConnect` 的语义是"**这对 peer 之间能否走该传输**"（依据 2.5.1 换来的 `peerInfo` 与拓扑判断）；`selectTransport` 对每个 Connector 独立做一次"选最优"。而"多路径"的需求，被 NCCL 拆成了"多 channel / 多 connIndex / 多 peer"三个正交维度，而不是在一个 Connector 里塞多种传输。
+> `canConnect` 的语义是"**这对 peer 之间能否走该传输**"（依据 2.5.1 换来的 `peerInfo` 与拓扑判断）；`selectTransport` 对每个 Connector 独立做一次"选最优"。而"多路径"的需求，被 NCCL 拆成了"多 channel / 多 connIndex / 多 peer"三个正交维度，而不是在一个 Connector 里塞多种传输。
 
 setup 产出的连接信息是一个**不透明缓冲区**：
 
