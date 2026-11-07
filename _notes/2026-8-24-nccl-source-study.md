@@ -2451,14 +2451,26 @@ NCCL_DEVICE_INLINE void ncclGinInitCommon(GinType* gin, ncclDevComm const& comm,
 }
 ```
 
-代入一组数值更清楚：设 2 条连接、每连接 4 个 context（共 8 个 `contextIndex`）。`contextIndex = 5` 时 `connectionId = 5 & 1 = 1`、`contextId = 5 >> 1 = 2`，即走连接 1 上的第 2 组 QP；而 CTA 依次取 0、1、2、3… 时 `connectionId` 交替为 0、1、0、1，天然把相邻 CTA 分散到两张网卡。两级下标的作用归纳如下：
+两个下标各自的作用归纳如下（具体换算已在上图与代码注释中展示，这里不再重复数值）：
 
 | 下标 | 计算方式 | 选中的资源 | 带来的影响 |
 |------|---------|-----------|-----------|
 | `connectionId` | `contextIndex` 低位（取模或按位与） | `ginComms[]`、`ginHandles[]`、`ginNetDeviceTypes[]` | 决定走哪张网卡、哪条 GIN 连接；多条连接实现跨 NIC 带宽聚合与 rail 覆盖 |
 | `contextId` | `contextIndex` 高位（整除或移位） | 该连接内的 QP 组 / GFD 队列 / signal 与 counter 槽位 | 决定并发工作区；多个 context 避免 CTA 之间争用同一发送队列与信号 |
 
-两级合起来，把 `ginContextCount` 个 `contextIndex` 映射到「连接 × context」的二维资源网格；再叠加上一节的 `peer` 下标，一次 Put 的完整定位就是 `ginHandles[connectionId]` → `[contextId]` → `gdqp + peer`。另外 `_signalShadows` 按**全局** `contextIndex` 而非 `contextId` 分片（`gin__funcs.h:97`），说明信号影子空间是按完整的二维组合隔离的，同一 `contextId` 落在不同连接上时也不会共用槽位。内核用 `blockIdx.x % ginContextCount` 选出 `contextIndex`（`device/symmetric/all_gather_gin.cuh:17`），因此 CTA 编号直接决定了它使用哪张网卡上的哪组 QP。
+两级合起来，把 `ginContextCount` 个 `contextIndex` 映射到「连接 × context」的二维资源网格；再叠加上一节的 `peer` 下标，一次 Put 的完整定位就是 `ginHandles[connectionId]` → `[contextId]` → `gdqp + peer`。内核用 `blockIdx.x % ginContextCount` 选出 `contextIndex`（`device/symmetric/all_gather_gin.cuh:17`），因此 CTA 编号直接决定了它使用哪张网卡上的哪组 QP。
+
+**信号影子（signal shadow）：GPU 本地维护的信号进度副本。** 这里补一个前面 `_signalShadows` 提到的概念。先看「信号」本身：它是 GIN 的完成通知机制——`put`/`get` 可以附带一个 signal，网卡在数据落定后对信号槽做原子加，接收方轮询该槽位判断之前的操作是否已完成。信号槽放在对称内存里（每个 context 一段 `signals_table`），值是单调递增的。而「影子」是这块 GPU 本地记录的一份「我已经等到哪个信号值」，按 `contextIndex` 分片、每个 signal 一个 uint64，分配大小为 `nGinContexts * ginSignalTotal * sizeof(uint64_t)`（`dev_runtime.cc:1237`），地址位于对称内存窗口内（`:1298-1299`），设备端可直接读写。
+
+为什么需要它，有两层原因：
+
+1. **进度记忆**：信号值随多次操作累加，每次等待必须知道「从哪个值继续等」，不能从头轮询。影子就是这份进度，体现在三个函数里（`gin__funcs.h:1031-1082`、`:1097-1105`）：
+   - `waitSignalMeetShadow`：`least = _signalShadows[signal] + sig.offset`，轮询信号槽直到达到 `least`——从上次进度出发，只等增量；
+   - `waitSignalFollowShadow`：等到之后把读回的值减去 `offset` 写回 `_signalShadows[signal]`（`:1066-1068`），影子跟上新进度；
+   - `resetSignal`：重置信号槽后把 `_signalShadows[signal] = 0`（`:1103-1104`），两者一起归零。
+2. **剥离物理偏移**：信号槽的物理值带一个 `offset`（`sig.offset`，是该 context 信号表在统一窗口里的基址偏移），不是从 0 开始。影子存的是扣除 offset 之后的逻辑值，等待时再加回 offset 换算成物理值，于是调用方无需关心信号槽的绝对地址，只关心相对增量。
+
+这正解释了为什么 `_signalShadows` 按**全局** `contextIndex` 而非 `contextId` 分片（`gin__funcs.h:97`）：不同 context 的信号表 offset 不同、进度也互相独立，共用一份会互相覆盖进度；按完整二维组合隔离，同一 `contextId` 落在不同连接上时也不会共用槽位。
 
 **远端信息：QP 配对在建连时固化，WQE 携带的是地址与 rkey**。这里要区分两个阶段：
 
