@@ -2158,7 +2158,21 @@ typedef enum {
 
 ### 4.3 主机侧：从插件加载到连接与窗口建立
 
-主机侧骨架分四步，全部围绕核心结构 `ncclGinState`（`src/include/gin/gin_host.h:27-48`，挂在 `sharedRes` 上）：
+前面讲了 GIN 是什么、有哪几种硬件形态，这一节看主机侧代码怎么把它变成"可用"。先说清时机：**这些准备工作并不在同一个阶段完成**。
+
+- **通信器初始化期**：第二章的阶段四里，`ncclCommInitRank` 会顺带调用 `ncclGinInit`（`init.cc:477`，与 `ncclNetInit`/`ncclRmaInit` 并列）。这一步只加载插件、选定一个后端，**不建立任何连接**——因为此时还不知道上层库会不会用 GIN。
+- **上层库激活期**：当上层库（如 DeepEP）调用公共 API `ncclDevCommCreate`（`src/dev_runtime.cc:1502`）申请设备侧通信上下文、并在 `reqs` 里声明需要 GIN 时，才触发剩下的三步——建连接、注册内存窗口、创建设备侧 context（`ginActivated` 控制，首次激活时执行一次，`dev_runtime.cc:1137`）。
+
+这也解释了为什么 GIN 不是 AllReduce 的主路径：它由上层库按需激活，而不是每个通信器初始化时都建一套。按代码执行顺序，主机侧共四步：
+
+| 步骤 | 时机 | 入口函数 | 产物 |
+|------|------|----------|------|
+| 1. 加载并选定插件 | 通信器初始化 | `ncclGinInit`（`plugin/gin.cc:269`） | `ginState` 里记下用哪个后端 |
+| 2. 建立 rank 间连接 | `ncclDevCommCreate` | `ncclGinConnectOnce`（`gin/gin_host.cc:80`） | `ginComms[]` |
+| 3. 注册对称内存窗口 | `ncclDevCommCreate` | `symMemoryRegisterGin` → `ncclGinRegister`（`dev_runtime.cc:1152`、`gin_host.cc:374`） | `ginHostWins` / `ginDevWins` |
+| 4. 创建设备侧 context | `ncclDevCommCreate` | `ncclGinDevCommSetup`（`dev_runtime.cc:1244`、`gin_host.cc:190`） | 下发到设备侧的句柄；按需起 progress 线程 |
+
+四步都读写同一个结构 `ncclGinState`（`src/include/gin/gin_host.h:27-48`，挂在 `sharedRes` 上，因此父子通信器共享同一份）：
 
 ```cpp
 struct ncclGinState {
@@ -2177,12 +2191,18 @@ struct ncclGinState {
 
 **第一步：加载并选定插件 —— `ncclGinInit`（`src/plugin/gin.cc:269`）**
 
-先纠正一个容易混淆的点：`ncclGinInit` 只负责"加载插件、选定一个"，**不建连接**。它先检查 `compCap >= 70`（Volta 起才支持 GIN），然后遍历插件列表（`initPluginLibsOnceFunc`，`gin.cc:194-256`）：
+要理解这一步，先要明白"插件"指什么。NCCL 不直接实现操作网卡的代码，而是把 GIN 需要的一组操作定义成函数指针表 `ncclGin_t`（`src/include/plugin/gin/gin_v14.h:27-67`）：`listen`、`connect`、`createContext`、`regMrSym`、`ginProgress` 等。**提供这组函数的一个实现，就是一个 GIN 插件**。三种 backend 之所以能共用同一套流程，是因为它们都以插件形式交出这组函数；`ginState->ncclGin` 指向选定的那一个，后面三步全都通过它调用。
 
-- **外部插件**：`NCCL_GIN_PLUGIN` 环境变量指定（默认 `libnccl-gin.so`），或 NET 插件自带的 GIN 支持；
-- 两个**内部插件**（无需外部库）：`ncclGinIbGdaki`（IB 上的 GDAKI）和 `ncclGinProxy`（通用回退）。
+为什么需要"遍历"？因为 NCCL 在启动前不知道这台机器上哪个后端能用——取决于装了什么网卡、有没有厂商提供的库。`initPluginLibsOnceFunc`（`gin.cc:194-256`，`std::call_once` 只构造一次进程级列表）按顺序列出四类候选：
 
-对每个启用的插件做 `init`（`init(&ginContext, commHash)`）→ `devices(&ndev)`，再由 `ncclGinPluginAssignToComm` 把 `ginType`/`ncclGin` 写进 `ginState`，选定一个后禁用其余外部插件。调用点在 `init.cc:477`，与 `ncclNetInit`/`ncclRmaInit` 并列。
+1. **外部插件**：`NCCL_GIN_PLUGIN` 环境变量指定的动态库（默认 `libnccl-gin.so`）——厂商的 GPI 实现就走这条路；
+2. **NET 插件自带的 GIN 支持**（若该 NET 插件提供）；
+3. **内置 `ncclGinIbGdaki`**：基于标准 IB verbs 的 GDAKI 实现，无需外部库；
+4. **内置 `ncclGinProxy`**：PROXY 回退实现，同样无需外部库。
+
+后两个是 NCCL 自己编进来的，保证即使没有任何外部库，GIN 也至少能回退到 GDAKI 或 PROXY。
+
+`ncclGinInit` 的遍历逻辑（`gin.cc:269-304`）：先检查 `compCap >= 70`（Volta 起支持 GIN）；然后对列表中每一项，若是外部插件就先 `dlopen` 取 v14/v13 符号，再调用 `init(&ginContext, commHash, ...)` 初始化、`devices(&ndev)` 探测是否有可用设备——`ndev <= 0` 就标记禁用、继续看下一个。**第一个成功启用的插件**由 `ncclGinPluginAssignToComm`（`gin.cc:133-174`）把 `ncclGin` 和 `ginType`（取自该插件 `getProperties(0).netDeviceType`）写进 `ginState`，随后禁用其余外部插件并结束遍历。用户可用 `NCCL_GIN_TYPE` 强制指定后端类型（`gin.cc:141-148`）；选不中任何插件时 `ncclGinState` 保持空，GIN 不可用。
 
 **第二步：建立连接 —— `ncclGinConnectOnce`（`src/gin/gin_host.cc:80`）**
 
@@ -2206,9 +2226,13 @@ for (int n = 0; n < ginState->ginCommCount; n++) {
 
 三个要点：**`ginCommCount` 是全体协商出来的**（每个 rank 上报自己的数，`bootstrapAllGather` 后取 min，上限 `NCCL_GIN_MAX_CONNECTIONS = 4`）；**连接是多路的**（`ginComms[]` 数组，对应多网卡/多 rail）；**复用阶段二建好的 bootstrap** 交换句柄——与 NET transport 建连是同一套路（呼应 2.6.4）。
 
-**第三步：为每个 device comm 建上下文 —— `ncclGinDevCommSetup`（`gin_host.cc:190`）**
+**第三步：注册对称内存窗口 —— `ncclGinRegister`（`gin_host.cc:374`）**
 
-上层库（如 DeepEP）要发起 GIN 时，会创建一个 `ncclDevComm`；这一步为它分配设备侧 context 并下发句柄。核心是循环 `createContext`（`gin.cc:277-292`），之后**按需启动 progress 线程**：
+连接建好后，还要把"哪些内存可以被远端访问"登记下来。GIN 通信的对象是窗口（window）：`ncclGinRegister` 对一块地址调 `regMrSym`，拿到 host 侧句柄（`ginHostWins`）和设备侧窗口（`ginDevWins`）——设备端 `ncclGinPut` 用的 `dstWin`/`srcWin` 就是这里注册出来的。`ncclDevCommCreate` 在首次激活时会遍历已有的对称内存逐一注册（`dev_runtime.cc:1150-1154`，源码注释说明窗口句柄要等拿到 stream 后再更新）；跨多个物理 segment 的地址需要 DMABUF 支持（`gin_host.cc:379-387`）。
+
+**第四步：创建设备侧 context —— `ncclGinDevCommSetup`（`gin_host.cc:190`）**
+
+这一步为上层库创建的 `ncclDevComm` 分配设备侧 context 并下发句柄，核心是循环 `createContext`（`gin_host.cc:277-292`），之后**按需启动 progress 线程**：
 
 ```cpp
 // gin_host.cc:294-298
@@ -2218,11 +2242,7 @@ if (ginState->needsProxyProgress && ginState->ginProgress == 0) {
 }
 ```
 
-progress 线程**不是 GIN 初始化就启动**，而是某个 backend 的 `devHandle->needsProxyProgress == 1` 时才起（典型是 PROXY）。
-
-**第四步：注册对称内存窗口 —— `ncclGinRegister`（`gin_host.cc:374`）**
-
-GIN 通信的对象是"窗口"（window）。`ncclGinRegister` 对一块地址调 `regMrSym`，拿到 host 侧句柄（`ginHostWins`）和设备侧窗口（`ginDevWins`）——设备端 `ncclGinPut` 用的 `dstWin`/`srcWin` 就是这里注册出来的。跨多个物理 segment 的地址需要 DMABUF 支持（`gin.cc:379-387`）。
+progress 线程**不是 GIN 初始化就启动**，而是某个 backend 的 `devHandle->needsProxyProgress == 1` 时才起（典型是 PROXY）。到这四步完成，`ncclDevComm` 里就带上了设备侧可用的 GIN 上下文与窗口，上层 kernel 才能调用 4.4 的 API。
 
 ### 4.4 设备侧：GPU kernel 里怎么发起一次通信
 
