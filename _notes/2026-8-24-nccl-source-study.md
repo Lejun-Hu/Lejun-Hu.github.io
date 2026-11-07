@@ -2276,7 +2276,7 @@ uint32_t ginContextCount;
 | 第二层 · 分发 | 一次调用怎样找到选定的 backend | `gin_device_common.h` 的 `ncclGinCall` / `ncclGinCallImpl` |
 | 第三层 · 内部 API 与 backend 实现 | 选定之后写出 WQE 还是 GFD | `gin_device_common.h` 的 `ncclGinApi_*` 模板 + `proxy/`、`gpi/`、`gdaki/` 三个目录 |
 
-三层走完之后，4.4.1 再往下一层追问 GDAKI 的具体参数：一次 `Put` 用哪条 QP、远端地址与 rkey 从哪里取——这部分直接说明 4.3 下发的句柄如何被消费。本节只覆盖「提交」这一侧；请求提交后如何确认完成、以及为什么部分 backend 还需要 Host 线程推进，放在 4.5。
+三层走完之后，4.4.1 与 4.4.2 再往下一层追问 GDAKI 的具体参数：一次 `Put` 用哪条 QP（4.4.1）、远端地址与 rkey 从哪里取（4.4.2）——这部分直接说明 4.3 下发的句柄如何被消费。本节只覆盖「提交」这一侧；请求提交后如何确认完成、以及为什么部分 backend 还需要 Host 线程推进，放在 4.5。
 
 先看最靠近调用方的第一层。上层库（如 DeepEP）在自己写的 kernel 里包含 `nccl_device/gin.h` 后，看到的就是下面这组函数；它们的签名带 `ncclGin_C*`（GIN 上下文）和 `ncclTeam`，不含任何 backend 相关参数，这正是「与硬件无关」在接口上的体现：
 
@@ -2370,11 +2370,11 @@ struct ncclGinApi_Wait {
 
 三个 backend 各自实现这套接口：`proxy/gin_proxy.h`、`gpi/gin_gpi.h`、`gdaki/gin_gdaki.h`。以 proxy 为例（`gin_proxy.h:68`），`ncclGinApi_Put<PROXY>::call` 最终调 `postGfd`——把请求写成一个 GFD 描述符放进共享内存（`proxyCtx->pis`/`cis` 是生产者/消费者索引），真正的网络操作由 4.5 的 progress 线程消费。
 
-到这里，一次 `ncclGinPut` 的完整路径就走通了：统一 API 接收调用，分发层按 context 里的 backend 选中实现，第三层的模板特化把请求写成硬件可消费的形式。三层各自只解决一个问题，因此更换 backend 时上层库与第一层都不需要改动。接下来 4.4.1 沿着第三层的 GDAKI 实现继续往下看，追问一次 `Put` 具体用哪条 QP、远端地址与 rkey 从哪里取。
+到这里，一次 `ncclGinPut` 的完整路径就走通了：统一 API 接收调用，分发层按 context 里的 backend 选中实现，第三层的模板特化把请求写成硬件可消费的形式。三层各自只解决一个问题，因此更换 backend 时上层库与第一层都不需要改动。接下来 4.4.1、4.4.2 沿着第三层的 GDAKI 实现继续往下看，分别追问一次 `Put` 具体用哪条 QP、远端地址与 rkey 从哪里取。
 
-#### 4.4.1 QP 选择与参数传递：设备侧怎么定位一次 Put 的目标
+#### 4.4.1 QP 选择：设备侧怎么定位本端的发送队列
 
-前三层回答的是「调用怎么走到 backend」。走到 GDAKI 这一层时，还有两个更具体的问题：一次 `Put` 用哪条 QP、远端地址与 rkey 从哪里取。这正好说明 4.3 里 Host 下发的那些句柄在设备侧如何被消费，因此放在设备侧这一节展开。以下以 GDAKI 为主，因为它由 GPU 自己选定 QP；另外两个 backend 的选择权不在 GPU。
+前三层回答的是「调用怎么走到 backend」。走到 GDAKI 这一层时，第一个具体问题是：一次 `Put` 用哪条 QP。这正好说明 4.3 里 Host 下发的那些句柄在设备侧如何被消费，因此放在设备侧这一节展开。以下以 GDAKI 为主，因为它由 GPU 自己选定 QP；另外两个 backend 的选择权不在 GPU。至于数据要写到对端哪块内存（远端地址与 rkey），放到 4.4.2 单独展开。
 
 **三种 backend 的选择权归属**——同一套 `ncclGinPut` 调用，决定 QP 的位置完全不同：
 
@@ -2519,7 +2519,9 @@ connectionId（选哪张网卡）+ contextId（选该网卡上第几组 QP）
 
 这正解释了为什么 `_signalShadows` 按**全局** `contextIndex` 而非 `contextId` 分片（`gin__funcs.h:97`）：不同 context 的信号表 offset 不同、进度也互相独立，共用一份会互相覆盖进度；按完整二维组合隔离，同一 `contextId` 落在不同连接上时也不会共用槽位。
 
-**远端信息：数据落到对端哪里，由地址与 rkey 决定。** 前面几段都在回答「用哪条本地 QP 发」——`ctx.handle[contextId]` 与 `gdqp + peer` 选出的是本端的发送队列。但一次 RDMA 写是单边操作，接收方 CPU 不参与，发送方投递 WQE 时还必须再告诉网卡「数据写到对端哪块内存、用什么 rkey 校验」，否则对端网卡无从定位目标。所以除本地 QP 外，Put 还有另一半参数——远端地址与 rkey——它们从哪来、何时固化，分两个阶段看：
+#### 4.4.2 远端参数：地址与 rkey 从哪来、何时固化
+
+4.4.1 回答了「用哪条本地 QP 发」——`ctx.handle[contextId]` 与 `gdqp + peer` 选出的是本端的发送队列。但一次 RDMA 写是单边操作，接收方 CPU 不参与，发送方投递 WQE 时还必须再告诉网卡「数据写到对端哪块内存、用什么 rkey 校验」，否则对端网卡无从定位目标。所以除本地 QP 外，Put 还有另一半参数——远端地址与 rkey。本节回答它们从哪来、何时固化，分两个阶段看：
 
 - **建连阶段**：`gdakiFillExchInfo` 把本端的 `qpn`、LID、GID 填入 `gdaki_exch_info`（`gin_host_gdaki.cc:353-357`），全体交换后由 `gdakiConnectQp` 调用 `doca_verbs_qp_attr_set_dest_qp_num` 把**对端 QPN 写进本地 QP 的属性**（`:416`）。一次 RDMA 写涉及通信两端各自独立的 QP：本端 QP 负责投递 WQE，对端 QP 由这个绑定关系确定，配对工作在初始化时一次完成。
 - **运行阶段**：设备侧提交时传给 `doca_gpu_dev_verbs_put` 的参数是 `qp`、远端地址与 rkey、本地地址与 lkey、长度，**不需要再带远端 QP 号**（`gin_gdaki.h:67-71`、`:110`）：
@@ -2547,7 +2549,7 @@ laddr.key  = loadConst(&srcMh->lkey);                      // 本地 lkey
 2. **rkey 与本地 QP 用同一个 `peer` 下标对齐。** `gdqp + peer` 与 `dstMh->rkeys[peer]` 里的 `peer` 是同一个 rank 索引，因此一次 Put 的两半参数——本端 QP、远端 rkey——由同一个 peer 对齐，不存在额外的映射表。
 3. **「下发」发生在初始化期，不是每次 launch kernel。** 窗口注册与 `createContext` 完成时，rkey 数组与 QP 数组就已放进 GPU 可见内存，句柄随 `ncclDevComm` 与窗口一次性交到设备侧；kernel 启动时只是按下标读这些已就绪的指针。这正是 4.3 结尾「控制面一次准备、kernel 不再向 Host 查询」在 GDAKI 参数上的具体体现。
 
-**初始化配置的影响**：
+上面讲的 QP 数组、rkey 表都是初始化期的产物，它们的规模由两个配置决定，归纳如下：
 
 | 配置 | 作用 | 位置 |
 |------|------|------|
