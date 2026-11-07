@@ -2406,6 +2406,29 @@ doca_gpu_dev_verbs_qp* qp = loadConst(&gdaki->gdqp) + peer;   // 按 peer 取本
 
 **context**是连接内部的并发工作区。`ginContextCount` 是上层库申请的总数（DeepEP 里即 `num_allocated_qps`），Host 把它向上取整到连接数的倍数，得到 `nContextsPerComm = nContextsTotal / ginCommCount`（`gin_host.cc:210-225`），再作为 `ginConfig.nContexts` 传给该连接的 `createContext`（`:265-268`）。一个 context 拥有的独立资源因 backend 而异：GDAKI 里每个 context 一个 `ncclGinGdakiGPUContext`，含自己的 `gdqp`（QP 数组）、`counters_table` 与 `signals_table`，分配大小是 `ncontexts * NCCL_GIN_GDAKI_GPU_CONTEXT_MAX_SIZE`（`gin_host_gdaki.cc:516-518`），QP 总数为 `nqps_for_comm = ncontexts * nranks`（`:476-478`）；PROXY 里每个 context 一条独立的 GFD 队列与 `sis`/`cis` 索引（`gin_host_proxy.cc:32-38`、`:174`），signal 槽位按 `contextId * nSignalsPerContext` 分开（`:309`）。因此选 `contextId` 决定的是：**该连接内用哪一组 QP 或哪一条 GFD 队列、哪一段 signal 与 counter 槽位**。多个 context 让不同 CTA 各用一套队列与信号，避免争用同一个发送队列。
 
+这里值得把「避免争用」的机制展开，因为它是多 context 设计的性能根源。先澄清一个易混点：**QP 不是「目的地相同」的副本，而是「每个 peer 一条」**——`gdqp + peer` 意味着一个 context 内 peer 0 到 peer N-1 各有一条 QP，每条两端固定配对，这是 RDMA 的 QP 语义。所以「多 context」带来的不是同一目的地的多条 QP，而是「每个 (context, peer) 组合各自一条独立 QP」。那么同一个 peer 为什么还要在多个 context 里各建一条？因为**一条 QP 是串行提交的共享资源**：它上面有一个发送队列 SQ、一个门铃寄存器 `sq_db`、一个 WQE 槽位计数器 `sq_rsvd_index`、以及一把 `sq_lock`。每次 `put` 都要占 WQE 槽、更新生产者索引、敲门铃，这几步必须互斥（`doca-gpunetio/include/device/doca_gpunetio_dev_verbs_qp.cuh:95-102`、`:443-469`）：
+
+```cpp
+// 提交 WQE 到一条 QP 的关键步骤（节选）
+doca_gpu_dev_verbs_reserve_wq_slots(...);            // 原子加 sq_rsvd_index，占一个 WQE 槽
+doca_gpu_dev_verbs_lock<mode>(&qp->sq_lock);          // 锁住门铃
+doca_gpu_dev_verbs_atomic_max(...&qp->sq_wqe_pi, prod_index);
+doca_gpu_dev_verbs_ring_db(...);                     // 敲 doorbell，通知网卡取 WQE
+doca_gpu_dev_verbs_unlock<mode>(&qp->sq_lock);
+```
+
+若所有 CTA 共用同一条 QP，它们会在 `sq_lock` 上自旋互等（`while (atomicCAS_block(lock, 0, 1) != 0) continue;`，`doca_gpunetio_dev_verbs_common.cuh:338-339`），门铃也退化成串行瓶颈。多 context 的意义，就是给每个并发提交单元（CTA）一套**独占的 QP**，让门铃、槽位计数、锁各自独立，提交互不干扰。这和「多网卡」是同一思路的两个粒度：多网卡分散的是**物理带宽**，多 context 分散的是**同一条 QP 上的提交串行化**。
+
+这一点也体现在 `ncclGinResourceSharingMode` 的三种取值上（`gin_device_common.h:56-60`），它们决定了同一 QP 被共享时的同步代价（`doca_gpunetio_dev_verbs_common.cuh:334-345`、`:305-318`）：
+
+| 模式 | 含义 | 提交时的同步代价 |
+|------|------|-----------------|
+| `EXCLUSIVE` | 单线程独占该 QP | 直接读写 `sq_lock`/槽位计数，无锁无原子 |
+| `CTA` | 一个 CTA 内共享 | `atomicCAS_block` + block 级 fence |
+| `GPU` | 全 GPU 共享 | 全局原子 + 全 GPU 级 fence |
+
+DeepEP 的 `get_qp_mode`（`comm.cuh:56-86`）正是按「SM 数 ≤ QP 数时每个 SM 独占一条 QP（走 `CTA`），SM 数 > QP 数时才退化到 `GPU` 共享」来分配的——**优先独占，就是为了避免锁与原子带来的串行化**。
+
 把上面两层资源与映射画成排布图更直观。下图以「2 张 GIN 网卡、每条连接 3 个 context、每个 context 4 个 peer」为例，展示从网卡到 QP 的并列结构，以及 kernel 侧 `contextIndex` 到 `connectionId` / `contextId` 的映射。其中 channelId 是 Host 建连期 `ncclTopoGetLocalGinDevs` 枚举本 GPU 就近网卡时用的计数器：`localGinDevs[i]` 即 channelId=i 枚举到的那张网卡，连接号 i 直接用 `localGinDevs[i]`，因此 channelId 与 connectionId 在数组下标上一一对应（`topo.cc:2084-2092`）。
 
 ```text
