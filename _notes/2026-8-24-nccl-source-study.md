@@ -2135,9 +2135,11 @@ GIN 的目标就是砍掉这段。对比一下发起路径：
 
 | Backend | 枚举值 | GPU 实际做什么 | 硬件前提 |
 |---------|--------|---------------|----------|
-| **GPI** | `NCCL_NET_DEVICE_GIN_GPI` | 只提交 64 字节抽象描述符（GFD），WQE 生成与报文构造由 NIC 固件接管 | Spectrum-X 平台的固件能力，当前为实验特性 |
-| **GDAKI** | `NCCL_NET_DEVICE_GIN_GDAKI` | GPU 自行构造完整 RDMA WQE，提交到 QP 发送队列并敲 doorbell | ConnectX-6 Dx 及以上 + DOCA |
+| **GPI**（GPU-Push Interface） | `NCCL_NET_DEVICE_GIN_GPI` | 只提交 64 字节抽象描述符（GFD），WQE 生成与报文构造由 NIC 固件接管 | Spectrum-X 平台的固件能力，当前为实验特性 |
+| **GDAKI**（GPUDirect Async Kernel-Initiated，常写作 GDA-KI） | `NCCL_NET_DEVICE_GIN_GDAKI` | GPU 自行构造完整 RDMA WQE，提交到 QP 发送队列并敲 doorbell | ConnectX-6 Dx 及以上 + DOCA |
 | **PROXY** | `NCCL_NET_DEVICE_GIN_PROXY` | 把请求写成描述符放进共享内存，Host Proxy 线程代发 | 无（最通用，也是缺省回退） |
+
+两个缩写的官方出处：`GPI` 见 `docs/userguide/source/api/device_setup.rst:229-233`（"GPU-Push Interface (GPI) ... Requires SpectrumX ... Added as an experimental feature in NCCL 2.30.6"）；`GDAKI` 见 `docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:57`（"GPUDirect Async Kernel-Initiated (GDA-KI) ..."，该术语源自 NVSHMEM，NCCL 沿用）。GPI 的含义是 GPU 线程把描述符直接推入网卡可见的 MMIO 队列（`bindings/nccl4py/nccl/core/typing.py:154`）；GDAKI 则强调通信由 CUDA kernel 内的线程异步发起，而非 Host。
 
 **GPI 与 GDAKI 的本质区别：由谁把传输请求翻译成网卡可执行的 WQE 与报文。** GDAKI 沿用标准 InfiniBand verbs 模型，GPU 线程经 DOCA GPUNetIO 的设备端函数（`doca_gpu_dev_verbs_put/get/signal`，`gin_gdaki.h:100-120`）自行构造完整 WQE（地址、rkey、长度）写入 QP 发送队列，QP 选择与报文格式由 GPU 侧控制——内部实现 `ncclGinIbGdaki` 正是复用标准 `ncclNetIb`（`src/transport/net_ib/gin.cc:314`）。GPI 把这一步卸载：GPU 只写一条 64 字节 GFD（操作码、目的 PE、窗口句柄与偏移）到 `gpu_memic_ptr` 环形队列（`gin_gpi.h:180-228`），后续的 QP 选择、WQE 生成、报文构造全部由 NIC 固件完成。由此形成取舍：GDAKI 控制粒度细、生态成熟；GPI 的 GPU 侧提交开销更小，但控制粒度更粗，且依赖更新的硬件——源码中内置插件只有 GDAKI 与 PROXY（`gin.cc:245-254`），GPI 需外部插件，可用 `NCCL_GIN_TYPE` 显式指定（`transport/net_ib/gin.cc:46`）。
 
