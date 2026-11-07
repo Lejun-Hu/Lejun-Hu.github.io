@@ -2096,7 +2096,7 @@ while (ncclShmem.aborted == 0) {
 
 回顾第三章的 NET 路径：GPU 内核算完 → 更新 `head`/`tail` 进度标记 → Host 侧的 Proxy 线程轮询到这个标记 → 调用 `ncclNet->isend()/irecv()` 提交 RDMA → 网卡才真正开始搬数据。这条链里，**通信的"发起权"在 Host**：GPU 只能把数据准备好、把标记写好，然后等 Host 来"接棒"。每次从"GPU 算完"到"网卡开动"，中间隔着 Host 的轮询周期和线程调度，这对 MoE、KV cache 这类延迟敏感场景已经不够。
 
-GIN 把发起权下放给 GPU：kernel 内的线程直接调用设备端 API 提交 Put/Get/信号量。收益有两点：**① 消除 Host-Device 往返与线程调度延迟**；**② 让"计算-通信重叠"从 kernel 级细化到线程级**——同一个 kernel 里可以一边算一边发，而不必等整个 kernel 结束、下一轮 proxy 介入。
+GIN 把发起权下放给 GPU：kernel 内的线程直接调用设备端 API 提交 Put/Get/信号量。收益有两点：**消除 Host-Device 往返与线程调度延迟**；**让"计算-通信重叠"从 kernel 级细化到线程级**——同一个 kernel 里可以一边算一边发，而不必等整个 kernel 结束、下一轮 proxy 介入。
 
 NVIDIA 之所以在 NCCL 与自家硬件上做这件事，是因为硬件前提已经具备：Volta（SM 7.0）起的 GPU 能直接写网卡的发送队列或描述符。GIN 的作用，就是把这份硬件能力包装成软件可调的 API。它对软硬件配合方式的改变是根本性的——过去是"GPU 写标记、Host 读标记、Host 驱动网卡"，现在变成"GPU 直接驱动网卡（GPI/GDAKI），或写描述符交 Proxy 代发（PROXY）"。为此 NCCL 在两层各加了一套结构：**主机侧**建连接、注册窗口（`ncclGinState` + `ncclGin_t` 插件接口），**设备侧**发起操作（`ncclGinPut`/`ncclGinGet` 等 + 三种 backend 的分发）。
 
@@ -2215,11 +2215,11 @@ ncclTopoGetLocalGinDevs(comm, localGinDevs, &nLocalGinDevs); // 本机 GIN 设�
 ...
 for (int n = 0; n < ginState->ginCommCount; n++) {
   ginState->ncclGin->listen(ginInstance, localGinDevs[n % nLocalGinDevs],
-                            allHandles + ..., &listenComm);   // ① 生成监听句柄
+                            allHandles + ..., &listenComm);   // 1. 生成监听句柄
   ginState->ncclGin->getProperties(..., ginState->ginProps + n);
-  bootstrapAllGather(comm->bootstrap, allHandles, ...);       // ② 全体交换句柄
+  bootstrapAllGather(comm->bootstrap, allHandles, ...);       // 2. 全体交换句柄
   ginState->ncclGin->connect(ginContext, handles, nGinRanks, myGinRank,
-                             listenComm, ginState->ginComms + n);  // ③ 建立连接
+                             listenComm, ginState->ginComms + n);  // 3. 建立连接
   ginState->ncclGin->closeListen(listenComm);
 }
 ```
@@ -2375,37 +2375,53 @@ laddr.key  = loadConst(&srcMh->lkey);                      // 本地 lkey
 
 把这些合到 4.3 的结论上看：QP 句柄、按 peer 索引的 rkey 表、context 数组，都是 Host 在建连与注册阶段准备好、放进 GPU 可见内存并随 `ncclDevComm` 下发的。「kernel 执行期间不再向 Host 查询」具体到 GDAKI，就是按 `contextIndex` 与 `peer` 两个下标直接取用这些资源。
 
-### 4.5 Progress 线程：三种 backend 各靠什么推进
+### 4.5 异步请求的落定：progress 线程与错误上报
 
-GIN 的 Put/Get 是**异步**的：设备端提交完就返回，不等待网卡完成。对于需要 Host 协助推进的 backend，落定过程由 `ncclGinProgress`（`src/gin/gin_host.cc:43-76`）这个 Host 侧线程承担：
+4.4 走到第三层时，一次 `ncclGinPut` 已经把请求写成 WQE 或 GFD，但**提交不等于完成**。设备端 API 返回后，网卡还要实际搬数据、写回完成状态，上层库也还需要一个途径判断操作何时可用、出错时如何得知。4.4 开头把这一侧留给了本节，4.3 第四步那句 `if (ginState->needsProxyProgress && ginState->ginProgress == 0)` 同样留下了一个尚未解释的判断。本节把这条线补完，依次回答三个问题：哪些 backend 需要 Host 侧协助推进、这个线程具体做什么、错误如何上报给调用方。
+
+先回到 4.2 的三种硬件落点。GDAKI 与 GPI 下，GPU 提交的内容由网卡直接执行，落定过程可以在设备侧完成；PROXY 下 GPU 只把 GFD 描述符写进共享队列，队列另一端必须有 Host 线程读取并调用 RMA 后端，网络操作才会真正发出。因此是否需要 Host 侧线程，取决于所选 backend 的**数据路径**，与「有没有 GIN 能力」无关——GPI 这类完全由 GPU 直驱的后端就不需要它。
+
+这个判断在代码里落成一个字段：`ncclNetDeviceHandle_t::needsProxyProgress`，由插件在 `createContext` 返回句柄时填好，`ncclGinDevCommSetup` 遍历所有 context 汇总（`gin_host.cc:291`），任一为 1 就把 `ginState->needsProxyProgress` 置 1。下表列出各 backend 的取值与依据，用来判断线程何时会出现：
+
+| Backend | `needsProxyProgress` | 依据 |
+|---------|---------------------|------|
+| PROXY | 恒为 `1` | `gin_host_proxy.cc:554` 直接写死；设备端只写 GFD 到共享队列，必须由 Host 读出后交给 RMA 后端提交 |
+| GDAKI | 取决于 QP 的 `cpu_proxy` 标志 | `transport/net_ib/gdaki/gin_host_gdaki.cc:745`、`:794`：遍历所有 QP 与伴随 QP，任一需要 CPU 代理则置 1 |
+| 外部插件（含 GPI 实现） | 由插件自定，通常为 `0` | 示例插件 `plugins/gin/example/plugin.c:170` 置 0；GPU 直接写网卡可见队列，无需 Host 推进 |
+
+读表可知，PROXY 是唯一无条件需要 progress 线程的后端；GDAKI 只在个别 QP 需要 CPU 代理时才需要；外部插件多数不需要。这也解释了 4.3 第四步那个条件判断为什么出现在 `createContext` 循环之后：`needsProxyProgress` 不是初始化时写死的常量，而是遍历完插件返回的句柄才确定，所以线程只能在第四步（创建设备侧 context）之后创建。
+
+线程本身由 `ncclGinDevCommSetup` 在满足条件时启动（`gin_host.cc:294-298`），执行体是 `ncclGinProgress`（`gin_host.cc:43-76`）。下面这段代码是它的循环骨架；注意它不包含任何网络逻辑，只按状态遍历所有 device comm 与 GIN 连接，逐个调用插件的 `ginProgress` 回调：
 
 ```cpp
-void* ncclGinProgress(struct ncclGinState* ginState) {
-  while (1) {
-    std::unique_lock<std::mutex> lock(ginState->mutex);
-    if (ginState->ginProgress == 1) {
-      for (auto* dc = ginState->devComms; dc; dc = dc->next)
-        for (int n = 0; n < ginState->ginCommCount; n++)
-          ginState->ncclGin->ginProgress(dc->ginCtx[n]);   // 逐个 context 推进
-      lock.unlock();
-      std::this_thread::yield();
-    } else if (ginState->ginProgress == -1) return NULL;
-    else if (ginState->ginProgress == 0) ginState->cond.wait(lock);   // 暂停时挂起
-  }
+// src/gin/gin_host.cc:48-75（节选）
+while (1) {
+  std::unique_lock<std::mutex> lock(ginState->mutex);
+  if (ginState->ginProgress == 1) {
+    struct ncclGinStateDevComm* dc = ginState->devComms;
+    while (dc) {
+      for (int n = 0; n < ginState->ginCommCount; n++) {
+        ncclResult_t ret = ginState->ncclGin->ginProgress(dc->ginCtx[n]);  // 调到插件
+        if (ret != ncclSuccess) {
+          COMPILER_ATOMIC_STORE(&ginState->asyncResult, ret, std::memory_order_release);
+          ginState->ginProgress = -2;
+          return NULL;                                                     // 出错则退出
+        }
+      }
+      dc = dc->next;
+    }
+    lock.unlock();
+    std::this_thread::yield();
+  } else if (ginState->ginProgress == -1) return NULL;                      // 正常退出
+  else if (ginState->ginProgress == 0) ginState->cond.wait(lock);            // 暂停
 }
 ```
 
-**这个线程是否启动，由所选 backend 自己声明，而不是无条件创建，也不是"没有 GIN 能力时的兜底"。** `ginProgress` 是 `ncclGin_t` 接口里一个可选的回调（`gin_v14.h:59-60`，注释 "Will be called if devHandle.needsProxyProgress=1"）；`needsProxyProgress` 是 `ncclNetDeviceHandle_t` 的字段，由插件在 `createContext` 里填好，`ncclGinDevCommSetup` 遍历所有 context 汇总（`gin_host.cc:291`），任一为 1 才起线程。
+`ginProgress` 是 `ncclGin_t` 接口里的可选回调（`gin_v14.h:59-60`，注释 "Will be called if devHandle.needsProxyProgress=1"）。线程只是驱动者，真正的推进逻辑在插件实现里。以 PROXY 为例，`ncclGinProxyProgress`（`gin_host_proxy.cc:616-636`）对每个 context 做三件事：轮询完成状态（`proxyGinPollCompletions`）、按 rank 轮询 GFD 队列（`proxyGinPollGfd`）、把取出的描述符交给 `proxyGinProcessGfd` 转成 `rmaBackend->iput` / `iputSignal` / `iget` 提交（`:245-262`、`:303-313`），最后调用 RMA 后端自身的 `rmaProgress`（`:633`）。完成信息由 `proxyGinPollCompletions` 写回消费索引 `cis`（`:141-145`），设备侧据此判断请求已落定。
 
-| Backend | `needsProxyProgress` | 原因 |
-|---------|---------------------|------|
-| PROXY | 恒为 `1`（`gin_host_proxy.cc:554`） | 设备端只把 GFD 描述符写进共享内存队列，必须由 Host 线程读出、调用 Net Plugin 的 `isend`/`irecv` 真正提交，完成后写回消费索引 |
-| GDAKI | 取决于 QP 的 `cpu_proxy` 标志（`transport/net_ib/gdaki/gin_host_gdaki.cc:745`、`:794`） | 绝大多数 QP 由 GPU 直接驱动；个别需要 CPU 代理的 QP 才置 1 |
-| GPI / 外部插件 | 通常为 `0`（示例插件 `plugins/gin/example/plugin.c:170`） | GPU 直接写网卡可见的 GFD 队列，无需 Host 推进 |
+线程的启停由 `ginProgress` 状态控制：`0` 暂停（`cond.wait`）、`1` 运行、`-1` 退出（`ncclGinHostFinalize` 置 -1 并 `join`）、`-2` 表示回调报错后自行退出。错误上报有两条路径，`ncclCommGetAsyncError` 都会检查（`init.cc:3459-3474`）：若 `needsProxyProgress` 为真，先读 `ginState->asyncResult`，即 progress 线程写下的结果；随后**无论有没有 progress 线程**，都调用 `ncclGinQueryLastError` 走插件的 `queryLastError`（`gin_v14.h:62-63`）。后者保证 GPI/GDAKI 这类不启动线程的后端，错误同样能被上层库取到。
 
-所以这个线程的存在，说明的是"**当前选中的后端需要 Host 协助推进**"，与「有没有 GIN 能力」无关。选到 GPI 这类完全由 GPU 直驱的后端时，就不会创建它。这也和 4.3 第四步的条件判断对应：`if (ginState->needsProxyProgress && ginState->ginProgress == 0)`。
-
-线程的启停由 `ginProgress` 状态控制：`0` 暂停等待（`cond.wait`）、`1` 运行、`-1` 退出（`ncclGinHostFinalize` 置 -1 并 `join`）。没有 progress 线程时，错误上报走插件的 `queryLastError`（`gin_v14.h:62-63`），`ncclCommGetAsyncError` 会区分这两种路径（`init.cc:3459-3465`）。
+到这里，GIN 从主机侧准备（4.3）、设备侧提交（4.4）到请求落定（4.5）的路径就完整了。下一节把这条路径与第三章的 Host 发起模式并排比较，看发起权下放给 GPU 之后，控制流与数据流分别改变了什么。
 
 ### 4.6 与 Host 发起模式的对比
 
