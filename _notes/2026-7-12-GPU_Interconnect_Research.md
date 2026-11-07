@@ -8,33 +8,33 @@ description: "从NVLink/NVSwitch出发，全景拆解GPU卡间互联协议与交
 published: true
 ---
 
-> 2022年底，ChatGPT发布，将世界推入大模型时代。此后短短四年间，模型参数量从千亿膨胀到万亿，训练集群从百卡跃升到十万卡——但这背后有一个越来越尖锐的矛盾：**单颗芯片的算力增长，远远追不上模型规模膨胀的速度。**
->
-> 解法看似简单：堆更多的芯片一起算。但问题随之而来——芯片之间如何通信？如果一万张GPU之间传输一次数据的延迟过高，算力利用率将急剧下降。这就是现代AI集群的关键瓶颈：**互联通信。**
->
-> 这个领域长期以来被英伟达的NVLink+NVSwitch方案统治，但近年来发生了剧烈的变化：在协议层，AMD、Intel、Google、AWS等国际巨头纷纷推出替代方案，寒武纪、华为昇腾、壁仞、摩尔线程、沐曦等国产力量也在紧追，UALink和OISA等开放标准联盟试图打破封闭垄断；在交换层，博通的Tomahawk Ultra以SUE（Scale-Up Ethernet）架构正面叫板NVSwitch，UALink联盟定义了开放的ULS交换标准，英伟达则推出NVLink Fusion试图拉拢Marvell、Astera Labs等厂商共建生态。底层的交换芯片市场由博通、Marvell等巨头把控，形成了复杂的产业链博弈。
->
-> 而对这些技术的深入理解，对于从事集合通信库（XCCL泛指各厂商通信库）、NCCL、HCCL、RCCL（ROCm Communication Collective Library）等）开发、大规模模型训练以及推理部署的工程师来说，都是绕不开的一课——通信库的本质，就是要在给定的硬件互联拓扑之上，把数据传输的效率压榨到极致；而模型的分布式训练策略与部署方案，同样需要对底层组网有清晰认知，才能合理规划张量并行、流水线并行和数据并行的切分与调度。
+2022 年底 ChatGPT 发布，将世界推入大模型时代。此后短短四年间，模型参数量从千亿膨胀到万亿，训练集群从百卡跃升到十万卡——但这背后有一个越来越尖锐的矛盾：单颗芯片的算力增长，远远追不上模型规模膨胀的速度。
+
+解法看似简单：通过增加参与计算的芯片数量来并行处理。但问题随之而来——芯片之间如何通信？如果一万张 GPU 之间传输一次数据的延迟过高，算力利用率将急剧下降。这就是现代 AI 集群的关键瓶颈：互联通信。
+
+这个领域长期以来由英伟达的 NVLink + NVSwitch 方案主导，但近年来发生了剧烈的变化。在协议层，AMD、Intel、Google、AWS 等国际厂商纷纷推出替代方案，寒武纪、华为昇腾、壁仞、摩尔线程、沐曦等国产力量也在跟进，UALink 和 OISA 等开放标准联盟试图打破封闭的格局；在交换层，博通的 Tomahawk Ultra 以 SUE（Scale-Up Ethernet）架构直接对标 NVSwitch，UALink 联盟定义了开放的 ULS 交换标准，英伟达则推出 NVLink Fusion，联合 Marvell、Astera Labs 等厂商共建生态。底层的交换芯片市场由博通、Marvell 等厂商掌控，形成了复杂的产业链博弈。
+
+对这些技术的深入理解，是从事集合通信库（XCCL，泛指各厂商通信库，如 NCCL、HCCL、RCCL 等）开发、大规模模型训练以及推理部署的工程师必须掌握的内容。通信库的本质，是在给定的硬件互联拓扑之上，把数据传输的效率优化到极致；而模型的分布式训练策略与部署方案，同样需要对底层组网有清晰认知，才能合理规划张量并行（TP）、流水线并行（PP）和数据并行（DP）的切分与调度。
+
+本文从第二章开始涉及大量厂商名称、协议缩写和技术参数。由于各家定制化协议的信息不完全公开透明，部分内容以信息罗列为主——互联领域本身就是一个高度碎片化的技术图谱。如果并不需要深入了解每家厂商的实现细节，可快速浏览以获取整体印象：对于大多数 AI 开发者而言，掌握核心带宽指标、了解英伟达和博通这两家关键供应商的产品线，已经足以应对日常工作中的判断需求。
 
 ---
 
-
-
-本文从第二章开始涉及了大量厂商名称、协议缩写和技术参数，部分内容由于各家定制化协议的信息不完全公开透明，难免以信息罗列为主——因为互联领域本身就是一个极度碎片化的技术图谱。如果并不需要深入了解每家厂商的实现细节，可快速浏览以获取整体印象：对于大多数 AI 开发者而言，掌握核心带宽指标、了解英伟达和博通这两家关键供应商的产品线，已经足以应对日常工作中的判断需求。
-
 ## 一、英伟达的Scale-up与Scale-out体系拆解
 
-在任何一个AI算力集群中，网络实际上分为**两个层次**：
+本章拆解英伟达以 NVLink 与 NVSwitch 为核心的 scale-up 体系，以及以 InfiniBand 与 Spectrum-X 为代表的 scale-out 体系。这两层是理解后续所有替代方案与竞争格局的基准：第二章讨论的各家协议，本质上都是在 scale-up 层与 NVLink 竞争；第三章讨论的交换芯片，则主要服务于 scale-out 层。因此先厘清英伟达如何组织这两个层次，是读懂全文的前提。
 
-**Scale-up（纵向扩展/超节点互联）：** 在**单个NVLink域**内工作——从一台8卡服务器内部的GPU直连，到通过NVSwitch将跨节点GPU编织成全互联的统一计算域。英伟达最新的NVL72机柜将72颗Blackwell GPU置于同一NVLink域中，任意两卡之间1.8TB/s带宽，通过NVSwitch实现all-to-all无阻塞全互联。这一层的特点是**TB/s级带宽、纳秒级延迟、内存语义通信**——大模型的张量并行（TP）和专家并行（EP）重度依赖它。代表技术：**NVLink（GPU直连协议）+ NVSwitch（交换芯片，可扩展到跨节点全互联）**。
+在任何一个 AI 算力集群中，网络实际上分为两个层次。
 
-**Scale-out（横向扩展/跨Pod互联）：** 当一个NVLink域内的GPU数量达到上限（如NVL72的72颗），仍需要更多算力时，就需要将多个NVLink域连接起来。这就是scale-out的领域——不同机柜、不同Pod甚至不同数据中心之间的网络。这一层使用**InfiniBand或以太网（RoCEv2 / UEC，Ultra Ethernet Consortium 超以太网联盟标准）**协议，带宽在几百Gb/s量级，主要承载数据并行（DP）和流水线并行（PP）等对延迟相对宽容的通信模式。InfiniBand本质上是基于**RDMA**的一种私有化协议，由IBTA（InfiniBand Trade Association）定义标准，但实际实现和生态高度集中于英伟达手中。英伟达在这层使用的Quantum InfiniBand交换机和Spectrum以太网交换机均采用**自研Mellanox ASIC（Application-Specific Integrated Circuit，专用集成电路）芯片**。
+**Scale-up（纵向扩展/超节点互联）** 在单个 NVLink 域内工作——从一台 8 卡服务器内部的 GPU 直连，到通过 NVSwitch 将跨节点 GPU 互联成全互联的统一计算域。英伟达最新的 NVL72 机柜将 72 颗 Blackwell GPU 置于同一 NVLink 域中，任意两卡之间 1.8TB/s 带宽，通过 NVSwitch 实现 all-to-all 无阻塞全互联。这一层的特点是 TB/s 级带宽、纳秒级延迟、内存语义通信——大模型的张量并行（TP）和专家并行（EP）重度依赖它。代表技术：NVLink（GPU 直连协议）+ NVSwitch（交换芯片，可扩展到跨节点全互联）。
 
-> 一个容易混淆的点：**NVSwitch通过第二层交换可以实现跨节点互联（如Hopper时代的256 GPU NVLink域），但这仍然是scale-up，不是scale-out。** 因为所有GPU在一个NVLink域内共享统一地址空间，走的是内存语义。真正的scale-out始于NVLink域的边界——当你需要用InfiniBand或Spectrum-X以太网连接不同的NVLink域时，才进入scale-out的领地。
+**Scale-out（横向扩展/跨 Pod 互联）** 当一个 NVLink 域内的 GPU 数量达到上限（如 NVL72 的 72 颗）、仍需要更多算力时，就需要将多个 NVLink 域连接起来。这就是 scale-out 的领域——不同机柜、不同 Pod 甚至不同数据中心之间的网络。这一层使用 InfiniBand 或以太网（RoCEv2 / UEC，Ultra Ethernet Consortium 超以太网联盟标准）协议，带宽在几百 Gb/s 量级，主要承载数据并行（DP）和流水线并行（PP）等对延迟相对宽容的通信模式。InfiniBand 本质上是基于 RDMA 的一种私有化协议，由 IBTA（InfiniBand Trade Association）定义标准，但实际实现和生态高度集中于英伟达手中。英伟达在这层使用的 Quantum InfiniBand 交换机和 Spectrum 以太网交换机，均采用自研 Mellanox ASIC（Application-Specific Integrated Circuit，专用集成电路）芯片。
+
+> 一个容易混淆的点：NVSwitch 通过第二层交换可以实现跨节点互联（如 Hopper 时代的 256 GPU NVLink 域），但这仍然是 scale-up，不是 scale-out。因为所有 GPU 在一个 NVLink 域内共享统一地址空间，走的是内存语义。真正的 scale-out 始于 NVLink 域的边界——当需要用 InfiniBand 或 Spectrum-X 以太网连接不同的 NVLink 域时，才进入 scale-out 的范畴。
 
 ### 1.1 NVLink技术演进简述
 
-NVLink是一种**自研的专有高速串行互联协议**，用于GPU到GPU以及GPU到CPU之间的直接通信。自2014年第一代推出以来，经历了六代演进：
+NVLink 是一种自研的专有高速串行互联协议，用于 GPU 到 GPU 以及 GPU 到 CPU 之间的直接通信。自 2014 年第一代推出以来，它经历了六代演进。下表按代次列出各代对应的 GPU 架构、每 GPU 链路数、总带宽与关键特性，作为后续讨论的基准数据。
 
 | 代次 | 架构 | 每GPU链路数 | 每GPU总带宽(双向) | 关键特性 |
 |---|---|---|---|---|
@@ -45,133 +45,135 @@ NVLink是一种**自研的专有高速串行互联协议**，用于GPU到GPU以�
 | NVLink 5 | Blackwell B200 (2024) | 18 | 1,800 GB/s | 224G PAM4 SerDes，NVL72支持72 GPU全互联 |
 | NVLink 6 | Vera Rubin (CES 2026发布，已全面量产) | 36 | 3,600 GB/s | 链路数翻倍，NVL144聚合带宽520TB/s |
 
-**第五代NVLink关键指标：** 每条链路100GB/s双向速率，Blackwell GPU配备18条链路，单GPU总带宽达到**1.8TB/s**，是PCIe 5.0 x16带宽（128GB/s）的**14倍**。GB200 NVL72系统在单个NVLink域内连接72个GPU，聚合带宽达**130TB/s**。
+第五代 NVLink 的关键指标：每条链路 100GB/s 双向速率，Blackwell GPU 配备 18 条链路，单 GPU 总带宽达到 1.8TB/s，是 PCIe 5.0 x16 带宽（128GB/s）的 14 倍。GB200 NVL72 系统在单个 NVLink 域内连接 72 个 GPU，聚合带宽达 130TB/s。
 
 ### 1.2 英伟达产品命名规则简述
 
-在深入技术细节之前，有必要先厘清英伟达的产品命名体系，因为类似"GB200""NVL72""VR200"这样的代号贯穿本文。
+在深入技术细节之前，有必要先厘清英伟达的产品命名体系，因为类似"GB200""NVL72""VR200"这样的代号贯穿本文。本节分别说明 GPU 架构命名、"G+B" 超级芯片命名、以及"NVL + 数字"的 NVLink 域命名三条规则，并用一张表汇总常见代号的含义。
 
-**GPU 架构命名：致敬科学巨匠。** 英伟达每代 GPU 架构以著名科学家命名：Ampere（A）、Hopper（H）、Blackwell（B）、Rubin（R），下一代为 Feynman。数据中心 GPU 通常以"架构首字母 + 性能层级"命名，如 A100、H100、B200。
+英伟达每代 GPU 架构以著名科学家命名：Ampere（A）、Hopper（H）、Blackwell（B）、Rubin（R），下一代为 Feynman。数据中心 GPU 通常以"架构首字母 + 性能层级"命名，如 A100、H100、B200。
 
-**"G+B" 组合：从 GPU 到超级芯片。** 从 GH200（Grace Hopper）开始，英伟达推出整合 CPU 与 GPU 的"超级芯片"。GB200 即 **G**race CPU + **B**lackwell GPU 的组合，由一个 Grace CPU 与两个 Blackwell GPU 封装而成。下一代 Vera Rubin 平台延续此逻辑——**V**era CPU + **R**ubin GPU，VR200 为其代表型号。
+从 GH200（Grace Hopper）开始，英伟达推出整合 CPU 与 GPU 的"超级芯片"，代号采用"G+B"组合——GB200 即 Grace CPU 与两个 Blackwell GPU 封装而成。下一代 Vera Rubin 平台延续此逻辑：Vera CPU + Rubin GPU，VR200 为其代表型号。
 
-**NVL + 数字：NVLink 域规模。** "NVL72"指通过 NVSwitch 将 **72** 颗 GPU 全互联的机柜系统，NVL144 则为 144 颗。此前 Hopper 时代的 256 GPU NVLink 域同理，只是未以 NVL 命名。
+"NVL + 数字"表示 NVLink 域规模："NVL72"指通过 NVSwitch 将 72 颗 GPU 全互联的机柜系统，NVL144 则为 144 颗。此前 Hopper 时代的 256 GPU NVLink 域同理，只是未以 NVL 命名。
 
 | 代号 | 含义 |
 |---|---|
-| **G** | Grace CPU（ARM 架构自研数据中心 CPU） |
-| **B** | Blackwell GPU |
-| **H** | Hopper GPU |
-| **V** | Vera CPU（下一代自研 CPU） |
-| **R** | Rubin GPU |
-| **NVL72** | 72 GPU 通过 NVLink 全互联的机柜系统 |
-| **GH200** | Grace + Hopper 超级芯片 |
-| **GB200** | Grace + Blackwell 超级芯片 |
-| **VR200** | Vera + Rubin 超级芯片 |
+| G | Grace CPU（ARM 架构自研数据中心 CPU） |
+| B | Blackwell GPU |
+| H | Hopper GPU |
+| V | Vera CPU（下一代自研 CPU） |
+| R | Rubin GPU |
+| NVL72 | 72 GPU 通过 NVLink 全互联的机柜系统 |
+| GH200 | Grace + Hopper 超级芯片 |
+| GB200 | Grace + Blackwell 超级芯片 |
+| VR200 | Vera + Rubin 超级芯片 |
 
 ### 1.3 NVLink、NVSwitch 与 Scale-out 交换网络的分工
 
-在讨论 GPU 互联时，一个常见的混淆是把 NVLink、NVSwitch、InfiniBand、Spectrum-X 这些名词混为一谈。它们实际上分属**三个不同层次**，各自承担不同的角色，共同构成了英伟达从单机到万卡集群的完整互联体系。下面自底向上逐一梳理。
+在讨论 GPU 互联时，一个常见的混淆是把 NVLink、NVSwitch、InfiniBand、Spectrum-X 这些名词混为一谈。它们实际上分属三个不同层次，各自承担不同的角色，共同构成英伟达从单机到万卡集群的完整互联体系。下面自底向上逐一梳理。
 
-**第一层：NVLink — GPU 之间的点对点直连协议。**
+**第 1 层：NVLink —— GPU 之间的点对点直连协议。**
 
-NVLink 定义了相邻两颗 GPU 之间以什么格式、以什么速度传输数据。它是纯粹的物理链路层协议：每颗 Blackwell GPU 配备 18 条 NVLink 链路，每条 100GB/s 双向，单 GPU 总带宽 1.8TB/s。NVLink 工作在服务器机箱内部，解决的是"两颗紧挨着的 GPU 如何高效通信"的问题。它的核心特征是**内存语义**（load/store）——GPU A 可以直接用一条访存指令 `ld.global [addr_on_B]` 读写 GPU B 的 HBM（High Bandwidth Memory，高带宽显存），NVLink 硬件自动完成地址翻译，全程不需要软件介入，延迟在纳秒级。
+NVLink 定义了相邻两颗 GPU 之间以什么格式、以什么速度传输数据。它是纯粹的物理链路层协议：每颗 Blackwell GPU 配备 18 条 NVLink 链路，每条 100GB/s 双向，单 GPU 总带宽 1.8TB/s。NVLink 工作在服务器机箱内部，解决的是"两颗紧挨着的 GPU 如何高效通信"的问题。它的核心特征是内存语义（load/store）——GPU A 可以直接用一条访存指令 `ld.global [addr_on_B]` 读写 GPU B 的 HBM（High Bandwidth Memory，高带宽显存），NVLink 硬件自动完成地址翻译，全程不需要软件介入，延迟在纳秒级。
 
-**第二层：NVSwitch — 将多颗 GPU 编织成全互联域。**
+**第 2 层：NVSwitch —— 将多颗 GPU 互联成全互联域。**
 
-NVLink 只能做点对点连接，而 NVSwitch 是交换芯片，将多颗 GPU 的多条 NVLink 链路汇聚成一个 **all-to-all 全互联交换网络**。单个服务器内的 NVSwitch 让 8 颗 GPU 彼此全速通信；外部 NVSwitch 则跨节点扩展，将一个 NVLink 域扩展到最多 576 颗 GPU（Blackwell 理论值）。NVSwitch 定义了多链路之间的无阻塞交换能力（例如 72×72 全互联），它和 NVLink 共同构成了英伟达的 **scale-up 体系**——追求极致带宽、纳秒延迟和内存语义通信。在同一个 NVLink 域内，所有 GPU 共享由硬件维护的统一地址空间和缓存一致性协议，任何一张卡都可以像访问本地显存一样直接 load/store 远端数据。
+NVLink 只能做点对点连接，而 NVSwitch 是交换芯片，将多颗 GPU 的多条 NVLink 链路汇聚成一个 all-to-all 全互联交换网络。单个服务器内的 NVSwitch 让 8 颗 GPU 彼此全速通信；外部 NVSwitch 则跨节点扩展，将一个 NVLink 域扩展到最多 576 颗 GPU（Blackwell 理论值）。NVSwitch 定义了多链路之间的无阻塞交换能力（例如 72×72 全互联），它和 NVLink 共同构成英伟达的 scale-up 体系——追求极致带宽、纳秒延迟和内存语义通信。在同一个 NVLink 域内，所有 GPU 共享由硬件维护的统一地址空间和缓存一致性协议，任何一张卡都可以像访问本地显存一样直接 load/store 远端数据。
 
-**第三层：Scale-out 交换网络 — InfiniBand 与 Spectrum 以太网两条产品线。**
+**第 3 层：Scale-out 交换网络 —— InfiniBand 与 Spectrum 以太网两条产品线。**
 
-当一个 NVLink 域内的 GPU 数量达到物理上限、仍需更多算力时，就需要将多个 NVLink 域连接起来，进入 scale-out 的领域。这一层与 NVLink 域有本质区别：**不同 NVLink 域之间没有共享地址空间，GPU 不能像域内那样直接用 load/store 跨域读写。** 取而代之的是消息传递模型——数据被显式地打包、寻址，通过网卡和交换机在域间路由。英伟达在这一层布局了两条产品线，面向不同的客户场景和生态策略。
+当一个 NVLink 域内的 GPU 数量达到物理上限、仍需更多算力时，就需要将多个 NVLink 域连接起来，进入 scale-out 的范畴。这一层与 NVLink 域有本质区别：不同 NVLink 域之间没有共享地址空间，GPU 不能像域内那样直接用 load/store 跨域读写。取而代之的是消息传递模型——数据被显式地打包、寻址，通过网卡和交换机在域间路由。英伟达在这一层布局了两条产品线，面向不同的客户场景和生态策略。
 
-**InfiniBand** 是英伟达 2019 年以 69 亿美元收购 Mellanox 后获得的核心资产。它是一种基于 RDMA 的私有化协议，Quantum 系列交换机（NDR 400Gbps / XDR 800Gbps）通过 ConnectX 网卡连接各 GPU，采用 Fat-Tree 胖树拓扑将数百个 NVLink 域组成万卡集群。
+InfiniBand 是英伟达 2019 年以 69 亿美元收购 Mellanox 后获得的核心资产。它是一种基于 RDMA 的私有化协议，Quantum 系列交换机（NDR 400Gbps / XDR 800Gbps）通过 ConnectX 网卡连接各 GPU，采用 Fat-Tree 胖树拓扑将数百个 NVLink 域组成万卡集群。
 
 跨域通信的具体流程是：发送端 GPU 提前向自己的 ConnectX 网卡注册一块本地显存区域并获得 rkey（remote key，远端内存访问密钥），然后发起 RDMA Write 请求，网卡通过 IB 网络直接将数据推送到远端 GPU 已注册的显存区域——全程不经过远端 CPU，接收端 GPU 甚至不参与数据传输。InfiniBand 的核心优势在于极低的端到端延迟和成熟的在网计算 INC（In-Network Computing，以 SHARP（Scalable Hierarchical Aggregation and Reduction Protocol，可扩展分层聚合归约协议）为代表）：交换机在转发数据时可执行随路归约（网侧 Reduction），梯度聚合在交换芯片内完成，数据无需返回 GPU 再转发，对大规模训练的梯度同步至关重要。
 
-**Spectrum-X 以太网** 则是英伟达的另一条产品线，采用自研 Spectrum ASIC 交换芯片，支持 RoCEv2（RDMA over Converged Ethernet）和 UEC 超以太网协议。
+Spectrum-X 以太网则是英伟达的另一条产品线，采用自研 Spectrum ASIC 交换芯片，支持 RoCEv2（RDMA over Converged Ethernet）和 UEC 超以太网协议。
 
-它的战略定位是为不想绑定 InfiniBand 私有生态的云厂商提供基于标准以太网的 scale-out 替代方案。与 InfiniBand 相比，Spectrum-X 的延迟稍高但生态更开放——可以利用已有的以太网运维工具和人才储备，成本更低、供应链更灵活。这一层也正是英伟达与博通、Marvell 等外部交换芯片厂商**直接竞争**的主战场：博通的 Tomahawk/Jericho 系列和 Marvell 的 Teralynx 系列都是以太网交换芯片，与 Spectrum-X 争夺同一批云数据中心客户。
+Spectrum-X 的战略定位，是为不想绑定 InfiniBand 私有生态的云厂商提供基于标准以太网的 scale-out 替代方案。与 InfiniBand 相比，Spectrum-X 的延迟稍高但生态更开放——可以利用已有的以太网运维工具和人才储备，成本更低、供应链更灵活。这一层也正是英伟达与博通、Marvell 等外部交换芯片厂商直接竞争的主要领域：博通的 Tomahawk/Jericho 系列和 Marvell 的 Teralynx 系列都是以太网交换芯片，与 Spectrum-X 争夺同一批云数据中心客户。
 
-**那么 NVLink 域内的 load/store 和跨域的 RDMA 之间是如何协作的？** 答案是 NCCL 通信库在中间做了抽象。NCCL 会自动感知集群的物理拓扑：同一个 NVLink 域内的 GPU 之间使用 NVLink transport，走高效的内存语义通道；跨域通信则走 IB/RoCE transport，把数据传输封装为 RDMA 消息。对上层 PyTorch 用户来说，一行 `all_reduce(gradients)` 在 8 卡 NVLink 域内和在 8192 卡的 IB 网络上都能正确执行，底层通信方式的切换是透明的——只是后者的延迟和带宽会不可避免地受域间物理链路的限制。
+那么 NVLink 域内的 load/store 和跨域的 RDMA 之间是如何协作的？答案是 NCCL 通信库在中间做了抽象。NCCL 会自动感知集群的物理拓扑：同一个 NVLink 域内的 GPU 之间使用 NVLink transport，走高效的内存语义通道；跨域通信则走 IB/RoCE transport，把数据传输封装为 RDMA 消息。对上层 PyTorch 用户来说，一行 `all_reduce(gradients)` 在 8 卡 NVLink 域内和在 8192 卡的 IB 网络上都能正确执行，底层通信方式的切换是透明的——只是后者的延迟和带宽会不可避免地受域间物理链路的限制。
 
-三条线的关系可以概括为：**NVLink 定义了单条链路的带宽，NVSwitch 决定了多条链路如何无阻塞交换，而 InfiniBand / Spectrum-X 负责将不同的 NVLink 域连接为万卡集群。** NVLink + NVSwitch 属于 scale-up，域内共享地址空间、走内存语义；InfiniBand / Spectrum-X 属于 scale-out，域间走消息语义，通过 RDMA 和 NCCL 抽象层无缝衔接。
+三条线的关系可以概括为：NVLink 定义单条链路的带宽，NVSwitch 决定多条链路如何无阻塞交换，而 InfiniBand / Spectrum-X 负责将不同的 NVLink 域连接为万卡集群。NVLink + NVSwitch 属于 scale-up，域内共享地址空间、走内存语义；InfiniBand / Spectrum-X 属于 scale-out，域间走消息语义，通过 RDMA 和 NCCL 抽象层衔接。
 
-当前最具代表性的应用是 **GB200 NVL72**：18 个计算托盘（72 颗 Blackwell GPU）通过 9 个 NVSwitch 托盘实现全部互联，任意两颗 GPU 之间均为 1.8TB/s 全速通信。如果要将多个 NVL72 机柜连接起来组成更大的集群，则需要通过每颗 GPU 配备的 ConnectX-7 InfiniBand 网卡接入 Quantum 交换机，进入 scale-out 网络。
+当前最具代表性的应用是 GB200 NVL72：18 个计算托盘（72 颗 Blackwell GPU）通过 9 个 NVSwitch 托盘实现全部互联，任意两颗 GPU 之间均为 1.8TB/s 全速通信。如果要将多个 NVL72 机柜连接起来组成更大的集群，则需要通过每颗 GPU 配备的 ConnectX-7 InfiniBand 网卡接入 Quantum 交换机，进入 scale-out 网络。
 
 ### 1.4 为什么NVSwitch不能直接扩展到万卡？
 
-核心原因可以归结为**物理极限、拓扑约束和语义差异**三个层面：
+上一节说明了 NVSwitch 在单个 NVLink 域内实现全互联的能力。本节回答一个自然的问题：既然 NVSwitch 能高效互联数十颗 GPU，为什么不把它直接扩展到万卡规模？答案可以归结为物理极限、拓扑约束和语义差异三个层面，此外还有功耗散热方面的约束。
 
-**1. 铜缆的物理距离极限。** NVLink 5在1.8TB/s的带宽下使用无源铜缆（passive copper），信号有效传输距离仅**2-2.5米**，刚好覆盖上下各9个计算托盘的纵向跨度。这就是为什么NVL72机柜中NVSwitch必须放在正中央——被上下各9个计算托盘夹在中间。
+**1. 铜缆的物理距离极限。** NVLink 5 在 1.8TB/s 的带宽下使用无源铜缆（passive copper），信号有效传输距离仅 2-2.5 米，刚好覆盖上下各 9 个计算托盘的纵向跨度。这就是为什么 NVL72 机柜中 NVSwitch 必须放在正中央——被上下各 9 个计算托盘夹在中间。
 
-**2. 全互联拓扑不可扩展。** NVSwitch构建的是**all-to-all全互联拓扑**——域内任意两颗GPU之间都是直连的。这要求交换芯片的端口数 ≥ GPU数。如果要做1,000 GPU的全互联，需要NVSwitch芯片数量和互联线缆呈**O(n²)增长**，在物理上不可行。而InfiniBand使用的是**Fat-Tree或Dragonfly拓扑**，通过多层交换机级联来实现对数级别的扩展。
+**2. 全互联拓扑不可扩展。** NVSwitch 构建的是 all-to-all 全互联拓扑——域内任意两颗 GPU 之间都是直连的。这要求交换芯片的端口数大于等于 GPU 数。如果要做 1,000 GPU 的全互联，需要的 NVSwitch 芯片数量和互联线缆呈 O(n²) 增长，在物理上不可行。而 InfiniBand 使用的是 Fat-Tree 或 Dragonfly 拓扑，通过多层交换机级联来实现对数级别的扩展。
 
-**3. 内存语义 vs 消息语义。** NVLink域内的GPU共享**统一地址空间**，走的是内存语义（load/store）——这种模式要求极低的延迟和极强的缓存一致性，维护大规模一致性协议的复杂度急剧攀升。InfiniBand走的是**消息传递语义**——数据被显式地打包、寻址、路由、传输，天然适合大规模分布式系统。
+**3. 内存语义与消息语义的差异。** NVLink 域内的 GPU 共享统一地址空间，走的是内存语义（load/store）——这种模式要求极低的延迟和极强的缓存一致性，维护大规模一致性协议的复杂度急剧攀升。InfiniBand 走的是消息传递语义——数据被显式地打包、寻址、路由、传输，天然适合大规模分布式系统。
 
-**4. 功耗和散热。** NVL72已经是120kW的功耗怪兽，需要全液冷。Scale-up域的GPU数量每翻一倍，交换芯片和互联缆的功耗都超线性增长。
+**4. 功耗和散热。** NVL72 已经是 120kW 的高功耗系统，需要全液冷。Scale-up 域的 GPU 数量每翻一倍，交换芯片和互联线缆的功耗都呈超线性增长。
 
-> **总结：这是一个"分工不同"的设计，不是性能优劣的问题。** NVSwitch/NVLink负责的是**在一个NVLink域内实现GPU间极致带宽和内存语义通信**。InfiniBand/Spectrum-X负责的是**将多个NVLink域连接为大规模集群**——追求可扩展性、容错性、标准化管理。两者在架构上是互补关系，而非竞争关系。
+> 总结：这是分工不同的设计，不是性能优劣的问题。NVSwitch/NVLink 负责的是在一个 NVLink 域内实现 GPU 间极致带宽和内存语义通信；InfiniBand/Spectrum-X 负责的是将多个 NVLink 域连接为大规模集群——追求可扩展性、容错性、标准化管理。两者在架构上是互补关系，而非竞争关系。
 
 ### 1.5 NVLink底层协议栈
 
-- **物理层**：采用自研224G PAM4 SerDes技术。PAM4（4-Level Pulse Amplitude Modulation，四电平脉冲幅度调制）是一种通过 4 个不同电压电平（00/01/10/11）在单个符号周期内传输 2 比特数据的高阶调制方式——相比传统的 NRZ（Non-Return-to-Zero，不归零编码）每个符号仅传输 1 比特，PAM4 在同等频率下带宽翻倍，但代价是信噪比容限降低、对信号完整性要求更高。从 Ampere 的 56Gbps → Hopper 的 112Gbps → Blackwell 的 224Gbps，SerDes 速率持续翻倍。
-- **信令协议**：通过 4 对差分信号线构成一个"sub-link"作为基本物理单元。信号通过铜缆 Twinax 介质传输，在接收端使用 ADC + 高级 DSP 进行信号均衡和时钟恢复。
-- **数据链路层**：使用FLIT（Flow Control Unit）固定大小包格式，包含FEC（Forward Error Correction，前向纠错）。
-- **协议层**：专有协议，支持GPU间直接内存访问（P2P RDMA-like操作），但与标准RDMA（如RoCEv2）不同。NVLink 3.0起采用分组交换架构，通过NVSwitch芯片实现all-to-all全互联。
+前几节从系统层面说明了 NVLink 的带宽规模、命名体系与分工定位。本节进入 NVLink 的协议实现层面，按自底向上的顺序说明其物理层、信令协议、数据链路层与协议层的技术构成，以建立对 NVLink 工作机制的具体认知。
+
+- **物理层**：采用自研 224G PAM4 SerDes 技术。PAM4（4-Level Pulse Amplitude Modulation，四电平脉冲幅度调制）是一种通过 4 个不同电压电平（00/01/10/11）在单个符号周期内传输 2 比特数据的高阶调制方式——相比传统的 NRZ（Non-Return-to-Zero，不归零编码）每个符号仅传输 1 比特，PAM4 在同等频率下带宽翻倍，但代价是信噪比容限降低、对信号完整性要求更高。从 Ampere 的 56Gbps，到 Hopper 的 112Gbps，再到 Blackwell 的 224Gbps，SerDes 速率持续翻倍。
+- **信令协议**：通过 4 对差分信号线构成一个"sub-link"作为基本物理单元。信号通过铜缆 Twinax 介质传输，在接收端使用 ADC 和高级 DSP 进行信号均衡和时钟恢复。
+- **数据链路层**：使用 FLIT（Flow Control Unit）固定大小包格式，包含 FEC（Forward Error Correction，前向纠错）。
+- **协议层**：专有协议，支持 GPU 间直接内存访问（P2P RDMA-like 操作），但与标准 RDMA（如 RoCEv2）不同。NVLink 3.0 起采用分组交换架构，通过 NVSwitch 芯片实现 all-to-all 全互联。
 
 ### 1.6 成本拆解
 
-作为 AI 技术从业者，我们日常接触最多的是模型 API 的调用成本——每百万 token 多少钱、不同厂商之间如何比价。但 API 定价的背后，是数千颗 GPU 组成的算力集群、TB 级互联带宽、全液冷散热系统以及高昂的 HBM 显存采购成本在支撑。理解一台 AI 服务器机柜的成本构成，不仅有助于把握"算力为什么这么贵"，也能对行业供应链格局建立更清晰的认知。
+作为 AI 技术从业者，日常接触最多的是模型 API 的调用成本——每百万 token 多少钱、不同厂商之间如何比价。但 API 定价的背后，是数千颗 GPU 组成的算力集群、TB 级互联带宽、全液冷散热系统以及高昂的 HBM 显存采购成本在支撑。理解一台 AI 服务器机柜的成本构成，不仅有助于把握"算力为什么这么贵"，也能对行业供应链格局建立更清晰的认知。
 
-以下数据主要来自摩根士丹利、SemiAnalysis 等机构的公开研报，具体数字因采购规模、渠道和时点不同可能存在差异，但其量级和比例关系可以帮助读者建立一个可靠的参考框架。
+以下数据主要来自摩根士丹利、SemiAnalysis 等机构的公开研报，具体数字因采购规模、渠道和时点不同可能存在差异，但其量级和比例关系可以帮助建立一个可靠的参考框架。
 
-以GB300 NVL72（Blackwell Ultra）和 VR200 NVL72（Vera Rubin）机架为例（数据来源：摩根士丹利 2026 年 5 月研报、SemiAnalysis）：
+以 GB300 NVL72（Blackwell Ultra）和 VR200 NVL72（Vera Rubin）机架为例（数据来源：摩根士丹利 2026 年 5 月研报、SemiAnalysis）：
 
 | 核心组件 | GB300 NVL72 | 占比 | VR200 NVL72 | 占比 | 增幅 |
 |---|---|---|---|---|---|
 | GPU | $2,513,700（72颗 B300） | 63.0% | $3,959,000（72颗 Rubin） | 50.8% | +57% |
-| 显存/内存 | $373,500（HBM3e，第三代高带宽显存的增强版） | 9.4% | $2,001,600（HBM4（第四代高带宽显存）+ LPDDR5X（Low Power Double Data Rate 5X，低功耗双倍数据率内存）） | 25.7% | +435% |
+| 显存/内存 | $373,500（HBM3e） | 9.4% | $2,001,600（HBM4 + LPDDR5X） | 25.7% | +435% |
 | NVLink Switch 交换芯片 | $64,800（18颗 NVSwitch 5） | 1.6% | $144,000（36颗 NVSwitch 6） | 1.8% | +122% |
-| 网络芯片（ConnectX / BlueField 等） | $261,000 | 6.5% | $576,000（含 ConnectX-9、BlueField-4 DPU（Data Processing Unit，数据处理器）等） | 7.4% | +121% |
+| 网络芯片（ConnectX / BlueField 等） | $261,000 | 6.5% | $576,000（含 ConnectX-9、BlueField-4 等） | 7.4% | +121% |
 | CPU | —（Grace CPU 集成于 GPU 托盘） | — | ~$180,000（36颗 Vera CPU） | 2.3% | 新增 |
 | 液冷系统（含 CDU） | $49,860 | 1.2% | $122,000 | 1.6% | +145% |
 | PCB | $35,100 | 0.9% | $116,730 | 1.5% | +233% |
 | 其他（电源/MLCC/ODM组装/结构件等） | ~$692,040 | 17.4% | ~$700,670 | 9.0% | +1% |
-| **整柜总BOM** | **~$3,990,000** | **100%** | **~$7,800,000** | **100%** | **+95%** |
+| 整柜总BOM | ~$3,990,000 | 100% | ~$7,800,000 | 100% | +95% |
 
-> 注：BOM（Bill of Materials，物料清单）指产品所有零部件的采购成本明细汇总，不包含研发、营销、运输等间接费用。以上数据均为投行估算的硬件采购成本，并非英伟达官方报价。
+表中涉及的术语：HBM3e 是第三代高带宽显存的增强版；HBM4 是第四代高带宽显存；LPDDR5X（Low Power Double Data Rate 5X）是低功耗双倍数据率内存；DPU（Data Processing Unit）是数据处理器；BOM（Bill of Materials，物料清单）指产品所有零部件的采购成本明细汇总，不包含研发、营销、运输等间接费用。以上数据均为投行估算的硬件采购成本，并非英伟达官方报价。
 
-> **关键变化：** GPU 在 BOM 中的比例从 GB300 的 **63%** 下降至 VR200 的 **51%**，而显存/内存从 **9%** 暴涨至 **26%**，成为最大增量来源。这意味着 AI 算力硬件的价值正在从单一 GPU 扩散至存储、互连、PCB 等全链条。VR200 中新增的 Vera CPU、BlueField-4 DPU 以及翻倍的 NVSwitch 和 ConnectX 数量，进一步推高了非 GPU 组件的价值占比。
+> 关键变化：GPU 在 BOM 中的比例从 GB300 的 63% 下降至 VR200 的 51%，而显存/内存从 9% 上升至 26%，成为最大增量来源。这意味着 AI 算力硬件的价值正在从单一 GPU 扩散至存储、互连、PCB 等全链条。VR200 中新增的 Vera CPU、BlueField-4 DPU 以及翻倍的 NVSwitch 和 ConnectX 数量，进一步推高了非 GPU 组件的价值占比。
 
 ---
 
 ## 二、替代互联协议全景：Scale-up 层
 
-上一节我们拆解了英伟达以 NVLink + NVSwitch 为核心的 scale-up 体系。但英伟达并非这一层的唯一玩家——随着大模型训练对 GPU 间带宽的需求持续攀升，越来越多的厂商开始推出自己的 scale-up 互联方案，试图在 GPU 直连这一核心环节打破 NVLink 的垄断。这些方案既有 AMD、Google、AWS 等国际巨头的自研协议，也有 UALink 这样的开放标准联盟，还有华为昇腾、寒武纪、壁仞等国产力量在紧追。
+上一章拆解了英伟达以 NVLink + NVSwitch 为核心的 scale-up 体系。但英伟达并非这一层的唯一参与者——随着大模型训练对 GPU 间带宽的需求持续攀升，越来越多的厂商开始推出自己的 scale-up 互联方案，试图在 GPU 直连这一核心环节打破 NVLink 的单一供应商格局。
 
-下文将依次对各家方案进行简要分析和对比，重点关注每项技术的核心设计思路、关键带宽指标、扩展规模上限以及商用成熟度，帮助读者快速建立 scale-up 层的竞争全景。需要说明的是，本文对各协议的介绍属于概览性总结，具体的协议层细节繁琐且枯燥，读者可快速浏览以获取大致印象，在此不必深究细节实现。
+这些方案中，有 AMD、Google、AWS 等厂商的自研协议，有 UALink 这样的开放标准联盟，也有华为昇腾、寒武纪、壁仞等国产力量在跟进。本章先介绍海外厂商方案（2.1 节），再介绍国产方案（2.2 节），重点关注每项技术的核心设计思路、关键带宽指标、扩展规模上限以及商用成熟度。需要说明的是，本文对各协议的介绍属于概览性总结，具体的协议层细节可快速浏览以获取大致印象，不必在此深究。
 
 ### 2.1 国外厂商方案
 
-下表汇总了当前海外主要 scale-up 互联协议的关键参数。除了 NVLink 之外，各家的方案在开放程度和生态策略上差异明显——有的走专有封闭路线（Google ICI、AWS NeuronLink），有的试图建立开放标准联盟（UALink），还有的基于既有通用标准做延伸（PCIe 6.0、CXL 4.0）。
+海外主要 scale-up 互联协议在开放程度和生态策略上差异明显——有的走专有封闭路线（Google ICI、AWS NeuronLink），有的试图建立开放标准联盟（UALink），还有的基于既有通用标准做延伸（PCIe 6.0、CXL 4.0）。下表先汇总各方案的关键参数，作为整体地图，随后逐一展开。
 
 | 互联协议 | 提出方 | 每GPU/芯片带宽 | 最大扩展规模 | 开放程度 | 商用状态 |
 |---|---|---|---|---|---|
-| **AMD Infinity Fabric** | AMD | ~1.075 TB/s (MI300X, 7链路) | 8 GPU (OAM（OCP Accelerator Module，开放计算项目加速器模块） Mesh) | AMD专有，软件开源(ROCm) | 已量产 (MI300X/MI355X) |
-| **UALink 1.0** | UALink联盟 (AMD/Intel/Google/Meta/Microsoft等) | 800 GB/s (4通道) | 1,024加速器 | 开放标准 | 规范已发布(2025.4)，首批硬件预计2026-2027 |
-| **Google ICI** | Google | 数百GB/s (TPU v5p/v7) | 9,216芯片 (Ironwood) | Google专有，不对外 | 已量产多代，仅限 Google Cloud |
-| **AWS NeuronLink** | Amazon (AWS) | 1,024 GB/s (Trainium2) | 64芯片 (UltraServer) | AWS专有，不对外 | 已量产 (Trainium2) |
-| **PCIe 6.0** | PCI-SIG | 256 GB/s (x16双向) | 点对点，需 Switch 扩展 | 完全开放标准 | 已商用 |
-| **CXL 4.0** | CXL联盟 | 128 GT/s | 跨机架内存池化 | 开放标准 | 规范已发布(2025.11) |
+| AMD Infinity Fabric | AMD | ~1.075 TB/s (MI300X, 7链路) | 8 GPU (OAM（OCP Accelerator Module，开放计算项目加速器模块） Mesh) | AMD专有，软件开源(ROCm) | 已量产 (MI300X/MI355X) |
+| UALink 1.0 | UALink联盟 (AMD/Intel/Google/Meta/Microsoft等) | 800 GB/s (4通道) | 1,024加速器 | 开放标准 | 规范已发布(2025.4)，首批硬件预计2026-2027 |
+| Google ICI | Google | 数百GB/s (TPU v5p/v7) | 9,216芯片 (Ironwood) | Google专有，不对外 | 已量产多代，仅限 Google Cloud |
+| AWS NeuronLink | Amazon (AWS) | 1,024 GB/s (Trainium2) | 64芯片 (UltraServer) | AWS专有，不对外 | 已量产 (Trainium2) |
+| PCIe 6.0 | PCI-SIG | 256 GB/s (x16双向) | 点对点，需 Switch 扩展 | 完全开放标准 | 已商用 |
+| CXL 4.0 | CXL联盟 | 128 GT/s | 跨机架内存池化 | 开放标准 | 规范已发布(2025.11) |
 
 **1. AMD Infinity Fabric (XGMI)**
 
-AMD 的 Infinity Fabric 最初是为 CPU 与 GPU 之间以及 Chiplet 芯粒之间的高速通信而设计的内部互联总线，后来被扩展为 XGMI（External Global Memory Interconnect），专门用于 Instinct 系列 GPU 之间的卡间直连。这一需求源于 AMD 在数据中心 GPU 市场对 NVIDIA 的追赶——如果不能在多卡互联带宽上与 NVLink 抗衡，即使单卡算力追平，集群扩展效率也会严重受限。
+AMD 的 Infinity Fabric 最初是为 CPU 与 GPU 之间以及 Chiplet 芯粒之间的高速通信而设计的内部互联总线，后来被扩展为 XGMI（External Global Memory Interconnect），专门用于 Instinct 系列 GPU 之间的卡间直连。这一需求源于 AMD 在数据中心 GPU 市场对 NVIDIA 的追赶——如果不能在多卡互联带宽上与 NVLink 竞争，即使单卡算力追平，集群扩展效率也会严重受限。
 
-XGMI 的设计思路与 NVLink 类似，都是专有的 GPU 直连协议，但两者在规模上有明显差距。以 MI300X 为例，每颗芯片配备 7 条第四代 Infinity Fabric 链路，每条 128 GB/s 双向，总带宽约 **1.075 TB/s**，与 H100 的 NVLink 4（900 GB/s）基本处于同一量级。但 XGMI 目前仅支持 **8 颗 GPU** 以环形或网格拓扑互联，超出 8 卡就需要切换到以太网，这在实际大模型训练中是一个明显的规模瓶颈。
+XGMI 的设计思路与 NVLink 类似，都是专有的 GPU 直连协议，但两者在规模上有明显差距。以 MI300X 为例，每颗芯片配备 7 条第四代 Infinity Fabric 链路，每条 128 GB/s 双向，总带宽约 1.075 TB/s，与 H100 的 NVLink 4（900 GB/s）基本处于同一量级。但 XGMI 目前仅支持 8 颗 GPU 以环形或网格拓扑互联，超出 8 卡就需要切换到以太网，这在实际大模型训练中是一个明显的规模瓶颈。
 
-软件栈方面，AMD 的 **ROCm + RCCL** 对标 CUDA + NCCL，且 ROCm 完全开源，对部分云厂商有较强吸引力。AMD 也意识到专用协议的局限：下一代 MI400 系列（2026 年下半年）将放弃纯自研路线，转而支持开放的 **UALink** 协议，XGMI 则退居为 Chiplet 片内互联的角色。从量产状态来看，MI300X 和 MI355X 均已大规模出货，MI355X 采用 3nm 工艺和 CDNA 4 架构，配备 288 GB HBM3e，互联规格与 MI300X 相近但制程明显领先。
+软件栈方面，AMD 的 ROCm + RCCL 对标 CUDA + NCCL，且 ROCm 完全开源，对部分云厂商有较强吸引力。AMD 也意识到专用协议的局限：下一代 MI400 系列（2026 年下半年）将放弃纯自研路线，转而支持开放的 UALink 协议，XGMI 则退居为 Chiplet 片内互联的角色。从量产状态来看，MI300X 和 MI355X 均已大规模出货，MI355X 采用 3nm 工艺和 CDNA 4 架构，配备 288 GB HBM3e，互联规格与 MI300X 相近但制程明显领先。下表将 XGMI 与 NVLink 4/5 做横向对比。
 
 | 对比维度 | AMD XGMI (MI300X) | NVIDIA NVLink 4 (H100) | NVIDIA NVLink 5 (B200) |
 |---|---|---|---|
@@ -182,9 +184,9 @@ XGMI 的设计思路与 NVLink 类似，都是专有的 GPU 直连协议，但�
 
 **2. UALink（Ultra Accelerator Link）**
 
-UALink 诞生于一个清晰的行业共识：超大规模云厂商（AWS、Google、Meta、Microsoft）不希望被 NVLink 单一供应商锁定。如果每部署一个 AI 集群都要连带采购整套 NVLink + NVSwitch + InfiniBand，议价权和供应链灵活性将完全丧失。于是 2024 年，AMD、Intel、Google、Meta、Microsoft、AWS、Cisco、HPE 八家联合发起 UALink 联盟，目标是定义一个**开放的、多供应商的 scale-up 互联标准**，让任何加速器厂商都可以使用同一套协议和交换芯片。截至 2026 年 1 月，联盟成员已超过 100 家。
+UALink 诞生于一个清晰的行业共识：超大规模云厂商（AWS、Google、Meta、Microsoft）不希望被 NVLink 单一供应商锁定。如果每部署一个 AI 集群都要连带采购整套 NVLink + NVSwitch + InfiniBand，议价权和供应链灵活性将完全丧失。于是 2024 年，AMD、Intel、Google、Meta、Microsoft、AWS、Cisco、HPE 八家联合发起 UALink 联盟，目标是定义一个开放的、多供应商的 scale-up 互联标准，让任何加速器厂商都可以使用同一套协议和交换芯片。截至 2026 年 1 月，联盟成员已超过 100 家。
 
-UALink 1.0 规范于 2025 年 4 月发布，核心技术规格如下：每通道 200 GT/s（Giga Transfers per second）。需要说明的是，UALink 采用特定编码方式，此处 1 Transfer 对应 1 Byte 有效数据，因此 200 GT/s 等效于 200 GB/s；4 通道聚合 **800 GB/s** 每 GPU，支持最多 **1,024 个加速器**在单一网络架构中互联——这一数字超过了 NVLink 5 的 576 GPU。协议支持加速器之间直接读写内存（内存语义），在物理层复用了成熟以太网 SerDes 技术以降低实现成本，但上层协议栈完全重新设计以适配 GPU 的数据流特征。更重要的是，UALink 同时定义了开放的交换芯片标准 **ULS（UALink Switch）**，允许博通、Marvell、Astera Labs 等第三方厂商生产兼容芯片，从而创建一个类似以太网交换芯片的多供应商市场。
+UALink 1.0 规范于 2025 年 4 月发布，核心技术规格如下：每通道 200 GT/s（Giga Transfers per second）。需要说明的是，UALink 采用特定编码方式，此处 1 Transfer 对应 1 Byte 有效数据，因此 200 GT/s 等效于 200 GB/s；4 通道聚合 800 GB/s 每 GPU，支持最多 1,024 个加速器在单一网络架构中互联——这一数字超过了 NVLink 5 的 576 GPU。协议支持加速器之间直接读写内存（内存语义），在物理层复用了成熟以太网 SerDes 技术以降低实现成本，但上层协议栈完全重新设计以适配 GPU 的数据流特征。更重要的是，UALink 同时定义了开放的交换芯片标准 ULS（UALink Switch），允许博通、Marvell、Astera Labs 等第三方厂商生产兼容芯片，从而创建一个类似以太网交换芯片的多供应商市场。
 
 UALink 2.0 于 2026 年 4 月发布，新增了在网计算、芯粒定义和可管理性等企业级特性。商用进度方面：AMD 的 MI400 系列将是首批原生支持 UALink 的 GPU，预计 2026 年下半年出货；原生 UALink 交换 ASIC 则要等到 2027 年左右面世。这意味着当前存在一个"协议先行、硬件跟进"的窗口期——早期系统可能通过博通 Tomahawk 等以太网交换芯片隧道承载 UALink 流量。
 
@@ -192,13 +194,13 @@ UALink 2.0 于 2026 年 4 月发布，新增了在网计算、芯粒定义和可
 
 **3. Google ICI（Inter-Chip Interconnect）**
 
-Google 的 ICI 是本文所有方案中最"异类"的一个——它不属于任何开放标准，也不对标 NVLink 的设计范式，而是一套面向 TPU（Tensor Processing Unit，张量处理器）脉动阵列架构**从零开始全栈自研**的芯片间互联体系。
+Google 的 ICI 是本文所有方案中最特殊的一个——它不属于任何开放标准，也不对标 NVLink 的设计范式，而是一套面向 TPU（Tensor Processing Unit，张量处理器）脉动阵列架构、从零开始全栈自研的芯片间互联体系。
 
-Google 开发 TPU 的初衷非常直接：搜索排序、广告推荐、Gemini 大模型等内部 AI 工作负载规模巨大，完全依赖外购 GPU 既不经济也无法针对自身业务做深度优化。ICI 作为 TPU 的专用互联协议，从第一代 TPU（2015 年）就开始内部部署，至今已经过七代演进。最新的 Ironwood（TPU v7）代表了当前 ICI 的工程极限：单个 Pod 可连接 **9,216 颗芯片**，最大通信跳数仅 7 跳。
+Google 开发 TPU 的初衷非常直接：搜索排序、广告推荐、Gemini 大模型等内部 AI 工作负载规模巨大，完全依赖外购 GPU 既不经济也无法针对自身业务做深度优化。ICI 作为 TPU 的专用互联协议，从第一代 TPU（2015 年）就开始内部部署，至今已经过七代演进。最新的 Ironwood（TPU v7）代表了当前 ICI 的工程极限：单个 Pod 可连接 9,216 颗芯片，最大通信跳数仅 7 跳。
 
-ICI 的设计与 NVLink 几乎走的是完全相反的路线。NVLink 依赖 NVSwitch 构建 all-to-all 全互联交换网络，而 ICI 采用 **4×4×4 三维环面拓扑（3D Torus）**——每颗 TPU 只与六个方向上的邻居直接相连，数据经过中间节点逐跳转发。这种规则的邻居结构表面上不如交换机灵活，但对于 Transformer 训练中高度规整的 AllReduce 和 AllGather 通信模式，Torus 网络反而能获得极高的带宽利用率，且链路数量不随规模增长。
+ICI 的设计与 NVLink 几乎走的是完全相反的路线。NVLink 依赖 NVSwitch 构建 all-to-all 全互联交换网络，而 ICI 采用 4×4×4 三维环面拓扑（3D Torus）——每颗 TPU 只与六个方向上的邻居直接相连，数据经过中间节点逐跳转发。这种规则的邻居结构表面上不如交换机灵活，但对于 Transformer 训练中高度规整的 AllReduce 和 AllGather 通信模式，Torus 网络反而能获得极高的带宽利用率，且链路数量不随规模增长。
 
-更关键的区别在物理层。TPU Pod 内部的基本构建块是 64 颗芯片组成的 4×4×4 立方体，立方体内部用铜缆互联。立方体之间则通过 **OCS（Optical Circuit Switch，光电路交换机）** 连接——这是一种基于 3D MEMS 反射镜阵列的纯光学交换设备，直接重定向光束而无需光电转换，可在约 10 秒内重新配置网络拓扑。这种铜光混合设计使 Google 能构建超大规模的单一逻辑计算域，而不会陷入 NVSwitch 那种全互联带来的平方级布线复杂度。
+更关键的区别在物理层。TPU Pod 内部的基本构建块是 64 颗芯片组成的 4×4×4 立方体，立方体内部用铜缆互联。立方体之间则通过 OCS（Optical Circuit Switch，光电路交换机）连接——这是一种基于 3D MEMS 反射镜阵列的纯光学交换设备，直接重定向光束而无需光电转换，可在约 10 秒内重新配置网络拓扑。这种铜光混合设计使 Google 能构建超大规模的单一逻辑计算域，而不会陷入 NVSwitch 那种全互联带来的平方级布线复杂度。
 
 ICI 完全专有、仅通过 Google Cloud 对外提供，不向第三方出售芯片或授权协议。因此在开放性和生态兼容性上，ICI 几乎为零。但从纯粹的技术角度看，它证明了一条独立于 NVLink 的架构路线是可行的。
 
@@ -206,77 +208,77 @@ ICI 完全专有、仅通过 Google Cloud 对外提供，不向第三方出售�
 
 AWS 对自研 AI 芯片的投入逻辑与 Google 相似，但动机更偏向成本优化——作为全球最大的云计算厂商，AWS 需要为内部 AI 工作负载和对外推理服务提供比采购 NVIDIA GPU 更经济的方案。NeuronLink 是 AWS 为 Trainium 和 Inferentia 系列自研芯片定制的卡间互联协议。
 
-Trainium2 搭载的 **NeuronLink-v3** 每芯片提供 **1,024 GB/s** 双向带宽，这一数字介于 NVLink 4（900 GB/s）和 NVLink 5（1,800 GB/s）之间。在拓扑上，16 颗 Trainium2 芯片通过 4×4 二维 Torus 组成一个 Trn2 计算实例；4 个 Trn2 实例再通过 NeuronLink 串联成 **Trn2 UltraServer**——一个包含 **64 颗芯片**的 Ring 拓扑计算集群。
+Trainium2 搭载的 NeuronLink-v3 每芯片提供 1,024 GB/s 双向带宽，这一数字介于 NVLink 4（900 GB/s）和 NVLink 5（1,800 GB/s）之间。在拓扑上，16 颗 Trainium2 芯片通过 4×4 二维 Torus 组成一个 Trn2 计算实例；4 个 Trn2 实例再通过 NeuronLink 串联成 Trn2 UltraServer——一个包含 64 颗芯片的 Ring 拓扑计算集群。
 
 Trainium3 将进一步升级为交换式拓扑结构（不再依赖纯 Ring），带宽和规模预计有明显提升。更长远的路线图中，AWS 已加入 UALink 联盟，Trainium4 将转向 UALink 开放标准，不再使用自研 NeuronLink。目前 Trainium2 已大规模量产并对外提供服务，Trn2 实例成为 AWS 上 AI 训练的主力产品之一。
 
-**PCIe 6.0、CXL 4.0 与 NVLink-C2C**
+**5. PCIe 6.0、CXL 4.0 与 NVLink-C2C**
 
-前面的讨论集中在 GPU 之间的互联，但 AI 系统中还有另一条关键的数据通路：**CPU 与 GPU 之间如何通信**。这一层涉及三种技术——PCIe（Peripheral Component Interconnect Express，高速串行扩展总线标准）、CXL 以及英伟达最新的 NVLink-C2C，三者之间既有依赖关系也有定位差异，放在一起对比才能看出各自的分工。
+前面的讨论集中在 GPU 之间的互联，但 AI 系统中还有另一条关键的数据通路：CPU 与 GPU 之间如何通信。这一层涉及三种技术——PCIe（Peripheral Component Interconnect Express，高速串行扩展总线标准）、CXL 以及英伟达最新的 NVLink-C2C，三者之间既有依赖关系也有定位差异，放在一起对比才能看出各自的分工。
 
-**PCIe 6.0** 是整个体系的物理基础。它由 PCI-SIG 组织于 2022 年发布，采用 PAM4 信令和 FLIT 包格式，x16 双向带宽 **256 GB/s**。作为最成熟的通用互联标准，PCIe 的优势在于生态庞大、成本低廉，但带宽远低于 NVLink，且不支持 GPU 间内存语义访问。在 AI 系统中，它最适合承担 CPU 到 GPU 的数据搬运通道，而非 GPU 间的高速直连。
+PCIe 6.0 是整个体系的物理基础。它由 PCI-SIG 组织于 2022 年发布，采用 PAM4 信令和 FLIT 包格式，x16 双向带宽 256 GB/s。作为最成熟的通用互联标准，PCIe 的优势在于生态庞大、成本低廉，但带宽远低于 NVLink，且不支持 GPU 间内存语义访问。在 AI 系统中，它最适合承担 CPU 到 GPU 的数据搬运通道，而非 GPU 间的高速直连。
 
-**CXL（Compute Express Link）** 则是在 PCIe 物理层之上构建的高层协议。CXL 4.0 于 2025 年 11 月发布，基于 PCIe 6.0 物理层，速率 128 GT/s，双向带宽约 **512 GB/s**。CXL 对 PCIe 的依赖关系非常明确：CXL 复用 PCIe 的 SerDes 和电气规范作为物理传输介质，但在协议层额外增加了缓存一致性（CXL.cache）、内存语义（CXL.mem）等能力。它的核心价值在于**跨机架内存池化**——让多台服务器通过 CXL 交换机共享同一块海量内存池，按需分配、弹性伸缩。这是 PCIe 本身做不到的。
+CXL（Compute Express Link）则是在 PCIe 物理层之上构建的高层协议。CXL 4.0 于 2025 年 11 月发布，基于 PCIe 6.0 物理层，速率 128 GT/s，双向带宽约 512 GB/s。CXL 对 PCIe 的依赖关系非常明确：CXL 复用 PCIe 的 SerDes 和电气规范作为物理传输介质，但在协议层额外增加了缓存一致性（CXL.cache）、内存语义（CXL.mem）等能力。它的核心价值在于跨机架内存池化——让多台服务器通过 CXL 交换机共享同一块海量内存池，按需分配、弹性伸缩。这是 PCIe 本身做不到的。
 
-**NVLink-C2C** 则是英伟达在最新 Vera Rubin 平台中引入的自研 CPU-GPU 直连技术。在上一代 Grace Hopper（GH200）中，Grace CPU 与 Hopper GPU 之间同样通过 NVLink-C2C 连接，但 Vera Rubin 将这一通道的带宽推向了一个新高度——双向 **1.8 TB/s**，延迟在纳秒级。它是 NVLink 协议在 Chiplet 片间互联层面的延伸，让 Vera CPU 能像访问本地内存一样直接读写 Rubin GPU 的 HBM。NVLink-C2C 是英伟达的私有技术，仅用于自家芯片之间的互联。根据英伟达官方 2026 年 7 月发布的 [Vera Rubin 平台部署进展](https://mp.weixin.qq.com/s/G88gqBIF8reG1WMp4cVTiw) 披露，全球已有超过 300 家合作伙伴开始部署该平台，每兆瓦 Token 吞吐量达到 Grace Blackwell 的 10 倍。
+NVLink-C2C 则是英伟达在最新 Vera Rubin 平台中引入的自研 CPU-GPU 直连技术。在上一代 Grace Hopper（GH200）中，Grace CPU 与 Hopper GPU 之间同样通过 NVLink-C2C 连接，但 Vera Rubin 将这一通道的带宽推向了一个新高度——双向 1.8 TB/s，延迟在纳秒级。它是 NVLink 协议在 Chiplet 片间互联层面的延伸，让 Vera CPU 能像访问本地内存一样直接读写 Rubin GPU 的 HBM。NVLink-C2C 是英伟达的私有技术，仅用于自家芯片之间的互联。根据英伟达官方 2026 年 7 月发布的 Vera Rubin 平台部署进展披露，全球已有超过 300 家合作伙伴开始部署该平台，每兆瓦 Token 吞吐量达到 Grace Blackwell 的 10 倍。
 
-表面上看，NVLink-C2C 的 1.8 TB/s 远超 CXL 4.0 的 512 GB/s，似乎 CXL 被"碾压"了。但实际上两者解决的是**完全不同的问题**。NVLink-C2C 追求的是单节点内 CPU 和 GPU 之间**最快的点到点通道**——它的物理范围仅限于同一芯片封装或基板内部，距离极短、性能极致，但不可扩展。CXL 追求的是**跨机架的海量内存共享**——几十台服务器可以按需接入同一个 CXL 内存池，在数百 TB 级别弹性分配资源，速度和距离的权衡截然不同。
+从带宽数值看，NVLink-C2C 的 1.8 TB/s 显著高于 CXL 4.0 的 512 GB/s，但两者解决的是完全不同的问题。NVLink-C2C 追求的是单节点内 CPU 和 GPU 之间最快的点到点通道——它的物理范围仅限于同一芯片封装或基板内部，距离极短、性能极致，但不可扩展。CXL 追求的是跨机架的海量内存共享——几十台服务器可以按需接入同一个 CXL 内存池，在数百 TB 级别弹性分配资源，速度和距离的权衡截然不同。
 
-可以这样理解：在 Vera Rubin NVL72 机柜内部，Vera CPU 与 Rubin GPU 之间最频繁、最紧急的数据交换走 **NVLink-C2C** 这条专属高速公路；而当多个机柜需要共享一份超大的模型参数或 KV 缓存时，**CXL** 提供了跨节点的弹性内存池，作为整个集群的共享"仓库"按需存取。两者在架构上是共存关系：NVIDIA 用私有技术锁死自家 CPU 和 GPU 的配合效率，同时为更大规模、更灵活的集群组网保留了 CXL 这类开放标准的接入空间。
+两者的分工可以这样描述：在 Vera Rubin NVL72 机柜内部，Vera CPU 与 Rubin GPU 之间频繁、紧急的数据交换走 NVLink-C2C，这条通道带宽高、距离短、不可扩展；当多个机柜需要共享一份超大的模型参数或 KV 缓存时，CXL 提供跨节点的弹性内存池，作为集群级共享存储按需存取。两者在架构上是共存关系：NVIDIA 用私有技术实现自家 CPU 与 GPU 的高效配合，同时为更大规模、更灵活的集群组网保留了 CXL 等开放标准的接入空间。
 
 ### 2.2 国产GPU互联方案
 
-国产 GPU 的 scale-up 互联起步较晚，但在过去几年取得了显著进展。受出口管制和供应链安全需求的双重驱动，华为昇腾、寒武纪、壁仞、摩尔线程、沐曦等厂商在过去几年密集推出了各自的互联协议，并在 2025—2026 年间实现了从实验室到大规模集群部署的跨越。与此同时，以中国移动主导的 OISA 开放标准正在尝试构建国产 GPU 间的统一互联生态，目标类似 UALink 在中国的落地。以下是各家方案的具体分析。
+国产 GPU 的 scale-up 互联起步较晚，但在过去几年取得了显著进展。受出口管制和供应链安全需求的双重驱动，华为昇腾、寒武纪、壁仞、摩尔线程、沐曦等厂商密集推出了各自的互联协议，并在 2025—2026 年间实现了从实验室到大规模集群部署的跨越。与此同时，以中国移动主导的 OISA 开放标准正在尝试构建国产 GPU 间的统一互联生态，目标类似 UALink 在中国的落地。以下是各家方案的具体分析。
 
-**6. 华为昇腾：从 HCCS 到 UB 统一总线的演进**
+**1. 华为昇腾：从 HCCS 到 UB 统一总线的演进**
 
-华为在 AI 芯片领域的投入规模和垂直整合能力在国产厂商中最为突出。昇腾系列从 910B 开始采用 Chiplet 封装，910C 在此基础上进一步将两颗 910B 芯片异构集成，通过自研的 **HCCS（Huawei Cache Coherence System）** 实现片间高速缓存一致性互联。HCCS 在 910 代际的单卡互联总带宽约为 90 GB/s，虽然与同期 NVLink 的 900 GB/s 存在数量级差距，但华为的策略并非在单卡带宽上硬拼——它把重心放在了**超大规模组网**上。
+华为在 AI 芯片领域的投入规模和垂直整合能力在国产厂商中最为突出。昇腾系列从 910B 开始采用 Chiplet 封装，910C 在此基础上进一步将两颗 910B 芯片异构集成，通过自研的 HCCS（Huawei Cache Coherence System）实现片间高速缓存一致性互联。HCCS 在 910 代际的单卡互联总带宽约为 90 GB/s，虽然与同期 NVLink 的 900 GB/s 存在数量级差距，但华为的策略并非在单卡带宽上直接竞争——它把重心放在了超大规模组网上。
 
-华为于 2025 年发布的 **CloudMatrix 384 超节点**是这一策略的集中体现：将 384 颗昇腾 910C NPU（Neural Processing Unit，神经网络处理器）和 192 颗鲲鹏 CPU 封装进单一逻辑计算域，通过下一代 **UB（Unified Bus，统一总线，中文名为"灵衢"）** 实现 TB/s 级的高带宽、低延迟互联。UB 架构融合了此前 HCCS 的缓存一致性能力和华为自研的交换芯片技术，目标是让超节点内的数百颗昇腾芯片像一个整体一样工作——这与 NVLink + NVSwitch 将 72 颗 GPU 组成 NVL72 机柜的思路异曲同工，但华为在规模上直接瞄准了更大的数量级。
+华为于 2025 年发布的 CloudMatrix 384 超节点是这一策略的集中体现：将 384 颗昇腾 910C NPU（Neural Processing Unit，神经网络处理器）和 192 颗鲲鹏 CPU 封装进单一逻辑计算域，通过下一代 UB（Unified Bus，统一总线，中文名为"灵衢"）实现 TB/s 级的高带宽、低延迟互联。UB 架构融合了此前 HCCS 的缓存一致性能力和华为自研的交换芯片技术，目标是让超节点内的数百颗昇腾芯片作为一个整体工作——这与 NVLink + NVSwitch 将 72 颗 GPU 组成 NVL72 机柜的思路相同，但华为在规模上直接瞄准了更大的数量级。
 
-软件栈方面，华为的 **CANN（Compute Architecture for Neural Networks）** 全栈自研，HCCL 通信库对标 NCCL。目前昇腾 910C 已大规模量产，CloudMatrix 384 已在多家运营商和互联网企业的数据中心落地。昇腾芯片在大模型训练领域的实际验证也在快速推进：2026 年 4 月，DeepSeek V4-Flash 的**后训练（Post-Training，指预训练完成后的微调、对齐等阶段）**首次完全由昇腾 950 系列完成；同年 6 月，深圳河套学院联合华为使用至少 1,000 块昇腾 910C 独立完成了 DeepSeek V4-Pro（1.6 万亿参数）的全参数后训练验证。这标志着国产算力栈正在从"推理可用"向"训练可用"过渡。华为的路线图显示将在 2026—2027 年推出 910D/910E 等后续芯片，UB 的带宽和规模将持续提升。
+软件栈方面，华为的 CANN（Compute Architecture for Neural Networks）全栈自研，HCCL 通信库对标 NCCL。目前昇腾 910C 已大规模量产，CloudMatrix 384 已在多家运营商和互联网企业的数据中心落地。昇腾芯片在大模型训练领域的实际验证也在快速推进：2026 年 4 月，DeepSeek V4-Flash 的后训练（Post-Training，指预训练完成后的微调、对齐等阶段）首次完全由昇腾 950 系列完成；同年 6 月，深圳河套学院联合华为使用至少 1,000 块昇腾 910C 独立完成了 DeepSeek V4-Pro（1.6 万亿参数）的全参数后训练验证。这标志着国产算力栈正在从"推理可用"向"训练可用"过渡。华为的路线图显示将在 2026—2027 年推出 910D/910E 等后续芯片，UB 的带宽和规模将持续提升。
 
-**7. 寒武纪：MLU-Link 的全自研路线**
+**2. 寒武纪：MLU-Link 的全自研路线**
 
-寒武纪是国内最早一批进入 AI 芯片领域的公司，从终端 IP 起家，逐步扩展到云端训练/推理芯片。其互联协议 **MLU-Link** 完全自研，不依赖 PCIe Switch 或第三方交换芯片，目前已在思元 370、思元 590 以及最新旗舰思元 690 三代产品上量产。
+寒武纪是国内最早一批进入 AI 芯片领域的公司，从终端 IP 起家，逐步扩展到云端训练/推理芯片。其互联协议 MLU-Link 完全自研，不依赖 PCIe Switch 或第三方交换芯片，目前已在思元 370、思元 590 以及最新旗舰思元 690 三代产品上量产。
 
-MLU-Link 在思元 590 上的具体参数为 4 端口、16 lane、单 lane 50 Gbps，双向总带宽 **200 GB/s**。思元 590 采用 7nm 工艺和 MLUarch05 架构，INT8 算力 512 TOPS（Tera Operations Per Second，每秒万亿次操作），FP16 算力约 256 TFLOPS（Tera Floating-point Operations Per Second，每秒万亿次浮点运算）。2026 年初量产的旗舰款**思元 690** 则是一次大的架构跨越——采用双 Die Chiplet 封装（2× 思元 590 规模），FP16 算力超过 **700 TFLOPS**，搭配 **MLU-Link 4.0** 实现更高带宽的卡间互联，目标直指 NVIDIA H100（2022 年发布，FP16 989 TFLOPS，NVLink 4 带宽 900 GB/s）。思元 690 在单卡算力上相当于 H100 的约 70%，在互联带宽方面仍有明显差距，但相较于思元 590 对比 A100 那代的代际差已在快速缩小。
+MLU-Link 在思元 590 上的具体参数为 4 端口、16 lane、单 lane 50 Gbps，双向总带宽 200 GB/s。思元 590 采用 7nm 工艺和 MLUarch05 架构，INT8 算力 512 TOPS（Tera Operations Per Second，每秒万亿次操作），FP16 算力约 256 TFLOPS（Tera Floating-point Operations Per Second，每秒万亿次浮点运算）。2026 年初量产的旗舰款思元 690 则是一次大的架构跨越——采用双 Die Chiplet 封装（2× 思元 590 规模），FP16 算力超过 700 TFLOPS，搭配 MLU-Link 4.0 实现更高带宽的卡间互联，目标直指 NVIDIA H100（2022 年发布，FP16 989 TFLOPS，NVLink 4 带宽 900 GB/s）。思元 690 在单卡算力上相当于 H100 的约 70%，在互联带宽方面仍有明显差距，但相较于思元 590 对比 A100 那代的代际差已在快速缩小。
 
-软件栈为 **NeuWare** 全栈平台，包含 AI 加速算子库 CNNL 和集合通信库 **CNCL**。在商用落地上，寒武纪已从政府和科研机构向互联网大厂渗透——字节跳动是最大客户，2026 年订单规模达 250-300 亿元；阿里云正在测试思元 690 用于推理平台；腾讯则将思元 590 批量部署于特定推理场景。不过目前大规模训练集群的部署仍处于早期验证阶段，主力营收以推理业务为主。寒武纪的客户主要集中在阿里、字节等互联网大厂的推理业务，训练侧的大规模集群部署尚处于验证阶段。
+软件栈为 NeuWare 全栈平台，包含 AI 加速算子库 CNNL 和集合通信库 CNCL。在商用落地上，寒武纪已从政府和科研机构向互联网大厂渗透——字节跳动是最大客户，2026 年订单规模达 250-300 亿元；阿里云正在测试思元 690 用于推理平台；腾讯则将思元 590 批量部署于特定推理场景。目前寒武纪的主力营收以推理业务为主，大规模训练集群的部署仍处于早期验证阶段。
 
-**8. 壁仞科技：Blink 协议与光交换超节点的差异化路线**
+**3. 壁仞科技：Blink 协议与光交换超节点的差异化路线**
 
-壁仞科技是国产 GPU 厂商中少数同时布局电互联和光互联的企业。其首款通用 GPU **BR100** 于 2022 年发布，采用 7nm 工艺，在 INT8（2,048 TOPS）和 BF16（1,024 TFLOPS）指标上直接对标甚至超越了同年发布的 NVIDIA H100（FP16 约 989 TFLOPS），一度创下国产芯片算力纪录。但由于美国出口管制升级，BR100 的后续量产和生态推广受到显著影响。2025 年，其面向通用计算场景的 **BR104** 率先实现量产，首批交付百度、字节跳动等互联网大厂，单卡 FP32 算力约 256 TFLOPS，搭载 32 GB HBM2e 显存。
+壁仞科技是国产 GPU 厂商中少数同时布局电互联和光互联的企业。其首款通用 GPU BR100 于 2022 年发布，采用 7nm 工艺，在 INT8（2,048 TOPS）和 BF16（1,024 TFLOPS）指标上直接对标甚至超越了同年发布的 NVIDIA H100（FP16 约 989 TFLOPS），一度创下国产芯片算力纪录。但由于美国出口管制升级，BR100 的后续量产和生态推广受到显著影响。2025 年，其面向通用计算场景的 BR104 率先实现量产，首批交付百度、字节跳动等互联网大厂，单卡 FP32 算力约 256 TFLOPS，搭载 32 GB HBM2e 显存。
 
-互联方面，壁仞的自研 **BLink** 电互联协议每通道 64 GB/s，支持 4 到 8 通道配置，单卡互联带宽约 256—512 GB/s。与 NVLink 4 的 900 GB/s 和 NVLink 5 的 1,800 GB/s 相比仍有明显差距，这也是壁仞押注光互连路线的原因之一——电互联在带宽和距离上的天花板，在国产制程受限的情况下更难突破。
+互联方面，壁仞的自研 BLink 电互联协议每通道 64 GB/s，支持 4 到 8 通道配置，单卡互联带宽约 256—512 GB/s。与 NVLink 4 的 900 GB/s 和 NVLink 5 的 1,800 GB/s 相比仍有明显差距，这也是壁仞选择光互连路线的原因之一——电互联在带宽和距离上的上限，在国产制程受限的情况下更难突破。
 
-壁仞最大的技术亮点在于**光互连超节点**方案。2025 年 7 月，壁仞联合仪电、曦智科技、中兴通讯发布了国内首个光互连光交换 GPU 超节点 **光跃 LightSphere X**，基于曦智科技的分布式光交换技术实现 128 卡互联。2026 年 7 月 WAIC（World Artificial Intelligence Conference，世界人工智能大会）期间，壁仞进一步推出了下一代 **NPO（Near-Packaged Optics，近封装光学）光互连**方案，支持单个超节点 **1,024 卡** Scale-up 扩展，并配套发布了 **BLink 2.0** 协议，在延迟和带宽上较上一代有显著提升。
+壁仞最大的技术亮点在于光互连超节点方案。2025 年 7 月，壁仞联合仪电、曦智科技、中兴通讯发布了国内首个光互连光交换 GPU 超节点光跃 LightSphere X，基于曦智科技的分布式光交换技术实现 128 卡互联。2026 年 7 月 WAIC（World Artificial Intelligence Conference，世界人工智能大会）期间，壁仞进一步推出了下一代 NPO（Near-Packaged Optics，近封装光学）光互连方案，支持单个超节点 1,024 卡 Scale-up 扩展，并配套发布了 BLink 2.0 协议，在延迟和带宽上较上一代有显著提升。
 
 光互连的核心优势在于突破电信号在铜缆上的距离和密度限制，这对于超大规模组网意义重大——Google 的 TPU OCS 和英伟达 Rubin 平台的 CPO 路线都在向光互连方向演进。壁仞是国内唯一将光交换超节点作为核心产品路线推进的厂商，在国产算力集群的组网层面占据了差异化先发优势。
 
-**9. 摩尔线程：MTLink 4.0 与 MUSA 的"CUDA 兼容"策略**
+**4. 摩尔线程：MTLink 4.0 与 MUSA 的"CUDA 兼容"策略**
 
-摩尔线程是国产 GPU 中在软件生态兼容性上走得最远的一家。其核心策略是 **MUSA（Moore Threads Unified System Architecture）**——一套 API 级兼容 CUDA 的全栈软件平台，能够通过 MUSIFY 工具自动转换 90% 以上的 CUDA 代码，大幅降低了从 NVIDIA 生态迁移的工程成本。
+摩尔线程是国产 GPU 中在软件生态兼容性上走得最远的一家。其核心策略是 MUSA（Moore Threads Unified System Architecture）——一套 API 级兼容 CUDA 的全栈软件平台，能够通过 MUSIFY 工具自动转换 90% 以上的 CUDA 代码，大幅降低了从 NVIDIA 生态迁移的工程成本。
 
-2025 年 12 月，摩尔线程在首届 MUSA 开发者大会上发布了全新 GPU 架构 **"花港"** 及首款基于该架构的云端 AI 加速芯片 **"华山"**。华山定位为 **AI 训推一体**芯片——即同一款芯片既能用于大模型训练也能用于推理部署，而非像以往那样将训练和推理拆分为两条产品线；同时支持超智融合场景（AI + 高性能计算的混合负载），覆盖 FP4 到 FP64 的全精度计算。华山支持超十万卡级 AI 工厂部署，其 Scale-up 系统兼容 **MTLink 4.0**，整卡互联带宽达到 **1,314 GB/s**，支持最多 **1,024 卡**互联。这一带宽指标在国产方案中处于领先水平，已接近 2024 年随 Blackwell B200 发布的 **NVLink 5（1,800 GB/s）**。
+2025 年 12 月，摩尔线程在首届 MUSA 开发者大会上发布了全新 GPU 架构"花港"及首款基于该架构的云端 AI 加速芯片"华山"。华山定位为 AI 训推一体芯片——即同一款芯片既能用于大模型训练也能用于推理部署，而非像以往那样将训练和推理拆分为两条产品线；同时支持超智融合场景（AI + 高性能计算的混合负载），覆盖 FP4 到 FP64 的全精度计算。华山支持超十万卡级 AI 工厂部署，其 Scale-up 系统兼容 MTLink 4.0，整卡互联带宽达到 1,314 GB/s，支持最多 1,024 卡互联。这一带宽指标在国产方案中处于领先水平，已接近 2024 年随 Blackwell B200 发布的 NVLink 5（1,800 GB/s）。
 
 MTLink 同时兼容多种以太网协议，使得摩尔线程的芯片可以灵活接入现有的数据中心网络。MUSA 5.0 全栈软件同步升级，覆盖从通信库到算子库再到 PyTorch 框架适配的完整链路。华山芯片于 2026 年进入量产阶段，摩尔线程也是 OISA 生态的核心成员之一。
 
-**10. 沐曦股份：MetaXLink 与全自研 MXMACA 软件栈**
+**5. 沐曦股份：MetaXLink 与全自研 MXMACA 软件栈**
 
-沐曦股份成立于 2020 年，创始团队拥有丰富的 GPU 研发经验，产品线覆盖云端训练（曦云 C 系列）、推理（曦思 N 系列）和图形渲染（曦彩 G 系列）。其互联方案 **MetaXLink** 已迭代到第二代，在旗舰产品曦云 C600（2025 年 7 月于 WAIC 发布）上提供约 **900 GB/s** 的互联带宽，配备 7 个接口——这一规格与 2023 年发布的 H200 所搭载的 NVLink 4（900 GB/s）基本处于同一量级，但距 2024 年随 Blackwell B200 发布的 NVLink 5（1,800 GB/s）仍有约两年代际差距。
+沐曦股份成立于 2020 年，创始团队拥有丰富的 GPU 研发经验，产品线覆盖云端训练（曦云 C 系列）、推理（曦思 N 系列）和图形渲染（曦彩 G 系列）。其互联方案 MetaXLink 已迭代到第二代，在旗舰产品曦云 C600（2025 年 7 月于 WAIC 发布）上提供约 900 GB/s 的互联带宽，配备 7 个接口——这一规格与 2023 年发布的 H200 所搭载的 NVLink 4（900 GB/s）基本处于同一量级，但距 2024 年随 Blackwell B200 发布的 NVLink 5（1,800 GB/s）仍有约两年代际差距。
 
-C500 采用 7nm 工艺和自研 XCORE 1.0 架构，C600 在此基础上升级至 XCORE 1.5 架构，新增 FP8 精度支持，搭载 144 GB HBM3e 显存，FP8 峰值算力约 1,000 TFLOPS。沐曦的 **MXMACA** 软件栈全栈自研，包含 MCCL 通信库，已适配 PyTorch 等主流框架。
+C500 采用 7nm 工艺和自研 XCORE 1.0 架构，C600 在此基础上升级至 XCORE 1.5 架构，新增 FP8 精度支持，搭载 144 GB HBM3e 显存，FP8 峰值算力约 1,000 TFLOPS。沐曦的 MXMACA 软件栈全栈自研，包含 MCCL 通信库，已适配 PyTorch 等主流框架。
 
-在商用落地方面，沐曦是目前国产 GPU 中出货量较大的一家——截至 2025 年底累计出货超过 **25,000 颗**，已在万卡级别集群中完成部署验证。沐曦也是 OISA 生态的创始成员之一，深度参与国产互联标准的制定。
+在商用落地方面，沐曦是目前国产 GPU 中出货量较大的一家——截至 2025 年底累计出货超过 25,000 颗，已在万卡级别集群中完成部署验证。沐曦也是 OISA 生态的创始成员之一，深度参与国产互联标准的制定。
 
-**11. OISA：中国的开放 Scale-up 互联标准**
+**6. OISA：中国的开放 Scale-up 互联标准**
 
-如果说 UALink 是海外的"反 NVLink 联盟"，那么 **OISA（Omni-directional Intelligent Sensing Express Architecture，全向智感互联架构）** 就是中国移动主导的国产对标方案。
+如果说 UALink 是海外的开放 scale-up 标准，那么 OISA（Omni-directional Intelligent Sensing Express Architecture，全向智感互联架构）就是中国移动主导的国产对标方案。
 
-OISA 由中国移动联合北京市科委发起，昆仑芯、摩尔线程、沐曦、海光、天数智芯、登临科技、太初、南湖研究院等 8 家 GPU 企业以及腾讯、百度共同参与，目标与 UALink 高度一致：构建国产 GPU 卡间**开放、多供应商的 scale-up 互联标准**，避免每家厂商各自定义一套私有协议导致的生态碎片化。
+OISA 由中国移动联合北京市科委发起，昆仑芯、摩尔线程、沐曦、海光、天数智芯、登临科技、太初、南湖研究院等 8 家 GPU 企业以及腾讯、百度共同参与，目标与 UALink 高度一致：构建国产 GPU 卡间开放、多供应商的 scale-up 互联标准，避免每家厂商各自定义一套私有协议导致的生态碎片化。
 
-OISA 1.0 于 2025 年 8 月发布，2.0 进一步将 scale-up 规格提升至单点 **896 GB/s** 带宽、支持最多 **1,024 张 AI 芯片**互联，时延缩短至数百纳秒，已具备原生内存语义。2025 年，昆仑芯基于 OISA 的 64 卡超节点在国际会议上完成首秀；OISA 商用产品预计 **2026 年 Q2** 开始出货。关于 OISA 在 scale-out 层的交换芯片规划，详见第三节。
+OISA 1.0 于 2025 年 8 月发布，2.0 进一步将 scale-up 规格提升至单点 896 GB/s 带宽、支持最多 1,024 张 AI 芯片互联，时延缩短至数百纳秒，已具备原生内存语义。2025 年，昆仑芯基于 OISA 的 64 卡超节点在国际会议上完成首秀；OISA 商用产品预计 2026 年 Q2 开始出货。关于 OISA 在 scale-out 层的交换芯片规划，详见第三章。
 
 与 UALink 相比，OISA 在带宽和标准化程度上仍有一定差距，但它在国内的意义更为特殊——它第一次将碎片化的国产 GPU 生态整合到一个共同的互联标准框架下，这对于尚处于追赶阶段的国产算力集群而言，其生态聚合价值可能比单纯的性能指标更重要。
 
@@ -284,28 +286,28 @@ OISA 1.0 于 2025 年 8 月发布，2.0 进一步将 scale-up 规格提升至单
 
 ## 三、替代交换方案全景：Scale-out 层
 
-前一章我们分析了各家在 scale-up 层（GPU 直连域内）的互联协议竞争。但当 GPU 集群的规模超过单个 NVLink/UALink/OISA 域的上限后，就需要 scale-out 交换机将这些域连接起来，构成万卡乃至十万卡级别的算力集群。这一层的核心玩家是**交换芯片**——它们决定了数据在机柜间如何路由、能以多低的延迟转发、以及整个集群的通信效率上限。
+前一章分析了各家在 scale-up 层（GPU 直连域内）的互联协议竞争。但当 GPU 集群的规模超过单个 NVLink/UALink/OISA 域的上限后，就需要 scale-out 交换机将这些域连接起来，构成万卡乃至十万卡级别的算力集群。这一层的核心参与者是交换芯片——它们决定了数据在机柜间如何路由、能以多低的延迟转发、以及整个集群的通信效率上限。
 
-与 scale-up 层各家封闭或半封闭的协议不同，scale-out 层天然是开放生态的竞技场：博通、Marvell 等商用芯片巨头、英伟达自研的 Mellanox 系列、以及国产的盛科通信，在这里展开直接竞争。2026 年一个标志性事件是英伟达凭借 Spectrum-X 首次登顶全球数据中心以太网交换机营收榜首（IDC 2026 Q1 数据），标志着交换机的战略地位从"网络配件"正式升级为"AI 算力的第三大瓶颈"。
+与 scale-up 层各家封闭或半封闭的协议不同，scale-out 层天然是开放生态的竞争领域：博通、Marvell 等商用芯片厂商、英伟达自研的 Mellanox 系列、以及国产的盛科通信，在这里展开直接竞争。2026 年一个标志性事件是英伟达凭借 Spectrum-X 首次登顶全球数据中心以太网交换机营收榜首（IDC 2026 Q1 数据），标志着交换机的战略地位从"网络配件"正式升级为"AI 算力的第三大瓶颈"。
 
 ### 3.1 全球智算交换芯片市场格局
 
-根据 QYResearch 2026 年 1 月报告，2025 年全球以太网交换芯片市场销售额为 **374 亿元人民币**（约 52 亿美元）。表中"交换容量"指芯片或整机所有端口满速工作时的总吞吐量上限，单位为 **Tbps（Terabits per second，太比特/秒）**，大致可按 800 Gbps × 端口数 × 2（双向）来估算。
+在分别展开海外与国产方案之前，本节先建立整个市场的总量与格局认知。根据 QYResearch 2026 年 1 月报告，2025 年全球以太网交换芯片市场销售额为 374 亿元人民币（约 52 亿美元）。表中"交换容量"指芯片或整机所有端口满速工作时的总吞吐量上限，单位为 Tbps（Terabits per second，太比特/秒），大致可按 800 Gbps × 端口数 × 2（双向）来估算。
 
-其中面向 AI 集群的智算交换芯片是增长最快的细分市场，也是各大厂商竞争的核心战场——因为普通企业级交换芯片的利润率和战略价值远无法与 AI 芯片匹敌。
+其中面向 AI 集群的智算交换芯片是增长最快的细分市场，也是各大厂商竞争的核心领域——因为普通企业级交换芯片的利润率和战略价值远无法与 AI 芯片匹敌。
 
 | 厂商 | 代表产品 | 交换容量 | 制程 | 策略定位 |
 |---|---|---|---|---|
-| **Broadcom** | Tomahawk 6 | 102.4 Tbps, 512×200G 端口 | TSMC 3nm | 商用芯片绝对霸主，所有整机厂商的共同供应商 |
-| **Marvell** | Teralynx 10 / T100 | 51.2 / 102.4 Tbps, 500ns 延迟 | TSMC 3nm | 低延迟+可编程差异竞争，已加入 NVLink Fusion 生态 |
-| **NVIDIA (Mellanox)** | Spectrum-X | 51.2 Tbps (Spectrum-4) | 自研 ASIC | 自研自用为主，AI 集群专用优化，少量外销 |
-| **盛科通信 (国产)** | Arctic 系列 | 25.6 Tbps, 800G 端口 | — | 国产替代领军，25.6T 对标博通 Tomahawk 4 级别 |
+| Broadcom | Tomahawk 6 | 102.4 Tbps, 512×200G 端口 | TSMC 3nm | 商用芯片市场领先者，所有整机厂商的共同供应商 |
+| Marvell | Teralynx 10 / T100 | 51.2 / 102.4 Tbps, 500ns 延迟 | TSMC 3nm | 低延迟+可编程差异竞争，已加入 NVLink Fusion 生态 |
+| NVIDIA (Mellanox) | Spectrum-X | 51.2 Tbps (Spectrum-4) | 自研 ASIC | 自研自用为主，AI 集群专用优化，少量外销 |
+| 盛科通信 (国产) | Arctic 系列 | 25.6 Tbps, 800G 端口 | — | 国产替代领军，25.6T 对标博通 Tomahawk 4 级别 |
 
-在**交换机整机层面**，格局有所不同。根据 IDC 2026 年 Q1 报告，英伟达凭借 Spectrum-X 交换机单季营收 21 亿美元、同比暴增 192.7%，首次登顶全球数据中心交换机营收榜首（21.5% 份额），超越思科和 Arista。在国内市场，2025 年中国数据中心交换机市场规模达 **310.1 亿元人民币**，同比增长 37.5%。智算训练场景的高性能 RoCE 交换机市场呈现出"**双强主导**"的格局——华为与新华三合计占高端市场近 70% 份额，中兴通讯凭借 800G 新品在智算细分市场快速攀升至 15–20%。
+在交换机整机层面，格局有所不同。根据 IDC 2026 年 Q1 报告，英伟达凭借 Spectrum-X 交换机单季营收 21 亿美元、同比增长 192.7%，首次登顶全球数据中心交换机营收榜首（21.5% 份额），超越思科和 Arista。在国内市场，2025 年中国数据中心交换机市场规模达 310.1 亿元人民币，同比增长 37.5%。智算训练场景的高性能 RoCE 交换机市场呈现"两家厂商主导"的格局——华为与新华三合计占高端市场近 70% 份额，中兴通讯凭借 800G 新品在智算细分市场快速攀升至 15–20%。
 
-英伟达在 scale-out 层实际运行着**两条策略不同的产品线**。一条是 InfiniBand（Quantum 系列），这是收购 Mellanox 后获得的完全私有化协议栈——从芯片到交换机到网卡（ConnectX）全链路自研，端到端锁定，性能最优但客户没有替代选择。另一条是 Spectrum-X 以太网交换机，同样采用自研 ASIC 芯片，但基于标准以太网协议（RoCEv2/UEC），与博通的 Tomahawk、Marvell 的 Teralynx 在同一套开放生态规则下竞争——客户可以在英伟达 Spectrum 和第三方交换机之间做选择，不必被单一供应商绑定。
+英伟达在 scale-out 层实际运行着两条策略不同的产品线。一条是 InfiniBand（Quantum 系列），这是收购 Mellanox 后获得的完全私有化协议栈——从芯片到交换机到网卡（ConnectX）全链路自研，端到端锁定，性能最优但客户没有替代选择。另一条是 Spectrum-X 以太网交换机，同样采用自研 ASIC 芯片，但基于标准以太网协议（RoCEv2/UEC），与博通的 Tomahawk、Marvell 的 Teralynx 在同一套开放生态规则下竞争——客户可以在英伟达 Spectrum 和第三方交换机之间做选择，不必被单一供应商绑定。
 
-这种"InfiniBand 封闭 + Spectrum 开放"的双轨策略，本质上是英伟达在 scale-out 层的左右互搏：用 InfiniBand 守住对极致性能有要求的顶级客户（如超大规模训练集群），用 Spectrum-X 去抢博通和 Marvell 在以太网交换机市场的地盘。2026 年 Q1 Spectrum-X 登顶全球数据中心交换机营收榜首，说明这条"开放路线"正在奏效。这背后还有一个市场现实：InfiniBand 尽管延迟更低、有 SHARP 在网计算等独门能力，但全链路仅英伟达一家供应商、运维人才稀缺、成本高昂；而基于标准以太网的 RoCEv2 经过多年优化，在绝大多数 AI 训练场景下与 IB 的性能差距已缩至 5–10% 以内，超大规模云厂商更看重供应链多样性和运维成本可控。
+这种"InfiniBand 封闭 + Spectrum 开放"的两条路线并行的策略，本质上是英伟达在 scale-out 层同时布局两条产品线：用 InfiniBand 服务对极致性能有要求的顶级客户（如超大规模训练集群），用 Spectrum-X 争夺博通和 Marvell 在以太网交换机市场的份额。2026 年 Q1 Spectrum-X 登顶全球数据中心交换机营收榜首，说明这条"开放路线"正在奏效。这背后还有一个市场现实：InfiniBand 尽管延迟更低、有 SHARP 在网计算等独特能力，但全链路仅英伟达一家供应商、运维人才稀缺、成本高昂；而基于标准以太网的 RoCEv2 经过多年优化，在绝大多数 AI 训练场景下与 IB 的性能差距已缩至 5–10% 以内，超大规模云厂商更看重供应链多样性和运维成本可控。
 
 ### 3.2 海外交换机方案
 
@@ -313,57 +315,55 @@ OISA 1.0 于 2025 年 8 月发布，2.0 进一步将 scale-up 规格提升至单
 
 **1. Broadcom：Tomahawk 系列与 SUE 开放规范**
 
-博通是全球以太网交换芯片的绝对霸主，Tomahawk 系列是其面向超大规模数据中心的旗舰产品线。最新的 Tomahawk 6 基于 TSMC 3nm 工艺，单芯片交换容量达到 102.4 Tbps，支持 512 个 200G 端口，代表了商用交换芯片的性能巅峰。
+博通是全球以太网交换芯片的市场领导者，Tomahawk 系列是其面向超大规模数据中心的旗舰产品线。最新的 Tomahawk 6 基于 TSMC 3nm 工艺，单芯片交换容量达到 102.4 Tbps，支持 512 个 200G 端口，代表了商用交换芯片的性能峰值。
 
-在 AI 集群场景中，博通于 2025 年推出的 **Tomahawk Ultra** 针对 scale-up 互联做了专项优化：51.2 Tbps 交换容量，64 字节包延迟仅 250ns，最大支持 1,024 个加速器互联。配合博通定义的 **SUE（Scale-Up Ethernet）** 开放接口规范，任意厂商的加速器都可以通过标准以太网接入 Tomahawk Ultra 构建高速互联域。此外，Jericho 4 系列面向运营商和边缘场景提供深度缓冲和可编程转发能力，Trident 5 系列则覆盖主流企业数据中心。
+在 AI 集群场景中，博通于 2025 年推出的 Tomahawk Ultra 针对 scale-up 互联做了专项优化：51.2 Tbps 交换容量，64 字节包延迟仅 250ns，最大支持 1,024 个加速器互联。配合博通定义的 SUE（Scale-Up Ethernet）开放接口规范，任意厂商的加速器都可以通过标准以太网接入 Tomahawk Ultra 构建高速互联域。此外，Jericho 4 系列面向运营商和边缘场景提供深度缓冲和可编程转发能力，Trident 5 系列则覆盖主流企业数据中心。
 
 博通的竞争壁垒在于：54.6% 的市场份额意味着几乎所有的交换机 OEM（Original Equipment Manufacturer，原始设备制造商，如思科、Arista、新华三、锐捷等）都是其客户，软件生态（SDK、驱动、协议栈）经过二十年的积累已经极度成熟。这是任何新进入者在短期内无法复制的。
 
 **2. Marvell：Teralynx 系列与低延迟差异化**
 
-Marvell 在以太网交换芯片市场的份额约 13%，其差异化策略集中在**低延迟**和**可编程性**。Teralynx 10 交换芯片将端口到端口的转发延迟压到了 500ns——在 AI 训练集群中，每降低 1 微秒的交换延迟，都可能转化为算力利用率的提升。最新的 T100 同样基于 TSMC 3nm 工艺，交换容量 102.4 Tbps，与博通 Tomahawk 6 处于同一性能级别。
+Marvell 在以太网交换芯片市场的份额约 13%，其差异化策略集中在低延迟和可编程性。Teralynx 10 交换芯片将端口到端口的转发延迟压到了 500ns——在 AI 训练集群中，每降低 1 微秒的交换延迟，都可能转化为算力利用率的提升。最新的 T100 同样基于 TSMC 3nm 工艺，交换容量 102.4 Tbps，与博通 Tomahawk 6 处于同一性能级别。
 
-Marvell 的另一张牌是 **NVLink Fusion 合作**。2026 年 3 月，英伟达投资 20 亿美元与 Marvell 建立战略合作关系，Marvell 将为 NVLink Fusion 生态提供兼容的定制 XPU 和 scale-up 网络产品。对 Marvell 而言，这意味着获得了英伟达生态的"官方认证"；对英伟达而言，这是用盟友的芯片去抢占博通和 UALink 的市场份额。
+Marvell 的另一张牌是 NVLink Fusion 合作。2026 年 3 月，英伟达投资 20 亿美元与 Marvell 建立战略合作关系，Marvell 将为 NVLink Fusion 生态提供兼容的定制 XPU 和 scale-up 网络产品。对 Marvell 而言，这意味着获得了英伟达生态的"官方认证"；对英伟达而言，这是用合作厂商的芯片去争夺博通和 UALink 的市场份额。
 
 **3. Cisco：Silicon One 的转型之路**
 
-思科曾长期坚持自研交换 ASIC（Silicon One 系列），但近年来逐步转向"自研+采购商用芯片"的混合策略，其市场份额呈下降趋势（9.6% → 预计 2030 年低于 6%）。面对 AI 集群的爆发需求，思科更多依赖与英伟达 Spectrum-X 的集成方案而非自有芯片来争夺市场。思科的战略重心已从芯片层面转向系统集成和网络管理软件。
+思科曾长期坚持自研交换 ASIC（Silicon One 系列），但近年来逐步转向"自研 + 采购商用芯片"的混合策略，其市场份额呈下降趋势（9.6% → 预计 2030 年低于 6%）。面对 AI 集群的爆发需求，思科更多依赖与英伟达 Spectrum-X 的集成方案而非自有芯片来争夺市场。思科的战略重心已从芯片层面转向系统集成和网络管理软件。
 
-**4. Arista：不造芯片的智算交换机之王**
+**4. Arista：不造芯片的智算交换机厂商**
 
-Arista 的策略与以上三家完全不同——它**不生产交换芯片**，而是从博通采购 Tomahawk 6 等顶级芯片后，在软件层面（EOS，Extensible Operating System）做深度优化。Arista 在数据中心交换机整机市场的份额仅次于英伟达（2026 Q1），核心客户包括 Meta、Microsoft 等超大规模云厂商。其旗舰 7800R4 系列搭载 Tomahawk 6 芯片，单机交换容量 102.4 Tbps，128 个 800G 端口，配合 EOS 的 RoCEv2 和 UEC 协议优化，已成为海外 AI 集群的主力交换机平台之一。
+Arista 的策略与以上三家完全不同——它不生产交换芯片，而是从博通采购 Tomahawk 6 等顶级芯片后，在软件层面（EOS，Extensible Operating System）做深度优化。Arista 在数据中心交换机整机市场的份额仅次于英伟达（2026 Q1），核心客户包括 Meta、Microsoft 等超大规模云厂商。其旗舰 7800R4 系列搭载 Tomahawk 6 芯片，单机交换容量 102.4 Tbps，128 个 800G 端口，配合 EOS 的 RoCEv2 和 UEC 协议优化，已成为海外 AI 集群的主力交换机平台之一。
 
 ### 3.3 国产智算交换机方案
 
-国产智算交换机市场呈现出"芯片自研 + 外购并存"的多元格局。华为海思和中兴微电子均走自研芯片路线，分别以 CloudEngine 和"凌云"芯片支撑自家整机；盛科通信则专注于向新华三、锐捷等整机厂商提供第三方国产交换 ASIC；新华三在高端产品线同时采用盛科国产芯片和博通 Tomahawk 芯片两条腿走路。以下是各家的核心产品和定位。
+国产智算交换机市场呈现"芯片自研 + 外购并存"的多元格局。华为海思和中兴微电子均走自研芯片路线，分别以 CloudEngine 和"凌云"芯片支撑自家整机；盛科通信则专注于向新华三、锐捷等整机厂商提供第三方国产交换 ASIC；新华三在高端产品线同时采用盛科国产芯片和博通 Tomahawk 芯片两条路线。以下是各家的核心产品和定位。
 
-**1. 盛科通信：国产交换芯片独苗**
+**1. 盛科通信：国产交换芯片的领先者**
 
-盛科是国内唯一实现以太网交换芯片商业化的上市公司，Arctic 系列最高规格达到 **25.6 Tbps**、支持 **800G 端口**，产品能力对标博通 Tomahawk 4 / Marvell Teralynx 7 级别（约 2–3 年前的代差）。盛科研发费用率高达 42%，正在押注 RISC-V CPU 集成以摆脱 ARM 授权限制。在国产超节点交换芯片细分市场，盛科 2026 年份额约 **40%**，华为昇腾超节点采购份额超过 **70%**，订单已排至 2027 年。
+盛科是国内唯一实现以太网交换芯片商业化的上市公司，Arctic 系列最高规格达到 25.6 Tbps、支持 800G 端口，产品能力对标博通 Tomahawk 4 / Marvell Teralynx 7 级别（约 2–3 年前的代差）。盛科研发费用率高达 42%，正在投入 RISC-V CPU 集成以摆脱 ARM 授权限制。在国产超节点交换芯片细分市场，盛科 2026 年份额约 40%，华为昇腾超节点采购份额超过 70%，订单已排至 2027 年。
 
 **2. 华为：自研海思芯片，全栈闭环**
 
-华为的智算交换机基于自研海思芯片，不依赖博通或盛科。旗舰产品 **CloudEngine 16800-X 系列**于 2023 年率先发布，支持最高 **288 个 800GE 端口**，搭载 iLossless 智能无损算法实现 0 丢包和 <10μs 超低时延。在国内智算交换机市场，华为以 **45–50%** 的份额稳居第一，其核心优势在于昇腾芯片 + 海思交换芯片 + CloudEngine 整机 + CANN 软件栈的全栈自研协同——这种纵向整合能力在国产厂商中独一档。
+华为的智算交换机基于自研海思芯片，不依赖博通或盛科。旗舰产品 CloudEngine 16800-X 系列于 2023 年率先发布，支持最高 288 个 800GE 端口，搭载 iLossless 智能无损算法实现 0 丢包和小于 10μs 超低时延。在国内智算交换机市场，华为以 45–50% 的份额位居第一，其核心优势在于昇腾芯片 + 海思交换芯片 + CloudEngine 整机 + CANN 软件栈的全栈自研协同——这种纵向整合能力在国产厂商中最为突出。
 
 **3. 新华三：搭载博通芯片，快速上量**
 
-新华三的策略是"不争芯片、做最好的整机"。其智算旗舰产品线分为两条：面向国产化诉求的 **S9825-8C-G**（2025 年 6 月发布），搭载国产 25.6T 芯片（盛科供应），首批通过工信部 800G 进网测试；面向极致性能的 **S9828-128EP**（2025 年 8 月发布），搭载博通 Tomahawk 6 芯片，单机交换容量 **102.4 Tbps**，128 个 800G 端口，4RU 紧凑机身。新华三在智算交换机市场的份额约 **10–15%**，其优势在于渠道覆盖和政企客户信任度。
+新华三的策略是"不争芯片、做最好的整机"。其智算旗舰产品线分为两条：面向国产化诉求的 S9825-8C-G（2025 年 6 月发布），搭载国产 25.6T 芯片（盛科供应），首批通过工信部 800G 进网测试；面向极致性能的 S9828-128EP（2025 年 8 月发布），搭载博通 Tomahawk 6 芯片，单机交换容量 102.4 Tbps，128 个 800G 端口，4RU 紧凑机身。新华三在智算交换机市场的份额约 10–15%，其优势在于渠道覆盖和政企客户信任度。
 
-**4. 中兴通讯：自研"凌云"芯片，整机多芯片集群突围**
+**4. 中兴通讯：自研"凌云"芯片，整机多芯片集群方案**
 
-中兴通讯是国产厂商中少有的同时布局自研交换芯片和整机的玩家。芯片层面，中兴微电子的**"凌云"51.2T AI 交换芯片**基于 7nm Chiplet 工艺，单片提供 **36 个 800G 端口**，是目前国内唯一已商用的同代产品，与博通 Tomahawk 5（51.2T，64 个 800G 端口）处于同一性能级别。整机层面，2026 年 4 月发布的 800G 框式智算交换机通过集群多颗凌云芯片，将整机端口密度推至 **576 个 800G 端口**，配合自研 OEX（ZTE Optical Express，中兴光快连互联架构）超节点互联架构，二层组网即可覆盖超大 AI 集群，相较传统三层组网减少一层网络跳数和光模块数量。中兴下一代凌云 102.4T 芯片预计 2027 年商用。
+中兴通讯是国产厂商中少有的同时布局自研交换芯片和整机的参与者。芯片层面，中兴微电子的"凌云"51.2T AI 交换芯片基于 7nm Chiplet 工艺，单片提供 36 个 800G 端口，是目前国内唯一已商用的同代产品，与博通 Tomahawk 5（51.2T，64 个 800G 端口）处于同一性能级别。整机层面，2026 年 4 月发布的 800G 框式智算交换机通过集群多颗凌云芯片，将整机端口密度推至 576 个 800G 端口，配合自研 OEX（ZTE Optical Express，中兴光快连互联架构）超节点互联架构，二层组网即可覆盖超大 AI 集群，相较传统三层组网减少一层网络跳数和光模块数量。中兴下一代凌云 102.4T 芯片预计 2027 年商用。
 
-中兴在智算交换机市场的份额约 **15–20%**，位居国内第二，但其核心客户集中在运营商市场（中国移动、电信等），在互联网大厂中的渗透率仍低于华为和新华三。
+中兴在智算交换机市场的份额约 15–20%，位居国内第二，但其核心客户集中在运营商市场（中国移动、电信等），在互联网大厂中的渗透率仍低于华为和新华三。
 
-**5. 锐捷网络：200G/400G 数据中心交换机龙头**
+**5. 锐捷网络：200G/400G 数据中心交换机领先厂商**
 
 锐捷网络在整体交换机市场份额排第三（14.6%），在 200G/400G 数据中心交换机细分市场更是夺得第一。但在 800G 智算交换机领域，锐捷目前尚未推出直接对标华为 CE16800 或新华三 S9828 的旗舰产品，更多通过白盒交换机组网方案和第三方芯片搭配博通 Tomahawk 5/6 芯片追赶。
 
 **6. OISA 交换芯片**
 
-在 OISA 的 scale-up 协议之外（详见第二节），OISA 生态还配套定义了面向 scale-out 场景的交换芯片规范。当多个 OISA 超节点域需要互连为更大规模集群时，OISA 兼容的交换芯片承担跨域数据转发任务。目前盛科通信的 Arctic 系列 25.6 Tbps 芯片已在客户端进入市场推广和逐步应用阶段，支持最大 800G 端口速率，下一代 51.2T 交换芯片也已进入规划。这套布局的战略意图很明确：通过 OISA 定义国产 GPU 间的互联协议（scale-up），同时通过兼容的交换芯片标准培育国产供应链（scale-out），两者配合降低对博通和英伟达的全栈依赖。
-
----
+在 OISA 的 scale-up 协议之外（详见第二章），OISA 生态还配套定义了面向 scale-out 场景的交换芯片规范。当多个 OISA 超节点域需要互连为更大规模集群时，OISA 兼容的交换芯片承担跨域数据转发任务。目前盛科通信的 Arctic 系列 25.6 Tbps 芯片已在客户端进入市场推广和逐步应用阶段，支持最大 800G 端口速率，下一代 51.2T 交换芯片也已进入规划。这套布局的战略意图很明确：通过 OISA 定义国产 GPU 间的互联协议（scale-up），同时通过兼容的交换芯片标准培育国产供应链（scale-out），两者配合降低对博通和英伟达的全栈依赖。
 
 ---
 
@@ -371,22 +371,18 @@ Arista 的策略与以上三家完全不同——它**不生产交换芯片**，
 
 从前面的技术拆解和竞争格局分析中，可以提炼出几个贯穿全文的核心趋势。以下从英伟达壁垒、scale-up 与 scale-out 竞争格局、国产进展以及未来演进四个维度，对全文进行收束。
 
-**1. 英伟达的体系化壁垒。** 从 NVLink 到 NVSwitch 再到 InfiniBand/Spectrum-X，英伟达构建了从单芯片到大集群的完整互联金字塔——scale-up 层用 NVLink + NVSwitch 实现域内万亿级带宽和内存语义，scale-out 层用 InfiniBand（封闭）和 Spectrum-X（开放）双轨覆盖万卡集群。其昂贵的根源在于全栈锁定的定价权：GB300 NVL72 整柜 BOM 约 $399 万，VR200 已达 $780 万，其中 GPU 占比从 63% 降到 51%，显存/内存从 9% 暴涨至 26%。但也正是这种封闭性，使得每一层优化可以互相配合，达到了眼下任何开放方案都无法比拟的性能天花板。
+**1. 英伟达的体系化壁垒。** 从 NVLink 到 NVSwitch 再到 InfiniBand/Spectrum-X，英伟达构建了从单芯片到大集群的完整互联体系——scale-up 层用 NVLink + NVSwitch 实现域内万亿级带宽和内存语义，scale-out 层用 InfiniBand（封闭）和 Spectrum-X（开放）两条路线覆盖万卡集群。其昂贵的根源在于全栈锁定的定价权：GB300 NVL72 整柜 BOM 约 $399 万，VR200 已达 $780 万，其中 GPU 占比从 63% 降到 51%，显存/内存从 9% 上升至 26%。但也正是这种封闭性，使得每一层优化可以互相配合，达到了眼下任何开放方案都无法比拟的性能上限。
 
-**2. Scale-up 竞争格局：从"一家独大"到"群雄并起"。** 海外形成了 UALink（100+ 成员开放联盟）、Google ICI（TPU 全栈自研）和 AWS NeuronLink（云厂商自研）三条路线并存的态势。AMD 的 Infinity Fabric 已退居 Chiplet 片内互联，转向 UALink 开放标准。国内方面，华为的 UB 统一总线在 384 超节点规模上走在最前，摩尔线程 MTLink 以 1,314 GB/s 位列国产带宽第一，壁仞以光交换超节点另辟蹊径，OISA 则试图构建国产统一标准。共同挑战在于：除华为外，多数方案尚未在大规模训练集群中得到充分验证，生态成熟度差距仍是主要制约。
+**2. Scale-up 竞争格局：从单一厂商主导到多方竞争。** 海外形成了 UALink（100+ 成员开放联盟）、Google ICI（TPU 全栈自研）和 AWS NeuronLink（云厂商自研）三条路线并存的态势。AMD 的 Infinity Fabric 已退居 Chiplet 片内互联，转向 UALink 开放标准。国内方面，华为的 UB 统一总线在 384 超节点规模上走在最前，摩尔线程 MTLink 以 1,314 GB/s 位列国产带宽第一，壁仞以光交换超节点采取差异化路线，OISA 则试图构建国产统一标准。共同挑战在于：除华为外，多数方案尚未在大规模训练集群中得到充分验证，生态成熟度差距仍是主要制约。
 
-**3. Scale-out 交换芯片：AI 算力的第三大瓶颈。** 博通以 54.6% 的份额统治全球市场，Tomahawk 6（102.4 Tbps/3nm）代表了商用芯片的性能巅峰。英伟达通过 Mellanox 自研 ASIC，同时用 InfiniBand 封闭和 Spectrum-X 开放两条路线争夺份额——2026 年 Q1 Spectrum-X 登顶全球数据中心交换机营收榜首。国内方面，盛科通信的 Arctic 芯片（25.6 Tbps/800G）在对标博通 Tomahawk 4 级别的产品线上实现了国产突破，在超节点细分市场占有约 40% 份额；整机层则由华为（海思自研芯片，45–50% 份额）、新华三（盛科+博通双线，10–15%）和中兴通讯（凌云 51.2T 自研芯片，15–20%）构成了三强格局。
+**3. Scale-out 交换芯片：AI 算力的第三大瓶颈。** 博通以 54.6% 的份额主导全球市场，Tomahawk 6（102.4 Tbps/3nm）代表了商用芯片的性能峰值。英伟达通过 Mellanox 自研 ASIC，同时用 InfiniBand 封闭和 Spectrum-X 开放两条路线争夺份额——2026 年 Q1 Spectrum-X 登顶全球数据中心交换机营收榜首。国内方面，盛科通信的 Arctic 芯片（25.6 Tbps/800G）在对标博通 Tomahawk 4 级别的产品线上实现了国产突破，在超节点细分市场占有约 40% 份额；整机层则由华为（海思自研芯片，45–50% 份额）、新华三（盛科+博通双线，10–15%）和中兴通讯（凌云 51.2T 自研芯片，15–20%）构成了三强格局。
 
-**4. 国产算力集群的双轮驱动。** 已形成以华为昇腾 CloudMatrix 超节点为高性能核心、OISA 为开放生态补充的格局。DeepSeek V4 系列在全球范围内首次将华为昇腾芯片引入万亿参数模型的训练流程，深圳河套学院使用 1,000+ 块昇腾 910C 独立验证了 DeepSeek V4-Pro 的全参数后训练。供应链方面，GPU 芯片和高端交换芯片与海外仍存在约 2–4 年的代际差距，但在交换机整机、液冷、光模块、PCB 等配套环节已形成较强的国产替代能力。
+**4. 国产算力集群的双线并行。** 已形成以华为昇腾 CloudMatrix 超节点为高性能核心、OISA 为开放生态补充的格局。DeepSeek V4 系列在全球范围内首次将华为昇腾芯片引入万亿参数模型的训练流程，深圳河套学院使用 1,000+ 块昇腾 910C 独立验证了 DeepSeek V4-Pro 的全参数后训练。供应链方面，GPU 芯片和高端交换芯片与海外仍存在约 2–4 年的代际差距，但在交换机整机、液冷、光模块、PCB 等配套环节已形成较强的国产替代能力。
 
 **5. 核心趋势：从单点性能博弈到多层生态竞争。** AI 互联领域的竞争已从"谁的带宽更高"的单维度比拼，演进为性能、生态、成本、供应链安全的多维博弈。理解这套从 scale-up 到 scale-out、从芯片到整机、从海外到国产的多层互联体系，比记住某个具体参数更有价值——重要的是建立体系化的认知框架。
 
 ---
-本篇聚焦于 AI 云端芯片之间的物理互联——scale-up 与 scale-out 两层的协议、芯片和整机方案。下一篇文章计划深入 AI 软件栈，以英伟达的实现方案为主线，拆解从 PyTorch 框架到硬件的数据流全路径，并探讨如果自研 AI 硬件，需要适配哪些软件栈和生态层面。届时也会对目前已有厂商的方案进行横向对比分析。敬请期待。
 
-*声明：本文基于公开资料整理，数据来源包括英伟达官网、SemiAnalysis、QYResearch、摩根士丹利研报、各公司官方文档及技术媒体分析。所有价格数据均为估算值。技术参数截至2026年7月。*
+本篇聚焦于 AI 云端芯片之间的物理互联——scale-up 与 scale-out 两层的协议、芯片和整机方案。下一篇文章计划深入 AI 软件栈，以英伟达的实现方案为主线，拆解从 PyTorch 框架到硬件的数据流全路径，并探讨如果自研 AI 硬件，需要适配哪些软件栈和生态层面。届时也会对目前已有厂商的方案进行横向对比分析。
 
-
----
-
-
+*声明：本文基于公开资料整理，数据来源包括英伟达官网、SemiAnalysis、QYResearch、摩根士丹利研报、各公司官方文档及技术媒体分析。所有价格数据均为估算值。技术参数截至 2026 年 7 月。*
