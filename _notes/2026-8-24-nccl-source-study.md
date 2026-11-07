@@ -2293,36 +2293,80 @@ ncclGinWaitSignal(net, coop, signal, least, bits, ord);                         
 
 操作对象是三类句柄：**窗口** `ncclGinWindow_t`（`void*`，`gin_device_host_common.h:18`）、**信号** `ncclGinSignal_t`（`uint32_t`，`nccl_device/core.h:29`）、**计数器** `ncclGinCounter_t`（`uint32_t`）。信号分强/弱两种语义（`gin.h:23-26`）：**Strong** signal 的可见性隐含"它之前所有 put 都已落定"；**Weak** 只保证捆绑的那次 put 落定——DeepEP 用 strong signal 做跨步同步、weak 做单次通知。
 
-第一层的接口里没有 backend 参数，但同一份上层代码必须能在 GDAKI、GPI、PROXY 三种实现上运行。这个矛盾由第二层解决：对外 API 内部都汇到 `ncclGinCall`，再进 `ncclGinCallImpl` 按 `ncclGinCtx.backend` 分发。分发依据来自 4.3 下发的设备侧 context，因此 kernel 运行时不需要查询 Host。
+第一层的接口里没有 backend 参数，但同一份上层代码必须能在 GDAKI、GPI、PROXY 三种实现上运行。这个矛盾由第二层解决：对外 API 内部都汇到 `ncclGinCall`，再进 `ncclGinCallImpl` 分发到具体的 backend 实现。分发有两条依据——编译期常量 `beMask` 说明**这次编译把哪几种 backend 编进了内核**，`ctx.backend` 说明**当前这个 context 实际在用哪一种**（来自 4.3 下发的 `ginNetDeviceTypes`）。下面这段代码就是分发的全部逻辑，读的时候重点看前两行如何决定走哪条 case、以及每个 case 里的条件如何帮编译器裁掉无关代码；中文注释是笔记补注，代码本身保持源码原样：
 
 **第二层：分发（`src/include/nccl_device/gin/gin_device_common.h`）**
 
 ```cpp
-// gin_device_common.h:178-199（节选）
+// gin_device_common.h:177-199（节选，中文注释为笔记所加）
 template <template <ncclNetDeviceType> typename ApiFn, typename... Arg>
 NCCL_DEVICE_INLINE static decltype(auto) ncclGinCallImpl(unsigned beMask, ncclGinCtx ctx, Arg&&... arg) {
+  // ApiFn 是第三层那个「按 backend 特化的操作模板」（如 ncclGinApi_Put）；
+  // beMask 是编译期位掩码，第 k 位为 1 表示第 k 号 backend 被编进本内核。
+  // 位号取 backend 枚举值：PROXY=2、GDAKI=3、GPI=4（net_device.h:18-24）。
   bool singleton = (beMask & (beMask - 1)) == 0;
+  // x & (x-1) 会清掉 x 最低位的那个 1；结果为 0 说明 beMask 只启用了一种 backend。
+
   switch (singleton ? __popc(beMask - 1) : (int)ctx.backend) {
-    case NCCL_NET_DEVICE_GIN_PROXY: return ApiFn<PROXY>::call(ctx, ...);
-    case NCCL_NET_DEVICE_GIN_GDAKI: return ApiFn<GDAKI>::call(ctx, ...);
-    case NCCL_NET_DEVICE_GIN_GPI:   return ApiFn<GPI>::call(ctx, ...);
-    default: __builtin_unreachable();
+    // 只启用一种时无需读内存：__popc 数出 beMask-1 里 1 的个数，
+    // 恰好等于唯一置位位的位号（也就是 backend 枚举值），编译期即可定死分支；
+    // 启用多种时才退回运行时读取 ctx.backend。
+#if NCCL_GIN_PROXY_ENABLE
+  case (int)NCCL_NET_DEVICE_GIN_PROXY:
+    // 该 backend 不在 beMask 中时告知编译器「此分支不可达」，便于整段裁掉。
+    if (!(1 & (beMask >> (int)NCCL_NET_DEVICE_GIN_PROXY))) __builtin_unreachable();
+    return ApiFn<NCCL_NET_DEVICE_GIN_PROXY>::call(ctx, static_cast<Arg&&>(arg)...);
+    // 把调用参数原样转发给第三层该 backend 的特化实现。
+#endif
+    // GDAKI / GPI 两个 case 结构完全相同，各自受对应的 ENABLE 宏控制（:186-195）。
+  default:
+    __builtin_unreachable();
   }
 }
 ```
 
-`ncclGinCtx`（`gin_device_common.h:62-70`）携带 `backendMask`/`backend`/`rank`/`nRanks`/`handle`/`contextId`。模板 + switch 让未启用的 backend 在编译期被整段裁掉。
+把两个位运算展开说一下：设 `beMask = 1 << 3`（只编入 GDAKI），则 `beMask & (beMask - 1) = 8 & 7 = 0`，`singleton` 为真；同时 `beMask - 1 = 7 = 0b111`，`__popc(7) = 3`，正好得到 GDAKI 的枚举值，于是 switch 直接落到 GDAKI 分支，连 `ctx.backend` 都不必读。若编入了多种 backend，`singleton` 为假，才按 `ctx.backend` 在运行时选择。
+
+`ncclGinCtx`（`gin_device_common.h:62-70`）携带 `backendMask`/`backend`/`rank`/`nRanks`/`handle`/`contextId`，其中 `backend` 与 `backendMask` 由 `ncclGin_C_makeCtx` / `_makeCtx` 从设备侧 context 填入（`impl/gin__funcs.h:126-147`）。`ncclGinCall` 有两个重载（`gin_device_common.h:201-209`）：一个传运行时的 `ctx.backendMask`，另一个传模板参数 `beMask`（编译期常量）。配合每个 case 里的 `__builtin_unreachable()`，未启用的 backend 代码会被编译器整段裁掉，内核里不留下运行时判断的开销。
 
 分发层只负责「选谁」，并不产生任何网络请求。真正把一次 `Put` 变成 WQE 或 GFD 的，是被选中的那个 backend 的特化实现。为了让分发层能用统一的 `ApiFn<backend>::call(...)` 形式调用，NCCL 把每个操作也定义成按 backend 特化的模板结构，这就是第三层：
 
 **第三层：内部 API（`gin_device_common.h:102-173`）**
 
+下面贴出其中三个最常用操作的真实声明，中文注释为笔记所加。可以看到它们都是只带 `backend` 一个模板参数的结构体，成员函数 `call` 的第一个参数统一是 `ncclGinCtx`——这正是第二层能用 `ApiFn<backend>::call(ctx, ...)` 统一调用的原因：
+
 ```cpp
-template <ncclNetDeviceType backend> struct ncclGinApi_Put  { ... call(...); };
-template <ncclNetDeviceType backend> struct ncclGinApi_Get  { ... call(...); };
-template <ncclNetDeviceType backend> struct ncclGinApi_Wait { ... call(...); };
-// 还有 Flush / FlushAsync / PutValue / GetSignalPtr / GetCounterPtr / ResetSignal / ResetCounter
+// gin_device_common.h:114-131（节选，中文注释为笔记所加）
+template <ncclNetDeviceType backend>
+struct ncclGinApi_Get {
+  template <typename Coop>
+  NCCL_DEVICE_INLINE static void call(ncclGinCtx, Coop coop, int peer, ncclGinWindow_t remoteWin, size_t remoteOff,
+                                      ncclGinWindow_t localWin, size_t localOff, size_t bytes, bool hasDescriptor,
+                                      ncclGinDescriptorSmem* descriptor, uint32_t optFlags = ncclGinOptFlagsDefault);
+  // 参数里已经带上远端窗口、本地窗口、偏移与长度——第一层 API 的语义在这里落成具体数据
+};
+
+template <ncclNetDeviceType backend>
+struct ncclGinApi_Put {
+  template <typename Coop>
+  NCCL_DEVICE_INLINE static void call(ncclGinCtx, Coop coop, int peer, bool hasWins, ncclGinWindow_t dstWin,
+                                      size_t dstOff, ncclGinWindow_t srcWin, size_t srcOff, size_t bytes,
+                                      ncclGinSignalDescriptor signal, ncclGinSignalOp_t signalOp, uint64_t signalOpArg,
+                                      bool hasCounter, ncclGinCounter_t counterId, bool hasDescriptor,
+                                      ncclGinDescriptorSmem* descriptor, cuda::thread_scope required,
+                                      cuda::thread_scope given, uint32_t optFlags = ncclGinOptFlagsDefault);
+  // 除数据外还可附带 signal / counter：这解释了为什么 Put 的参数比 Get 多一截
+};
+
+template <ncclNetDeviceType backend>
+struct ncclGinApi_Wait {
+  NCCL_DEVICE_INLINE static void call(ncclGinCtx, ncclGinRequest_t& outRequest, bool hasDescriptor,
+                                      ncclGinDescriptorSmem* descriptor, cuda::memory_order ord, uint32_t* abortFlag);
+  // 等待异步请求完成，与 4.5 讲的「提交不等于完成」对应
+};
 ```
+
+同一文件里还有 `Flush` / `FlushAsync` / `PutValue` / `GetSignalPtr` / `GetCounterPtr` / `ResetSignal` / `ResetCounter` 等操作，声明形式相同。这里只是**声明**，每个操作的具体实现由三个 backend 各自特化提供（`gin_device_common.h:100-173` 只给出模板骨架）。
 
 三个 backend 各自实现这套接口：`proxy/gin_proxy.h`、`gpi/gin_gpi.h`、`gdaki/gin_gdaki.h`。以 proxy 为例（`gin_proxy.h:68`），`ncclGinApi_Put<PROXY>::call` 最终调 `postGfd`——把请求写成一个 GFD 描述符放进共享内存（`proxyCtx->pis`/`cis` 是生产者/消费者索引），真正的网络操作由 4.5 的 progress 线程消费。
 
