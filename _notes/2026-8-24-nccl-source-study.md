@@ -2483,6 +2483,30 @@ NCCL_DEVICE_INLINE void ncclGinInitCommon(GinType* gin, ncclDevComm const& comm,
 
 两级合起来，把 `ginContextCount` 个 `contextIndex` 映射到「连接 × context」的二维资源网格；再叠加上一节的 `peer` 下标，一次 Put 的完整定位就是 `ginHandles[connectionId]` → `[contextId]` → `gdqp + peer`。内核用 `blockIdx.x % ginContextCount` 选出 `contextIndex`（`device/symmetric/all_gather_gin.cuh:17`），因此 CTA 编号直接决定了它使用哪张网卡上的哪组 QP。
 
+**从 CTA 到 QP：并行发送的完整路径。** 上面这句里的 `blockIdx.x` 是关键，它把 CUDA 的并行性与 GIN 的并行性接了起来。CUDA 里 CTA（Cooperative Thread Array）就是 thread block：一个 kernel 以 grid 形式启动，grid 中多个 block 在多个 SM 上并行执行，每个 block 有唯一编号 `blockIdx.x`。GIN 要做的事，是把这些「并行执行单元」映射到「并行通信资源」上。整条映射链如下：
+
+```text
+CUDA 并行层：一个 kernel 启动多个 block（CTA），并行执行，各有唯一 blockIdx.x
+      │  blockIdx.x % ginContextCount     取模：把 block 编号折进 context 的有限范围
+      ▼
+contextIndex                             扁平 context 编号（0 .. ginContextCount-1）
+      │  ncclGinInitCommon 拆低位 / 高位
+      ▼
+connectionId（选哪张网卡）+ contextId（选该网卡上第几组 QP）
+      │  + peer
+      ▼
+唯一一条 QP
+```
+
+`ncclGin` 构造器（`gin.h:204-215`、`gin__funcs.h:100-105`）接收 `contextIndex` 并原样交给 `ncclGinInitCommon` 拆分，NCCL 的 symmetric 内核都在函数开头这样构造（`all_gather_gin.cuh:17`、`reduce_scatter_gin.cuh:13`），因此**一个 block 内的所有 GIN 操作固定走 `blockIdx.x` 定出的那一个 context**：block 内通过 `coop` 协同，block 之间用不同 context 隔离。
+
+这里要说明两点，它们合起来回答了「为什么这样能并行发送」：
+
+1. **取模是「并发单元 → 有限资源」的轮转分配器。** 一个 kernel 的 block 数通常远大于 context 数（context 才几十个，block 可能有上千个）。取模让相邻 `blockIdx.x` 落到相邻 `contextIndex`，进而交错到不同网卡、不同 QP 组，于是多个 block 的发送被分散到多路资源上并行进行。这正是「多组数据发散到多个 CTA、多个 CTA 再打散到多张网卡、多个 context 上的 QP 组」的实现机制——CUDA 的并行性（多 block）经过这一层映射，被翻译成了 GIN 的并行性（多网卡 × 多 QP 组）。
+2. **分配粒度由并发单元决定，且要匹配资源数。** 并发度（block 数）不超过资源数（context 数）时，每个 block 独占一组 QP，走 `CTA`/`EXCLUSIVE` 模式、提交无需锁；超过后，多个 block 绕回起点共享同一 context，才退化为 `GPU` 模式、需要锁与原子（对应上一节的争用代价）。所以 `blockIdx.x % ginContextCount` 既是并行发送的入口，也是决定「独占还是共享」的开关。
+
+分配单位因内核而异，但机制相同：NCCL 的 symmetric 内核是「一个 CTA = 一个 context」（block 级），DeepEP 的 dispatch 内核粒度更细，是「一个 warp = 一个 context」（`dispatch.cuh:67-71`，每个 warp 用 `get_qp_mode` 分一个 QP）。无论 block 级还是 warp 级，「并发单元取模轮转到有限资源」这一逻辑不变。
+
 **信号影子（signal shadow）：GPU 本地维护的信号进度副本。** 这里补一个前面 `_signalShadows` 提到的概念。先看「信号」本身：它是 GIN 的完成通知机制——`put`/`get` 可以附带一个 signal，网卡在数据落定后对信号槽做原子加，接收方轮询该槽位判断之前的操作是否已完成。信号槽放在对称内存里（每个 context 一段 `signals_table`），值是单调递增的。而「影子」是这块 GPU 本地记录的一份「我已经等到哪个信号值」，按 `contextIndex` 分片、每个 signal 一个 uint64，分配大小为 `nGinContexts * ginSignalTotal * sizeof(uint64_t)`（`dev_runtime.cc:1237`），地址位于对称内存窗口内（`:1298-1299`），设备端可直接读写。
 
 为什么需要它，有两层原因：
