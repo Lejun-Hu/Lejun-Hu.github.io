@@ -2406,7 +2406,33 @@ doca_gpu_dev_verbs_qp* qp = loadConst(&gdaki->gdqp) + peer;   // 按 peer 取本
 
 **context**是连接内部的并发工作区。`ginContextCount` 是上层库申请的总数（DeepEP 里即 `num_allocated_qps`），Host 把它向上取整到连接数的倍数，得到 `nContextsPerComm = nContextsTotal / ginCommCount`（`gin_host.cc:210-225`），再作为 `ginConfig.nContexts` 传给该连接的 `createContext`（`:265-268`）。一个 context 拥有的独立资源因 backend 而异：GDAKI 里每个 context 一个 `ncclGinGdakiGPUContext`，含自己的 `gdqp`（QP 数组）、`counters_table` 与 `signals_table`，分配大小是 `ncontexts * NCCL_GIN_GDAKI_GPU_CONTEXT_MAX_SIZE`（`gin_host_gdaki.cc:516-518`），QP 总数为 `nqps_for_comm = ncontexts * nranks`（`:476-478`）；PROXY 里每个 context 一条独立的 GFD 队列与 `sis`/`cis` 索引（`gin_host_proxy.cc:32-38`、`:174`），signal 槽位按 `contextId * nSignalsPerContext` 分开（`:309`）。因此选 `contextId` 决定的是：**该连接内用哪一组 QP 或哪一条 GFD 队列、哪一段 signal 与 counter 槽位**。多个 context 让不同 CTA 各用一套队列与信号，避免争用同一个发送队列。
 
-下面这段是拆分逻辑，中文注释为笔记所加。注意三个字段分别以哪个下标为索引，这正体现了两级资源的分工：
+把上面两层资源与映射画成排布图更直观。下图以「2 张 GIN 网卡、每条连接 3 个 context、每个 context 4 个 peer」为例，展示从网卡到 QP 的并列结构，以及 kernel 侧 `contextIndex` 到 `connectionId` / `contextId` 的映射。其中 channelId 是 Host 建连期 `ncclTopoGetLocalGinDevs` 枚举本 GPU 就近网卡时用的计数器：`localGinDevs[i]` 即 channelId=i 枚举到的那张网卡，连接号 i 直接用 `localGinDevs[i]`，因此 channelId 与 connectionId 在数组下标上一一对应（`topo.cc:2084-2092`）。
+
+```text
+Host 建连期：channelId 枚举本 GPU 就近的 GIN 网卡 → localGinDevs[]
+  channelId=0 ──► 网卡 dev=5 ──┐
+  channelId=1 ──► 网卡 dev=9 ──┴──► localGinDevs[] = {5, 9}（2 张并列，netsPerGpu=2）
+
+连接层 connectionId（每条连接 = 一张网卡 + 一份设备侧资源表，上限 4）
+  connectionId=0 ──► localGinDevs[0]=dev5 ──► ginHandles[0]
+  connectionId=1 ──► localGinDevs[1]=dev9 ──► ginHandles[1]
+
+context 层 contextId（每条连接内 3 组并列，每组 nranks 个 QP，按 peer 索引）
+  ginHandles[0]（网卡 dev5）
+    contextId=0 ──► GPUContext{ gdqp→[QP(peer0)  QP(peer1)  QP(peer2)  QP(peer3)] }
+    contextId=1 ──► GPUContext{ gdqp→[QP(peer0)  QP(peer1)  QP(peer2)  QP(peer3)] }
+    contextId=2 ──► GPUContext{ gdqp→[QP(peer0)  QP(peer1)  QP(peer2)  QP(peer3)] }
+  ginHandles[1]（网卡 dev9）：同样 3 组，结构相同，从略
+
+kernel 侧定位：contextIndex → (connectionId, contextId) → 某组内的 QP
+  contextIndex = blockIdx.x % ginContextCount            （共 6 个：0..5）
+  connectionId = contextIndex & (ginConnectionCount-1)   （低位：0,1,0,1,0,1 交错选网卡）
+  contextId    = contextIndex >> 1                        （高位：0,0,1,1,2,2 分组选 QP 组；连接数=2 时右移 1 位）
+  QP = ((ncclGinGdakiGPUContext*)ginHandles[connectionId])[contextId].gdqp + peer
+  例 contextIndex=5 → connectionId=1（网卡 dev9）、contextId=2（第 2 组），发 peer2 即用该组 QP(peer2)
+```
+
+图中三层都是**建连期固定的静态绑定**：网卡与连接、连接与其下的 context、context 与其下的 QP 数组，运行时 kernel 只需用 `contextIndex` 拆出两个下标、再加一个 `peer`，就能落到唯一的 QP。下面这段是拆分逻辑，中文注释为笔记所加，与图里的低位/高位规则一一对应：
 
 ```cpp
 // src/include/nccl_device/impl/gin__funcs.h:81-97（节选，中文注释为笔记所加）
