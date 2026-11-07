@@ -2242,11 +2242,37 @@ if (ginState->needsProxyProgress && ginState->ginProgress == 0) {
 }
 ```
 
-progress 线程**不是 GIN 初始化就启动**，而是某个 backend 的 `devHandle->needsProxyProgress == 1` 时才起（典型是 PROXY）。到这四步完成，`ncclDevComm` 里就带上了设备侧可用的 GIN 上下文与窗口，上层 kernel 才能调用 4.4 的 API。
+progress 线程**不是 GIN 初始化就启动**，而是由所选 backend 在 `createContext` 时声明需要才起（详见 4.5）。
+
+**四步完成后，Host 与 Device 的分界就确定了。** Host 侧在 kernel 启动前完成了全部控制面准备：选定插件、建立 rank 间连接（`ginComms[]`）、注册对称内存窗口（取得 rkey/lkey 与窗口句柄）、分配设备侧 context（QP 数组或 GFD 队列、signal/counter 表、共享内存队列指针）。这些结果通过 `ncclDevComm` 的字段下发给设备侧：
+
+```cpp
+// src/include/nccl_device/impl/comm__types.h:48-57（节选）
+uint8_t ginConnectionCount;
+uint8_t ginNetDeviceTypes[NCCL_GIN_MAX_CONNECTIONS];  // 每条连接使用哪个 backend
+void*   ginHandles[NCCL_GIN_MAX_CONNECTIONS];         // 设备侧 context 的地址
+int     ginSignalCount, ginCounterCount;
+uint64_t* ginSignalShadows;
+uint32_t ginContextCount;
+```
+
+这些字段由 `ncclGinDevCommSetup` 从 `devHandles[n]->handle` 填入（`gin_host.cc:289-291`）；插件文档也明确区分了两者：`ginCtx` 是 host 侧描述符，`ncclNetDeviceHandle_t.handle` 是设备侧描述符（`plugins/gin/README.md:127-131`）。设备侧构造 `ncclGin_C` 时，`ncclGinInitCommon` 直接从 `ncclDevComm` 读出 backend 类型与句柄（`src/include/nccl_device/impl/gin__funcs.h:81-98`），不再向 Host 查询。
+
+因此 kernel 执行期间不需要 Host 参与控制面操作：连接、内存注册、队列与信号的分配都已就绪，且窗口句柄里的 rkey/lkey、context 里的 QP 与队列地址都是 GPU 可直接读写的地址，GPU 线程按 4.4 的 API 提交请求即可。这正是 GIN 能消除 Host-Device 往返的前提。
+
+数据面则需要区分 backend。GPI 与纯 GPU 直驱的 GDAKI 下，网络操作的提交与完成完全由 GPU 侧完成；PROXY 下 GPU 只把描述符写入共享队列，仍由 Host progress 线程代发；GDAKI 在 QP 需要 CPU 代理时同样如此。更准确的表述是：**控制面准备一次完成并下发到设备侧，kernel 不再为此与 Host 交互；数据面是否经过 Host，取决于所选 backend。**
 
 ### 4.4 设备侧：GPU kernel 里怎么发起一次通信
 
-设备侧分**三层**，从上层库视角到硬件逐层看：
+4.3 结束时，Host 侧已经完成连接建立、内存注册与设备侧 context 分配，并把 backend 类型、句柄写进了 `ncclDevComm`。这些字段是留给 GPU kernel 用的：上层库在自己写的 kernel 里调用 `ncclGinPut` 时，正是通过它们确定该往哪个 QP 或哪条队列提交请求。本节站到这条分界的另一侧，追一次设备侧发起的通信调用怎样一步步落到硬件上。
+
+沿调用方向看，有三个问题需要回答：kernel 里能调用哪些 GIN 操作；一次调用怎样找到 4.2 选定的那个 backend；找到之后最终写出的是标准 RDMA WQE 还是 GFD 描述符。代码对应三层，按从上层库到硬件的顺序展开：
+
+1. **第一层 · 对外 API**（`src/include/nccl_device/gin.h`）：上层库直接调用的函数，以及窗口、信号、计数器三类操作对象；
+2. **第二层 · 分发**（`gin_device_common.h`）：`ncclGinCall` / `ncclGinCallImpl` 按 `ncclGinCtx.backend` 把调用派给对应 backend；
+3. **第三层 · 内部 API 与 backend 实现**（`gin_device_common.h` 的 `ncclGinApi_*` 模板 + `proxy/`、`gpi/`、`gdaki/` 三个目录）：构造描述符或 WQE 并写入队列。
+
+本节只覆盖「提交」这一侧；请求提交后如何确认完成、以及为什么部分 backend 还需要 Host 线程推进，放在 4.5。
 
 **第一层：对外 API（`src/include/nccl_device/gin.h`）**——上层库（DeepEP）直接调用的入口，签名带 `ncclGin_C*`（GIN 上下文）和 `ncclTeam`：
 
@@ -2292,7 +2318,7 @@ template <ncclNetDeviceType backend> struct ncclGinApi_Wait { ... call(...); };
 
 ### 4.5 Progress 线程：三种 backend 各靠什么推进
 
-GIN 的 Put/Get 是**异步**的：设备端提交完就返回，真正落定需要一个"推进者"。这就是 `ncclGinProgress`（`src/gin/gin_host.cc:43-76`）：
+GIN 的 Put/Get 是**异步**的：设备端提交完就返回，不等待网卡完成。对于需要 Host 协助推进的 backend，落定过程由 `ncclGinProgress`（`src/gin/gin_host.cc:43-76`）这个 Host 侧线程承担：
 
 ```cpp
 void* ncclGinProgress(struct ncclGinState* ginState) {
@@ -2310,12 +2336,17 @@ void* ncclGinProgress(struct ncclGinState* ginState) {
 }
 ```
 
-关键点：**这个线程不是所有 backend 都需要**。`ginProgress` 是 `ncclGin_t` 接口里的一个可选回调（`gin_v14.h:60`，注释 "Will be called if devHandle.needsProxyProgress=1"）。三种 backend 的分工：
+**这个线程是否启动，由所选 backend 自己声明，而不是无条件创建，也不是"没有 GIN 能力时的兜底"。** `ginProgress` 是 `ncclGin_t` 接口里一个可选的回调（`gin_v14.h:59-60`，注释 "Will be called if devHandle.needsProxyProgress=1"）；`needsProxyProgress` 是 `ncclNetDeviceHandle_t` 的字段，由插件在 `createContext` 里填好，`ncclGinDevCommSetup` 遍历所有 context 汇总（`gin_host.cc:291`），任一为 1 才起线程。
 
-- **PROXY**：设备端只写了共享内存里的 GFD 描述符，**必须有 Host 线程**读出来、调用 Net Plugin 的 `isend`/`irecv` 真正提交，完成后写回完成索引——所以 `needsProxyProgress = 1`，靠 progress 线程推进；
-- **GPI / GDAKI**：GPU 已经直接驱动网卡，progress 的作用退化为轮询 NIC 完成队列（CQ）、回收资源/更新 credit，是否另起线程取决于具体实现。
+| Backend | `needsProxyProgress` | 原因 |
+|---------|---------------------|------|
+| PROXY | 恒为 `1`（`gin_host_proxy.cc:554`） | 设备端只把 GFD 描述符写进共享内存队列，必须由 Host 线程读出、调用 Net Plugin 的 `isend`/`irecv` 真正提交，完成后写回消费索引 |
+| GDAKI | 取决于 QP 的 `cpu_proxy` 标志（`transport/net_ib/gdaki/gin_host_gdaki.cc:745`、`:794`） | 绝大多数 QP 由 GPU 直接驱动；个别需要 CPU 代理的 QP 才置 1 |
+| GPI / 外部插件 | 通常为 `0`（示例插件 `plugins/gin/example/plugin.c:170`） | GPU 直接写网卡可见的 GFD 队列，无需 Host 推进 |
 
-线程的启停由 `ginProgress` 状态控制：`0` 暂停等待（`cond.wait`）、`1` 运行、`-1` 退出（`ncclGinHostFinalize` 置 -1 并 `join`）。
+所以这个线程的存在，说明的是"**当前选中的后端需要 Host 协助推进**"，与「有没有 GIN 能力」无关。选到 GPI 这类完全由 GPU 直驱的后端时，就不会创建它。这也和 4.3 第四步的条件判断对应：`if (ginState->needsProxyProgress && ginState->ginProgress == 0)`。
+
+线程的启停由 `ginProgress` 状态控制：`0` 暂停等待（`cond.wait`）、`1` 运行、`-1` 退出（`ncclGinHostFinalize` 置 -1 并 `join`）。没有 progress 线程时，错误上报走插件的 `queryLastError`（`gin_v14.h:62-63`），`ncclCommGetAsyncError` 会区分这两种路径（`init.cc:3459-3465`）。
 
 ### 4.6 与 Host 发起模式的对比
 
