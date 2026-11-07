@@ -1,8 +1,8 @@
 <head>
-  <!-- 主题防闪烁脚本：在页面渲染前读取并应用主题 -->
+  <!-- 主题防闪烁脚本：在页面渲染前读取并应用主题，未设置过时默认深色 -->
   <script>
     (function() {
-      const theme = localStorage.getItem('theme') || 'light';
+      const theme = localStorage.getItem('theme') || 'dark';
       document.documentElement.setAttribute('data-theme', theme);
     })();
   </script>

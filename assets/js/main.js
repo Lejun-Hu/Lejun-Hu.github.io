@@ -4,7 +4,7 @@
  */
 function toggleTheme() {
   const html = document.documentElement;
-  const currentTheme = html.getAttribute('data-theme') || 'light';
+  const currentTheme = html.getAttribute('data-theme') || 'dark';
   const newTheme = currentTheme === 'light' ? 'dark' : 'light';
 
   html.setAttribute('data-theme', newTheme);
@@ -20,7 +20,7 @@ function toggleTheme() {
  */
 function syncThemeToggle() {
   const html = document.documentElement;
-  const currentTheme = html.getAttribute('data-theme') || 'light';
+  const currentTheme = html.getAttribute('data-theme') || 'dark';
   const lightIcon = document.querySelector('.theme-icon-light');
   const darkIcon = document.querySelector('.theme-icon-dark');
 
