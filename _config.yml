@@ -56,6 +56,7 @@ exclude:
   - node_modules
   - vendor
   - cv-website.zip
+  - rules        # 内部写作规则，仅供模型调用，不发布
 
 # ============================================
 # 自定义集合配置
