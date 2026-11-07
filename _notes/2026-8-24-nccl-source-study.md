@@ -2272,7 +2272,7 @@ uint32_t ginContextCount;
 2. **第二层 · 分发**（`gin_device_common.h`）：`ncclGinCall` / `ncclGinCallImpl` 按 `ncclGinCtx.backend` 把调用派给对应 backend；
 3. **第三层 · 内部 API 与 backend 实现**（`gin_device_common.h` 的 `ncclGinApi_*` 模板 + `proxy/`、`gpi/`、`gdaki/` 三个目录）：构造描述符或 WQE 并写入队列。
 
-本节只覆盖「提交」这一侧；请求提交后如何确认完成、以及为什么部分 backend 还需要 Host 线程推进，放在 4.5。
+三层走完之后，4.4.1 再往下一层追问 GDAKI 的具体参数：一次 `Put` 用哪条 QP、远端地址与 rkey 从哪里取——这部分直接说明 4.3 下发的句柄如何被消费。本节只覆盖「提交」这一侧；请求提交后如何确认完成、以及为什么部分 backend 还需要 Host 线程推进，放在 4.5。
 
 **第一层：对外 API（`src/include/nccl_device/gin.h`）**——上层库（DeepEP）直接调用的入口，签名带 `ncclGin_C*`（GIN 上下文）和 `ncclTeam`：
 
@@ -2315,6 +2315,53 @@ template <ncclNetDeviceType backend> struct ncclGinApi_Wait { ... call(...); };
 ```
 
 三个 backend 各自实现这套接口：`proxy/gin_proxy.h`、`gpi/gin_gpi.h`、`gdaki/gin_gdaki.h`。以 proxy 为例（`gin_proxy.h:68`），`ncclGinApi_Put<PROXY>::call` 最终调 `postGfd`——把请求写成一个 GFD 描述符放进共享内存（`proxyCtx->pis`/`cis` 是生产者/消费者索引），真正的网络操作由 4.5 的 progress 线程消费。
+
+#### 4.4.1 QP 选择与参数传递：设备侧怎么定位一次 Put 的目标
+
+前三层回答的是「调用怎么走到 backend」。走到 GDAKI 这一层时，还有两个更具体的问题：一次 `Put` 用哪条 QP、远端地址与 rkey 从哪里取。这正好说明 4.3 里 Host 下发的那些句柄在设备侧如何被消费，因此放在设备侧这一节展开。以下以 GDAKI 为主，因为它由 GPU 自己选定 QP；另外两个 backend 的选择权不在 GPU。
+
+**三种 backend 的选择权归属**——同一套 `ncclGinPut` 调用，决定 QP 的位置完全不同：
+
+| Backend | QP 由谁选 | 依据 |
+|---------|-----------|------|
+| GDAKI | GPU 内核 | 设备侧持有按 peer 索引的 QP 数组（`gdqp`），发起时自己取用并投递 WQE |
+| GPI | 网卡固件 | GPU 只写 64 字节 GFD，字段为目的 PE 等抽象信息，不含 QP；WQE 生成与 QP 选择由固件完成 |
+| PROXY | Host 侧 | GPU 写 GFD 到共享队列，progress 线程读出后交给 `rmaBackend->iput` / `iget` / `iputSignal`（`gin_host_proxy.cc:245-262`），QP 由 RMA 后端负责 |
+
+**GDAKI：GPU 侧定位本地 QP**。设备侧 context 由 `ctx.handle` 指向，`ctx.contextId` 选第几个 context，`gdqp` 则是该 context 内按 peer 索引的 QP 数组：
+
+```cpp
+// src/include/nccl_device/gin/gdaki/gin_gdaki.h:59-61（节选）
+ncclGinGdakiGPUContext* gdaki = &((struct ncclGinGdakiGPUContext*)ctx.handle)[ctx.contextId];
+doca_gpu_dev_verbs_qp* qp = loadConst(&gdaki->gdqp) + peer;   // 按 peer 取本地 QP
+```
+
+逻辑上「GPU 侧有一个 `qp[peer]`」是成立的，物理形态是 `ncclGinGdakiGPUContext`（`gin_gdaki_device_host_common.h:25-36`）里位于 GPU 可见内存的 `doca_gpu_dev_verbs_qp` 数组——Host 在 `createContext` 阶段用 `doca_gpu_verbs_export_multi_qps_dev` 把这批 QP 导出到设备（`transport/net_ib/gdaki/gin_host_gdaki.cc:747`）。GPU 运行时按索引直接取，不经过 Host。
+
+`contextIndex` 还要再拆一层：`ncclGinInitCommon`（`src/include/nccl_device/impl/gin__funcs.h:86-96`）把它拆成 `connectionId` 与 `contextId`，前者选 `ginHandles[]` 里的连接，后者选该连接内的 context。内核用 `blockIdx.x % ginContextCount` 决定 context（`device/symmetric/all_gather_gin.cuh:17`），于是不同 CTA 被分散到多条连接与多个 context 上，避免所有流量压在同一条 QP。
+
+**远端信息：QP 配对在建连时固化，WQE 携带的是地址与 rkey**。这里要区分两个阶段：
+
+- **建连阶段**：`gdakiFillExchInfo` 把本端的 `qpn`、LID、GID 填入 `gdaki_exch_info`（`gin_host_gdaki.cc:353-357`），全体交换后由 `gdakiConnectQp` 调用 `doca_verbs_qp_attr_set_dest_qp_num` 把**对端 QPN 写进本地 QP 的属性**（`:416`）。一次 RDMA 写涉及通信两端各自独立的 QP：本端 QP 负责投递 WQE，对端 QP 由这个绑定关系确定，配对工作在初始化时一次完成。
+- **运行阶段**：设备侧提交时传给 `doca_gpu_dev_verbs_put` 的参数是 `qp`、远端地址与 rkey、本地地址与 lkey、长度，**不需要再带远端 QP 号**（`gin_gdaki.h:67-71`、`:110`）：
+
+```cpp
+raddr.addr = dstOff;
+raddr.key  = loadConst(loadConst(&dstMh->rkeys) + peer);   // 远端 rkey，按 peer 索引
+laddr.addr = srcOff;
+laddr.key  = loadConst(&srcMh->lkey);                      // 本地 lkey
+```
+
+`rkeys` 来自 4.3 的窗口注册：`regMrSym` 对每块窗口做一次 AllGather 换得各 peer 的 rkey（`gin_host_gdaki.cc:262-267`），存进 `ncclGinGdakiMemHandle`（`gin_gdaki_device_host_common.h:38-41`）。RDMA 是单边写，接收方 CPU 不参与匹配，因此 WQE 必须显式给出远端虚拟地址与 rkey；网卡据此完成地址转换与内存保护校验，再把数据 DMA 到对端。带信号或计数器的操作会使用独立的 rkey（`signalKey`、`counters_table.rkeys`）以及 `companion_gdqp + peer` 这条伴随 QP（`gin_gdaki.h:75-89`）。
+
+**初始化配置的影响**：
+
+| 配置 | 作用 | 位置 |
+|------|------|------|
+| `NCCL_GIN_CONNECTION_FULL` / `RAIL` | FULL 覆盖全体 rank；RAIL 只覆盖同一 rail（`ncclTeamRail`），由是否支持跨 NIC 决定 | `gin_host.cc:141-155`、`init.cc:1670` |
+| `ginContextCount` | 每个 context 一套 QP，context 数决定可并行使用的 QP 组数 | `gin_host.cc:209-225` |
+
+把这些合到 4.3 的结论上看：QP 句柄、按 peer 索引的 rkey 表、context 数组，都是 Host 在建连与注册阶段准备好、放进 GPU 可见内存并随 `ncclDevComm` 下发的。「kernel 执行期间不再向 Host 查询」具体到 GDAKI，就是按 `contextIndex` 与 `peer` 两个下标直接取用这些资源。
 
 ### 4.5 Progress 线程：三种 backend 各靠什么推进
 
