@@ -2531,7 +2531,21 @@ laddr.addr = srcOff;
 laddr.key  = loadConst(&srcMh->lkey);                      // 本地 lkey
 ```
 
-`rkeys` 来自 4.3 的窗口注册：`regMrSym` 对每块窗口做一次 AllGather 换得各 peer 的 rkey（`gin_host_gdaki.cc:262-267`），存进 `ncclGinGdakiMemHandle`（`gin_gdaki_device_host_common.h:38-41`）。RDMA 是单边写，接收方 CPU 不参与匹配，因此 WQE 必须显式给出远端虚拟地址与 rkey；网卡据此完成地址转换与内存保护校验，再把数据 DMA 到对端。带信号或计数器的操作会使用独立的 rkey（`signalKey`、`counters_table.rkeys`）以及 `companion_gdqp + peer` 这条伴随 QP（`gin_gdaki.h:75-89`）。
+`rkeys` 来自 4.3 的窗口注册：`regMrSym` 对每块窗口做一次 AllGather 换得各 peer 的 rkey（`gin_host_gdaki.cc:1022-1025`），再把这份数组 `copy_h_to_d()` 拷进 GPU 内存、指针存进 `ncclGinGdakiMemHandle`（`gin_host_gdaki.cc:1027-1030`、`gin_gdaki_device_host_common.h:38-41`）。RDMA 是单边写，接收方 CPU 不参与匹配，因此 WQE 必须显式给出远端虚拟地址与 rkey；网卡据此完成地址转换与内存保护校验，再把数据 DMA 到对端。带信号或计数器的操作会使用独立的 rkey（`signalKey`、`counters_table.rkeys`）以及 `companion_gdqp + peer` 这条伴随 QP（`gin_gdaki.h:75-89`）。
+
+把这一段和前面「本地 QP 的复杂定位」合起来看，能澄清一个关键问题：设备侧发起一次 Put 所需的全部信息——本地 QP、对端 QP、远端 rkey——**是否都在初始化期备好、随句柄交到设备侧，而不是 kernel 临时向 Host 查询？** 答案是肯定的，但三者的获取方式不同，不能都套用「按编号取」：
+
+| 信息 | 初始化期如何准备 | 运行时如何取用 |
+|------|----------------|---------------|
+| 本地 QP | `createContext` 里 `doca_gpu_verbs_export_multi_qps_dev` 把 `ncontexts * nranks` 条 QP 导出到 GPU 可见内存（`gin_host_gdaki.cc:747`） | `gdqp + peer`，按 peer 下标直接取 |
+| 对端 QP 号 | 建连时 `doca_verbs_qp_attr_set_dest_qp_num` 把对端 QPN 写进本地 QP 的属性（`gin_host_gdaki.cc:416`） | **无需再取**：本地 QP 属性已绑定对端，`doca_gpu_dev_verbs_put` 只传本地 `qp` 指针 |
+| 远端 rkey | 窗口注册 `regMrSym` 做 AllGather 后 `copy_h_to_d()` 拷进 GPU 内存，指针存进窗口句柄（`gin_host_gdaki.cc:1022-1030`） | `dstMh->rkeys[peer]`，按 peer 下标从窗口句柄取 |
+
+由此得到三点结论：
+
+1. **对端 QP 不是「按编号查表」来的，而是固化在本地 QP 属性里。** 前面那套复杂定位（`connectionId`、`contextId`、`peer` 三级下标）只用于选出**本端**的发送队列；一旦拿到本地 QP 指针，对端配对已隐含其中，运行时不需要再关心远端 QP 号。这正是「运行阶段不带远端 QP 号」的原因。
+2. **rkey 与本地 QP 用同一个 `peer` 下标对齐。** `gdqp + peer` 与 `dstMh->rkeys[peer]` 里的 `peer` 是同一个 rank 索引，因此一次 Put 的两半参数——本端 QP、远端 rkey——由同一个 peer 对齐，不存在额外的映射表。
+3. **「下发」发生在初始化期，不是每次 launch kernel。** 窗口注册与 `createContext` 完成时，rkey 数组与 QP 数组就已放进 GPU 可见内存，句柄随 `ncclDevComm` 与窗口一次性交到设备侧；kernel 启动时只是按下标读这些已就绪的指针。这正是 4.3 结尾「控制面一次准备、kernel 不再向 Host 查询」在 GDAKI 参数上的具体体现。
 
 **初始化配置的影响**：
 
