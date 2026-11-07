@@ -2266,15 +2266,21 @@ uint32_t ginContextCount;
 
 4.3 结束时，Host 侧已经完成连接建立、内存注册与设备侧 context 分配，并把 backend 类型、句柄写进了 `ncclDevComm`。这些字段是留给 GPU kernel 用的：上层库在自己写的 kernel 里调用 `ncclGinPut` 时，正是通过它们确定该往哪个 QP 或哪条队列提交请求。本节站到这条分界的另一侧，追一次设备侧发起的通信调用怎样一步步落到硬件上。
 
-沿调用方向看，有三个问题需要回答：kernel 里能调用哪些 GIN 操作；一次调用怎样找到 4.2 选定的那个 backend；找到之后最终写出的是标准 RDMA WQE 还是 GFD 描述符。代码对应三层，按从上层库到硬件的顺序展开：
+设备侧代码之所以分成三层，来自一个必须解决的矛盾：上层库需要一套与硬件无关的稳定接口，而 4.2 讲的三种 backend 在设备侧要做的事完全不同——GDAKI 由 GPU 组装 WQE 并投递到 QP，GPI 写 64 字节 GFD 交给网卡固件，PROXY 把描述符放进共享内存等 Host 代发。如果让上层库直接面对这些差异，每换一种 backend 就得改调用代码。NCCL 的做法是把一次调用拆成三段：一层统一 API 承接所有调用，一层按 `backendMask` 与设备侧 context 里记录的 backend 分发，剩下的差异全部收进各 backend 的模板特化里。
 
-1. **第一层 · 对外 API**（`src/include/nccl_device/gin.h`）：上层库直接调用的函数，以及窗口、信号、计数器三类操作对象；
-2. **第二层 · 分发**（`gin_device_common.h`）：`ncclGinCall` / `ncclGinCallImpl` 按 `ncclGinCtx.backend` 把调用派给对应 backend；
-3. **第三层 · 内部 API 与 backend 实现**（`gin_device_common.h` 的 `ncclGinApi_*` 模板 + `proxy/`、`gpi/`、`gdaki/` 三个目录）：构造描述符或 WQE 并写入队列。
+于是沿一次调用的流向，读代码时依次要回答三个问题：kernel 里能调用哪些操作；一次调用怎样找到 4.2 选定的那个 backend；找到之后最终写出的是标准 RDMA WQE 还是 GFD 描述符。下表把这三个问题与代码中对应的层次列出，后续三小节按此顺序展开：
+
+| 层 | 回答的问题 | 代码位置 |
+|----|-----------|---------|
+| 第一层 · 对外 API | kernel 能调用哪些操作、操作对象是什么 | `src/include/nccl_device/gin.h` |
+| 第二层 · 分发 | 一次调用怎样找到选定的 backend | `gin_device_common.h` 的 `ncclGinCall` / `ncclGinCallImpl` |
+| 第三层 · 内部 API 与 backend 实现 | 选定之后写出 WQE 还是 GFD | `gin_device_common.h` 的 `ncclGinApi_*` 模板 + `proxy/`、`gpi/`、`gdaki/` 三个目录 |
 
 三层走完之后，4.4.1 再往下一层追问 GDAKI 的具体参数：一次 `Put` 用哪条 QP、远端地址与 rkey 从哪里取——这部分直接说明 4.3 下发的句柄如何被消费。本节只覆盖「提交」这一侧；请求提交后如何确认完成、以及为什么部分 backend 还需要 Host 线程推进，放在 4.5。
 
-**第一层：对外 API（`src/include/nccl_device/gin.h`）**——上层库（DeepEP）直接调用的入口，签名带 `ncclGin_C*`（GIN 上下文）和 `ncclTeam`：
+先看最靠近调用方的第一层。上层库（如 DeepEP）在自己写的 kernel 里包含 `nccl_device/gin.h` 后，看到的就是下面这组函数；它们的签名带 `ncclGin_C*`（GIN 上下文）和 `ncclTeam`，不含任何 backend 相关参数，这正是「与硬件无关」在接口上的体现：
+
+**第一层：对外 API（`src/include/nccl_device/gin.h`）**
 
 ```cpp
 // gin.h:150-203（节选）
@@ -2287,7 +2293,9 @@ ncclGinWaitSignal(net, coop, signal, least, bits, ord);                         
 
 操作对象是三类句柄：**窗口** `ncclGinWindow_t`（`void*`，`gin_device_host_common.h:18`）、**信号** `ncclGinSignal_t`（`uint32_t`，`nccl_device/core.h:29`）、**计数器** `ncclGinCounter_t`（`uint32_t`）。信号分强/弱两种语义（`gin.h:23-26`）：**Strong** signal 的可见性隐含"它之前所有 put 都已落定"；**Weak** 只保证捆绑的那次 put 落定——DeepEP 用 strong signal 做跨步同步、weak 做单次通知。
 
-**第二层：分发（`src/include/nccl_device/gin/gin_device_common.h`）**——对外 API 内部都汇到 `ncclGinCall`，再进 `ncclGinCallImpl` 按 backend 分发：
+第一层的接口里没有 backend 参数，但同一份上层代码必须能在 GDAKI、GPI、PROXY 三种实现上运行。这个矛盾由第二层解决：对外 API 内部都汇到 `ncclGinCall`，再进 `ncclGinCallImpl` 按 `ncclGinCtx.backend` 分发。分发依据来自 4.3 下发的设备侧 context，因此 kernel 运行时不需要查询 Host。
+
+**第二层：分发（`src/include/nccl_device/gin/gin_device_common.h`）**
 
 ```cpp
 // gin_device_common.h:178-199（节选）
@@ -2305,7 +2313,9 @@ NCCL_DEVICE_INLINE static decltype(auto) ncclGinCallImpl(unsigned beMask, ncclGi
 
 `ncclGinCtx`（`gin_device_common.h:62-70`）携带 `backendMask`/`backend`/`rank`/`nRanks`/`handle`/`contextId`。模板 + switch 让未启用的 backend 在编译期被整段裁掉。
 
-**第三层：内部 API（`gin_device_common.h:102-173`）**——每个操作是一个模板结构，`backend` 作为模板参数特化到具体实现：
+分发层只负责「选谁」，并不产生任何网络请求。真正把一次 `Put` 变成 WQE 或 GFD 的，是被选中的那个 backend 的特化实现。为了让分发层能用统一的 `ApiFn<backend>::call(...)` 形式调用，NCCL 把每个操作也定义成按 backend 特化的模板结构，这就是第三层：
+
+**第三层：内部 API（`gin_device_common.h:102-173`）**
 
 ```cpp
 template <ncclNetDeviceType backend> struct ncclGinApi_Put  { ... call(...); };
@@ -2315,6 +2325,8 @@ template <ncclNetDeviceType backend> struct ncclGinApi_Wait { ... call(...); };
 ```
 
 三个 backend 各自实现这套接口：`proxy/gin_proxy.h`、`gpi/gin_gpi.h`、`gdaki/gin_gdaki.h`。以 proxy 为例（`gin_proxy.h:68`），`ncclGinApi_Put<PROXY>::call` 最终调 `postGfd`——把请求写成一个 GFD 描述符放进共享内存（`proxyCtx->pis`/`cis` 是生产者/消费者索引），真正的网络操作由 4.5 的 progress 线程消费。
+
+到这里，一次 `ncclGinPut` 的完整路径就走通了：统一 API 接收调用，分发层按 context 里的 backend 选中实现，第三层的模板特化把请求写成硬件可消费的形式。三层各自只解决一个问题，因此更换 backend 时上层库与第一层都不需要改动。接下来 4.4.1 沿着第三层的 GDAKI 实现继续往下看，追问一次 `Put` 具体用哪条 QP、远端地址与 rkey 从哪里取。
 
 #### 4.4.1 QP 选择与参数传递：设备侧怎么定位一次 Put 的目标
 
