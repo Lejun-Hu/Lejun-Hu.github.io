@@ -2549,14 +2549,16 @@ laddr.key  = loadConst(&srcMh->lkey);                      // 本地 lkey
 2. **rkey 与本地 QP 用同一个 `peer` 下标对齐。** `gdqp + peer` 与 `dstMh->rkeys[peer]` 里的 `peer` 是同一个 rank 索引，因此一次 Put 的两半参数——本端 QP、远端 rkey——由同一个 peer 对齐，不存在额外的映射表。
 3. **「下发」发生在初始化期，不是每次 launch kernel。** 窗口注册与 `createContext` 完成时，rkey 数组与 QP 数组就已放进 GPU 可见内存，句柄随 `ncclDevComm` 与窗口一次性交到设备侧；kernel 启动时只是按下标读这些已就绪的指针。这正是 4.3 结尾「控制面一次准备、kernel 不再向 Host 查询」在 GDAKI 参数上的具体体现。
 
-上面讲的 QP 数组、rkey 表都是初始化期的产物，它们的规模由两个配置决定，归纳如下：
+最后补一个决定「peer 覆盖哪些 rank」的配置——连接范围。前面说的按 peer 索引的 QP 数组、rkey 数组，其 peer 到底覆盖哪些 rank，由 `ginConnectionType` 决定，取 FULL 或 RAIL 两种，依据全体 rank 是否支持跨 NIC 自动判定（`init.cc:1668-1671`）。
 
-| 配置 | 作用 | 位置 |
-|------|------|------|
-| `NCCL_GIN_CONNECTION_FULL` / `RAIL` | FULL 覆盖全体 rank；RAIL 只覆盖同一 rail（`ncclTeamRail`），由是否支持跨 NIC 决定 | `gin_host.cc:141-155`、`init.cc:1670` |
-| `ginContextCount` | 每个 context 一套 QP，context 数决定可并行使用的 QP 组数 | `gin_host.cc:209-225` |
+rail 是跨节点网络拓扑里的「轨道」概念。以 rail-optimized 组网为例：每个节点有 `lsaSize` 块 GPU，每块 GPU 绑定一张网卡，这张网卡对应的 rail 贯穿所有节点、连接每个节点的「同一槽位」GPU。`ncclTeamRail`（`nccl_device/core.cc:36-45`）返回的正是与自己同 rail 的 rank 集合：`nRanks = 总 rank 数 / lsaSize`（即节点数）、`rank = 本 rank / lsaSize`（自己在第几个节点）、`stride = lsaSize`。也就是说，rail 成员是「各节点中与自己同槽位的 GPU」，成员数等于节点数。
 
-把这些合到 4.3 的结论上看：QP 句柄、按 peer 索引的 rkey 表、context 数组，都是 Host 在建连与注册阶段准备好、放进 GPU 可见内存并随 `ncclDevComm` 下发的。「kernel 执行期间不再向 Host 查询」具体到 GDAKI，就是按 `contextIndex` 与 `peer` 两个下标直接取用这些资源。
+两种连接范围在 GDAKI 里的区别（`gin_host.cc:141-155`）：
+
+- **FULL**：`nGinRanks = comm->nRanks`，为全体 rank 建连接。每个 context 的 QP 数组、rkey 数组长度都是「总 rank 数」，任意两 rank 都能直连。要求全体 rank 支持跨 NIC（GPU 能访问多张网卡）。
+- **RAIL**：`nGinRanks = railTeam.nRanks`（即节点数），只为同 rail 的 rank 建连接。每个 context 的 QP 数与 rkey 数降为「节点数」，QP 总数从 `ncontexts * nRanks` 降到 `ncontexts * 节点数`（`gin_host_gdaki.cc:475-478`）。跨 rail 的 rank 不能直连，要发数据给它，需先经节点内 NVLink 转发到目标 rail 上的 GPU，再由那张网卡发出——这正是 DeepEP hybrid 模式里「scaleup 走 NVLink、scaleout 走 rail」分流的原因。
+
+区分这两者的意义在于：rail-optimized 拓扑下 GPU 不能跨 NIC，它只能直连自己那张网卡对应的 rail。此时若强行按 FULL 为全体 rank 建连接，多数 QP 也走不通；RAIL 用更少的 QP（节点数而非总 rank 数）覆盖了真正可直连的那部分，把跨 rail 的流量留给 NVLink 转发。
 
 ### 4.5 异步请求的落定：progress 线程与错误上报
 
