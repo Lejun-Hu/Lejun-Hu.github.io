@@ -2519,7 +2519,7 @@ connectionId（选哪张网卡）+ contextId（选该网卡上第几组 QP）
 
 这正解释了为什么 `_signalShadows` 按**全局** `contextIndex` 而非 `contextId` 分片（`gin__funcs.h:97`）：不同 context 的信号表 offset 不同、进度也互相独立，共用一份会互相覆盖进度；按完整二维组合隔离，同一 `contextId` 落在不同连接上时也不会共用槽位。
 
-**远端信息：QP 配对在建连时固化，WQE 携带的是地址与 rkey**。这里要区分两个阶段：
+**远端信息：数据落到对端哪里，由地址与 rkey 决定。** 前面几段都在回答「用哪条本地 QP 发」——`ctx.handle[contextId]` 与 `gdqp + peer` 选出的是本端的发送队列。但一次 RDMA 写是单边操作，接收方 CPU 不参与，发送方投递 WQE 时还必须再告诉网卡「数据写到对端哪块内存、用什么 rkey 校验」，否则对端网卡无从定位目标。所以除本地 QP 外，Put 还有另一半参数——远端地址与 rkey——它们从哪来、何时固化，分两个阶段看：
 
 - **建连阶段**：`gdakiFillExchInfo` 把本端的 `qpn`、LID、GID 填入 `gdaki_exch_info`（`gin_host_gdaki.cc:353-357`），全体交换后由 `gdakiConnectQp` 调用 `doca_verbs_qp_attr_set_dest_qp_num` 把**对端 QPN 写进本地 QP 的属性**（`:416`）。一次 RDMA 写涉及通信两端各自独立的 QP：本端 QP 负责投递 WQE，对端 QP 由这个绑定关系确定，配对工作在初始化时一次完成。
 - **运行阶段**：设备侧提交时传给 `doca_gpu_dev_verbs_put` 的参数是 `qp`、远端地址与 rkey、本地地址与 lkey、长度，**不需要再带远端 QP 号**（`gin_gdaki.h:67-71`、`:110`）：
