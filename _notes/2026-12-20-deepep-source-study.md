@@ -235,6 +235,7 @@ DispatchRuntime::launch(runtime, args, stream);               // 启动
 
 V2 的内核是**运行期 JIT 编译**的（`README.md:13`）。`generate` 并非凭空生成算法，而是把运行期才知道的模板参数拼成一段仅用于实例化的源码（`dispatch.hpp:51-89`）：
 
+{% raw %}
 ```cpp
 // csrc/kernels/elastic/dispatch.hpp:80-88（节选）
 return fmt::format(R"(
@@ -245,6 +246,7 @@ static void __instantiate_kernel() {{
 }}
 )", header_name, func_name);
 ```
+{% endraw %}
 
 `func_name` 由 `is_scaleup_nvlink`、`num_sms`、warp 数、`num_experts`、`num_topk`、`num_qps` 等十几个参数拼成模板实参（`:55-77`），`header_name` 在单机与跨机两种情况下分别选 `dispatch` 与 `hybrid_dispatch`。因此算法主体写在 `.cuh` 里，运行期只决定「实例化哪一个模板组合」，再用 NVRTC 编译（`csrc/jit/compiler.hpp:22` 起）并缓存。这样既避免了安装期编译，又让内核里的循环边界、warp 数量都是编译期常量。
 
