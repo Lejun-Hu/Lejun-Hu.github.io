@@ -2092,15 +2092,15 @@ while (ncclShmem.aborted == 0) {
 
 ## 四、GIN 详解
 
-> **GIN = GPU Initiated Network，即"由 GPU 发起的网络通信"。** 它回答一个具体问题：跨节点的数据搬运，能不能不经过 Host CPU、而是由 GPU kernel 里的线程直接发起？
->
-> 回顾第三章的 NET 路径：GPU 内核算完 → 更新 `head`/`tail` 进度标记 → Host 侧的 Proxy 线程轮询到这个标记 → 调用 `ncclNet->isend()/irecv()` 提交 RDMA → 网卡才真正开始搬数据。这条链里，**通信的"发起权"在 Host**：GPU 只能把数据准备好、把标记写好，然后等 Host 来"接棒"。每次从"GPU 算完"到"网卡开动"，中间隔着 Host 的轮询周期和线程调度，这对 MoE、KV cache 这类延迟敏感场景已经不够。
->
-> GIN 把发起权下放给 GPU：kernel 内的线程直接调用设备端 API 提交 Put/Get/信号量。收益有两点：**① 消除 Host-Device 往返与线程调度延迟**；**② 让"计算-通信重叠"从 kernel 级细化到线程级**——同一个 kernel 里可以一边算一边发，而不必等整个 kernel 结束、下一轮 proxy 介入。
->
-> NVIDIA 之所以在 NCCL 与自家硬件上做这件事，是因为硬件前提已经具备：Volta（SM 7.0）起的 GPU 能直接写网卡的发送队列或描述符。GIN 的作用，就是把这份硬件能力包装成软件可调的 API。它对软硬件配合方式的改变是根本性的——过去是"GPU 写标记、Host 读标记、Host 驱动网卡"，现在变成"GPU 直接驱动网卡（GPI/GDAKI），或写描述符交 Proxy 代发（PROXY）"。为此 NCCL 在两层各加了一套结构：**主机侧**建连接、注册窗口（`ncclGinState` + `ncclGin_t` 插件接口），**设备侧**发起操作（`ncclGinPut`/`ncclGinGet` 等 + 三种 backend 的分发）。
->
-> 本章的阅读主线：先讲清楚"为什么需要 GIN"（4.1），再看它落地的三种硬件形态（4.2），然后分别拆主机侧（4.3）与设备侧（4.4）的代码骨架，最后看谁在推进这些异步操作（4.5）以及与 Host 发起模式的对比（4.6）。
+**GIN = GPU Initiated Network，即"由 GPU 发起的网络通信"。** 它回答一个具体问题：跨节点的数据搬运，能不能不经过 Host CPU、而是由 GPU kernel 里的线程直接发起？
+
+回顾第三章的 NET 路径：GPU 内核算完 → 更新 `head`/`tail` 进度标记 → Host 侧的 Proxy 线程轮询到这个标记 → 调用 `ncclNet->isend()/irecv()` 提交 RDMA → 网卡才真正开始搬数据。这条链里，**通信的"发起权"在 Host**：GPU 只能把数据准备好、把标记写好，然后等 Host 来"接棒"。每次从"GPU 算完"到"网卡开动"，中间隔着 Host 的轮询周期和线程调度，这对 MoE、KV cache 这类延迟敏感场景已经不够。
+
+GIN 把发起权下放给 GPU：kernel 内的线程直接调用设备端 API 提交 Put/Get/信号量。收益有两点：**① 消除 Host-Device 往返与线程调度延迟**；**② 让"计算-通信重叠"从 kernel 级细化到线程级**——同一个 kernel 里可以一边算一边发，而不必等整个 kernel 结束、下一轮 proxy 介入。
+
+NVIDIA 之所以在 NCCL 与自家硬件上做这件事，是因为硬件前提已经具备：Volta（SM 7.0）起的 GPU 能直接写网卡的发送队列或描述符。GIN 的作用，就是把这份硬件能力包装成软件可调的 API。它对软硬件配合方式的改变是根本性的——过去是"GPU 写标记、Host 读标记、Host 驱动网卡"，现在变成"GPU 直接驱动网卡（GPI/GDAKI），或写描述符交 Proxy 代发（PROXY）"。为此 NCCL 在两层各加了一套结构：**主机侧**建连接、注册窗口（`ncclGinState` + `ncclGin_t` 插件接口），**设备侧**发起操作（`ncclGinPut`/`ncclGinGet` 等 + 三种 backend 的分发）。
+
+本章按以下顺序展开：先讲清楚"为什么需要 GIN"（4.1），再看它落地的三种硬件形态（4.2），然后分别拆主机侧（4.3）与设备侧（4.4）的代码骨架，最后看谁在推进这些异步操作（4.5）以及与 Host 发起模式的对比（4.6）。
 
 ### 4.1 GIN 解决什么问题：从 Host 发起谈起
 
