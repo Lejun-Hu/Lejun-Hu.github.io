@@ -2092,135 +2092,221 @@ while (ncclShmem.aborted == 0) {
 
 ## 四、GIN 详解
 
-### 4.1 GIN 概念与动机
+> **GIN = GPU Initiated Network，即"由 GPU 发起的网络通信"。** 它回答一个具体问题：跨节点的数据搬运，能不能不经过 Host CPU、而是由 GPU kernel 里的线程直接发起？
+>
+> 回顾第三章的 NET 路径：GPU 内核算完 → 更新 `head`/`tail` 进度标记 → Host 侧的 Proxy 线程轮询到这个标记 → 调用 `ncclNet->isend()/irecv()` 提交 RDMA → 网卡才真正开始搬数据。这条链里，**通信的"发起权"在 Host**：GPU 只能把数据准备好、把标记写好，然后等 Host 来"接棒"。每次从"GPU 算完"到"网卡开动"，中间隔着 Host 的轮询周期和线程调度，这对 MoE、KV cache 这类延迟敏感场景已经不够。
+>
+> GIN 把发起权下放给 GPU：kernel 内的线程直接调用设备端 API 提交 Put/Get/信号量。收益有两点：**① 消除 Host-Device 往返与线程调度延迟**；**② 让"计算-通信重叠"从 kernel 级细化到线程级**——同一个 kernel 里可以一边算一边发，而不必等整个 kernel 结束、下一轮 proxy 介入。
+>
+> NVIDIA 之所以在 NCCL 与自家硬件上做这件事，是因为硬件前提已经具备：Volta（SM 7.0）起的 GPU 能直接写网卡的发送队列或描述符。GIN 的作用，就是把这份硬件能力包装成软件可调的 API。它对软硬件配合方式的改变是根本性的——过去是"GPU 写标记、Host 读标记、Host 驱动网卡"，现在变成"GPU 直接驱动网卡（GPI/GDAKI），或写描述符交 Proxy 代发（PROXY）"。为此 NCCL 在两层各加了一套结构：**主机侧**建连接、注册窗口（`ncclGinState` + `ncclGin_t` 插件接口），**设备侧**发起操作（`ncclGinPut`/`ncclGinGet` 等 + 三种 backend 的分发）。
+>
+> 本章的阅读主线：先讲清楚"为什么需要 GIN"（4.1），再看它落地的三种硬件形态（4.2），然后分别拆主机侧（4.3）与设备侧（4.4）的代码骨架，最后看谁在推进这些异步操作（4.5）以及与 Host 发起模式的对比（4.6）。
 
-**GIN (GPU Initiated Network)** 允许 GPU SM 上的线程直接发起网络通信操作（Put/Get/信号量），避免以下开销：
+### 4.1 GIN 解决什么问题：从 Host 发起谈起
 
-- Host 发起模式（传统）：GPU Kernel → CUDA Stream 完成 → Host 提交 RDMA → 网卡执行。需要 Kernel 结束才能启动网络操作
-- GIN 模式：GPU Kernel 内的线程直接通过设备端 API 提交网络请求，实现 Kernel 计算与网络通信的重叠（overlap）
+NCCL 的跨节点通信默认由 Host 发起。以一次 send 为例，完整时序是：
 
-核心收益：**消除 Host-Device 同步开销，实现计算-通信 overlap 的细粒度流水线**。
-
-### 4.2 三种 Backend
-
-| Backend | 枚举值 | 原理 | 硬件依赖 |
-|---------|--------|------|----------|
-| **GPI**（GPU Packet Injection） | `NCCL_NET_DEVICE_GIN_GPI` | GPU 直接构造网络包并通过 PCIe 写入 NIC 发送队列 | 需要 NIC 硬件支持 GPU 直接访问发送队列 |
-| **GDAKI**（GPU Direct Async Kernel Initiated） | `NCCL_NET_DEVICE_GIN_GDAKI` | 基于 NVIDIA DOCA GPUNetIO 框架，GPU 通过专用通道提交网络描述符 | ConnectX-6 Dx 及以上 + DOCA |
-| **PROXY** | `NCCL_NET_DEVICE_GIN_PROXY` | GPU 写描述符到共享内存，Host 侧 Proxy 线程轮询并代理执行网络操作 | 无特殊硬件要求（最通用） |
-
-Backend 选择机制（`src/include/nccl_device/gin/gin_device_common.h:40-49`）：通过编译期 `backendMask` 位掩码支持多 Backend 并存，运行时根据 `ncclGinCtx.backend` 在 `ncclGinCallImpl` 中分发。
-
-### 4.3 主机侧 GIN 初始化
-
-```cpp
-// src/include/gin.h:13
-ncclResult_t ncclGinInit(struct ncclComm* comm);
+```
+GPU kernel：写数据 → 写 head 标记（ncclSendMem.head）
+      │
+Host Proxy 线程：轮询 head → 发现推进 → 调用 ncclNet->isend()
+      │
+网卡：DMA 读取数据 → 发出 → 写完成队列（CQ）
+      │
+Host Proxy 线程：轮询 CQ → 更新 tail / credit
 ```
 
-`ncclGinInit` → `ncclGinConnectOnce`（`src/gin/gin_host.cc:80`）的核心流程：
+这条链有两个延迟来源：**Host-Device 往返**（GPU 要等 Host 看到标记，Host 提交后 GPU 还要等网卡完成）和**轮询/调度延迟**（Proxy 线程的轮询周期受 CPU 调度影响）。它们叠加起来，决定了"GPU 准备好数据"到"网卡真正开动"之间的固定开销。
 
-1. 加载 GIN Plugin（`ncclGin_t` 接口，`src/include/plugin/nccl_gin.h`）
-2. 遍历所有网卡设备，创建 `ginComm_t` 通信上下文
-3. 通过 Bootstrap 交换各 Rank 的 GIN 连接信息
-4. 对所有 Peer 建立 GIN 连接
-5. 启动 GIN Progress 线程（`ncclGinProgress`，`src/gin/gin_host.cc:43`）
+GIN 的目标就是砍掉这段。对比一下发起路径：
 
-GIN 共享资源存储在 `ncclSharedResources::ginState`（`src/include/comm.h:146`）：
+| | 传统（Host 发起） | GIN（GPU 发起） |
+|---|---|---|
+| 谁提交网络操作 | Host Proxy 线程（`ncclNet->isend`） | GPU kernel 内线程（`ncclGinPut` 等） |
+| GPU 需要做什么 | 写 head 标记后**等 Host** | 直接提交，提交完继续算 |
+| 重叠粒度 | kernel 级（等 kernel 结束 + proxy 介入） | 线程级（kernel 内边算边发） |
+| 典型延迟 | Host-Device 往返 + 线程调度 | 仅 GPU 到网卡的总线写 |
+
+这就是 GIN 存在的根本原因：**把通信发起权从 Host 移进 GPU kernel**，从而让计算与通信的 overlap 细到线程粒度。
+
+### 4.2 三种 Backend：同一套 API，三种硬件落点
+
+"GPU 直接驱动网卡"有几种物理实现方式，NCCL 把它们抽象成三个 backend。设备侧 API 是同一套（`ncclGinPut`/`ncclGinGet` 等），区别只在每个 backend 怎么把这套 API 落到硬件上：
+
+| Backend | 枚举值 | GPU 实际做什么 | 硬件前提 |
+|---------|--------|---------------|----------|
+| **GPI**（GPU Packet Injection） | `NCCL_NET_DEVICE_GIN_GPI` | 直接构造网络包，经 PCIe 写入 NIC 的发送队列 | NIC 支持 GPU 直接访问发送队列 |
+| **GDAKI**（GPU Direct Async Kernel Initiated） | `NCCL_NET_DEVICE_GIN_GDAKI` | 经 NVIDIA DOCA GPUNetIO 的专用通道提交网络描述符 | ConnectX-6 Dx 及以上 + DOCA |
+| **PROXY** | `NCCL_NET_DEVICE_GIN_PROXY` | 把请求写成描述符放进共享内存，Host Proxy 线程代发 | 无（最通用，也是缺省回退） |
+
+类型定义在 `src/include/nccl_device/core.h:168-173`，枚举值特意与设备类型对齐（`src/include/nccl_device/net_device.h:18-24`）：
 
 ```cpp
-// ncclGinState 包含：
-//   ncclGin_t* ncclGin      — GIN 插件接口
-//   int ginCommCount         — GIN Comm 数量
-//   ncclGinType_t ginType   — GPI / GDAKI / PROXY
-//   GinStateDevComm* devComms — 设备侧上下文链表
-//   thread progressThread    — Progress 线程
-//   mutex/cv                 — 同步原语
+typedef enum {
+  NCCL_GIN_TYPE_NONE = 0,
+  NCCL_GIN_TYPE_PROXY = 2,  // = NCCL_NET_DEVICE_GIN_PROXY
+  NCCL_GIN_TYPE_GDAKI = 3,  // = NCCL_NET_DEVICE_GIN_GDAKI
+  NCCL_GIN_TYPE_GPI = 4,    // = NCCL_NET_DEVICE_GIN_GPI
+} ncclGinType_t;
 ```
 
-### 4.4 设备侧 GIN API
+三个 backend 的编译开关是独立的（`src/include/nccl_device/gin/gin_device_common.h:24-38`）：PROXY 恒启用；GPI/GDAKI 要求 `CUDA_VERSION >= 12020 && __CUDA_ARCH__ >= 700`。运行时到底用哪个，由 `ncclGinState.ginType` 记录——它在插件分配时写入（见 4.3），设备侧分发时据此选择（见 4.4）。
 
-设备侧 GIN API 定义在：
+### 4.3 主机侧：从插件加载到连接与窗口建立
 
-- `src/include/nccl_device/gin/gin_device_common.h` — 通用定义与分发机制
-- `src/include/nccl_device/gin/gin_device_api.h` — 统一 API 声明
-- `src/include/nccl_device/gin/gpi/gin_gpi.h` — GPI Backend 实现
-- `src/include/nccl_device/gin/gdaki/gin_gdaki.h` — GDAKI Backend 实现
-- `src/include/nccl_device/gin/proxy/gin_proxy.h` — Proxy Backend 实现
-
-核心 API：
-
-| API | 功能 |
-|-----|------|
-| `ncclGinApi_Put::call(ctx, coop, peer, dstWin, ...)` | GPU 发起 Put 操作（本地→远程），可附带信号量操作 |
-| `ncclGinApi_Get::call(ctx, coop, peer, remoteWin, localWin, ...)` | GPU 发起 Get 操作（远程→本地） |
-| `ncclGinApi_PutValue::call(ctx, peer, dstWin, srcData, ...)` | Put 一个标量值 |
-| `ncclGinApi_Wait::call(ctx, request, ...)` | 等待异步操作完成 |
-| `ncclGinApi_Flush::call(ctx, coop, ...)` | 刷新所有未完成操作 |
-| `ncclGinApi_FlushAsync::call(ctx, peer, ...)` | 异步刷新 |
-
-分发机制（`gin_device_common.h:177-209`）：
+主机侧骨架分四步，全部围绕核心结构 `ncclGinState`（`src/include/gin/gin_host.h:27-48`，挂在 `sharedRes` 上）：
 
 ```cpp
-// 编译期根据 backendMask 分发
+struct ncclGinState {
+  ncclGin_t* ncclGin;                              // 插件接口（v14）
+  void* ginInstance;                               // 插件 init 出来的实例
+  ncclGinType_t ginType;                           // GPI / GDAKI / PROXY
+  int ginCommCount;                                // 建了几条 GIN 连接（≤ 4）
+  void* ginComms[NCCL_GIN_MAX_CONNECTIONS];        // 每条连接的 collComm
+  int needsProxyProgress;                          // 是否需要 Host 线程推进
+  int ginProgress;                                 // 0 暂停 / 1 运行 / -1 退出
+  std::thread thread; std::mutex mutex; std::condition_variable cond;
+  struct ncclGinStateDevComm* devComms;            // 设备侧上下文链表
+  ncclGinConnectionType_t ginConnectionType;       // FULL / RAIL
+};
+```
+
+**第一步：加载并选定插件 —— `ncclGinInit`（`src/plugin/gin.cc:269`）**
+
+先纠正一个容易混淆的点：`ncclGinInit` 只负责"加载插件、选定一个"，**不建连接**。它先检查 `compCap >= 70`（Volta 起才支持 GIN），然后遍历插件列表（`initPluginLibsOnceFunc`，`gin.cc:194-256`）：
+
+- **外部插件**：`NCCL_GIN_PLUGIN` 环境变量指定（默认 `libnccl-gin.so`），或 NET 插件自带的 GIN 支持；
+- 两个**内部插件**（无需外部库）：`ncclGinIbGdaki`（IB 上的 GDAKI）和 `ncclGinProxy`（通用回退）。
+
+对每个启用的插件做 `init`（`init(&ginContext, commHash)`）→ `devices(&ndev)`，再由 `ncclGinPluginAssignToComm` 把 `ginType`/`ncclGin` 写进 `ginState`，选定一个后禁用其余外部插件。调用点在 `init.cc:477`，与 `ncclNetInit`/`ncclRmaInit` 并列。
+
+**第二步：建立连接 —— `ncclGinConnectOnce`（`src/gin/gin_host.cc:80`）**
+
+这一步才真正把 rank 之间的 GIN 连接建起来：
+
+```cpp
+// gin_host.cc:100-172（节选）
+ginState->ncclGin->devices(&ndev);                          // 有 GIN 能力的设备数
+ncclTopoGetLocalGinDevs(comm, localGinDevs, &nLocalGinDevs); // 本机 GIN 设备
+...
+for (int n = 0; n < ginState->ginCommCount; n++) {
+  ginState->ncclGin->listen(ginInstance, localGinDevs[n % nLocalGinDevs],
+                            allHandles + ..., &listenComm);   // ① 生成监听句柄
+  ginState->ncclGin->getProperties(..., ginState->ginProps + n);
+  bootstrapAllGather(comm->bootstrap, allHandles, ...);       // ② 全体交换句柄
+  ginState->ncclGin->connect(ginContext, handles, nGinRanks, myGinRank,
+                             listenComm, ginState->ginComms + n);  // ③ 建立连接
+  ginState->ncclGin->closeListen(listenComm);
+}
+```
+
+三个要点：**`ginCommCount` 是全体协商出来的**（每个 rank 上报自己的数，`bootstrapAllGather` 后取 min，上限 `NCCL_GIN_MAX_CONNECTIONS = 4`）；**连接是多路的**（`ginComms[]` 数组，对应多网卡/多 rail）；**复用阶段二建好的 bootstrap** 交换句柄——与 NET transport 建连是同一套路（呼应 2.6.4）。
+
+**第三步：为每个 device comm 建上下文 —— `ncclGinDevCommSetup`（`gin_host.cc:190`）**
+
+上层库（如 DeepEP）要发起 GIN 时，会创建一个 `ncclDevComm`；这一步为它分配设备侧 context 并下发句柄。核心是循环 `createContext`（`gin.cc:277-292`），之后**按需启动 progress 线程**：
+
+```cpp
+// gin_host.cc:294-298
+if (ginState->needsProxyProgress && ginState->ginProgress == 0) {
+  ginState->ginProgress = 1;
+  ginState->thread = std::thread(ncclGinProgress, ginState);  // 只有需要才起线程
+}
+```
+
+progress 线程**不是 GIN 初始化就启动**，而是某个 backend 的 `devHandle->needsProxyProgress == 1` 时才起（典型是 PROXY）。
+
+**第四步：注册对称内存窗口 —— `ncclGinRegister`（`gin_host.cc:374`）**
+
+GIN 通信的对象是"窗口"（window）。`ncclGinRegister` 对一块地址调 `regMrSym`，拿到 host 侧句柄（`ginHostWins`）和设备侧窗口（`ginDevWins`）——设备端 `ncclGinPut` 用的 `dstWin`/`srcWin` 就是这里注册出来的。跨多个物理 segment 的地址需要 DMABUF 支持（`gin.cc:379-387`）。
+
+### 4.4 设备侧：GPU kernel 里怎么发起一次通信
+
+设备侧分**三层**，从上层库视角到硬件逐层看：
+
+**第一层：对外 API（`src/include/nccl_device/gin.h`）**——上层库（DeepEP）直接调用的入口，签名带 `ncclGin_C*`（GIN 上下文）和 `ncclTeam`：
+
+```cpp
+// gin.h:150-203（节选）
+ncclGinPut(net, team, peer, dstWin, dstOffset, srcWin, srcOffset, bytes, ...);     // 本地 → 远程
+ncclGinGet(net, team, peer, remoteWin, remoteOff, localWin, localOff, bytes, ...); // 远程 → 本地
+ncclGinSignal(net, team, peer, ..., signalId, signalOp, ...);                      // 只发信号
+ncclGinFlush(net, coop, ord);                                                     // 冲刷未完成请求
+ncclGinWaitSignal(net, coop, signal, least, bits, ord);                           // 等信号
+```
+
+操作对象是三类句柄：**窗口** `ncclGinWindow_t`（`void*`，`gin_device_host_common.h:18`）、**信号** `ncclGinSignal_t`（`uint32_t`，`nccl_device/core.h:29`）、**计数器** `ncclGinCounter_t`（`uint32_t`）。信号分强/弱两种语义（`gin.h:23-26`）：**Strong** signal 的可见性隐含"它之前所有 put 都已落定"；**Weak** 只保证捆绑的那次 put 落定——DeepEP 用 strong signal 做跨步同步、weak 做单次通知。
+
+**第二层：分发（`src/include/nccl_device/gin/gin_device_common.h`）**——对外 API 内部都汇到 `ncclGinCall`，再进 `ncclGinCallImpl` 按 backend 分发：
+
+```cpp
+// gin_device_common.h:178-199（节选）
 template <template <ncclNetDeviceType> typename ApiFn, typename... Arg>
 NCCL_DEVICE_INLINE static decltype(auto) ncclGinCallImpl(unsigned beMask, ncclGinCtx ctx, Arg&&... arg) {
-  switch (ctx.backend) {
-    case NCCL_NET_DEVICE_GIN_PROXY: return ApiFn<PROXY>::call(...);
-    case NCCL_NET_DEVICE_GIN_GDAKI: return ApiFn<GDAKI>::call(...);
-    case NCCL_NET_DEVICE_GIN_GPI:   return ApiFn<GPI>::call(...);
+  bool singleton = (beMask & (beMask - 1)) == 0;
+  switch (singleton ? __popc(beMask - 1) : (int)ctx.backend) {
+    case NCCL_NET_DEVICE_GIN_PROXY: return ApiFn<PROXY>::call(ctx, ...);
+    case NCCL_NET_DEVICE_GIN_GDAKI: return ApiFn<GDAKI>::call(ctx, ...);
+    case NCCL_NET_DEVICE_GIN_GPI:   return ApiFn<GPI>::call(ctx, ...);
+    default: __builtin_unreachable();
   }
 }
 ```
 
-通过模板 + switch 实现零开销分发，编译期即可消除不活跃 Backend 的代码路径。
+`ncclGinCtx`（`gin_device_common.h:62-70`）携带 `backendMask`/`backend`/`rank`/`nRanks`/`handle`/`contextId`。模板 + switch 让未启用的 backend 在编译期被整段裁掉。
 
-### 4.5 GIN Progress 线程
-
-GIN Progress 线程（`src/gin/gin_host.cc:43-76`）是 GIN 架构中 Host 侧的核心组件：
+**第三层：内部 API（`gin_device_common.h:102-173`）**——每个操作是一个模板结构，`backend` 作为模板参数特化到具体实现：
 
 ```cpp
-// src/gin/gin_host.cc:43-76
+template <ncclNetDeviceType backend> struct ncclGinApi_Put  { ... call(...); };
+template <ncclNetDeviceType backend> struct ncclGinApi_Get  { ... call(...); };
+template <ncclNetDeviceType backend> struct ncclGinApi_Wait { ... call(...); };
+// 还有 Flush / FlushAsync / PutValue / GetSignalPtr / GetCounterPtr / ResetSignal / ResetCounter
+```
+
+三个 backend 各自实现这套接口：`proxy/gin_proxy.h`、`gpi/gin_gpi.h`、`gdaki/gin_gdaki.h`。以 proxy 为例（`gin_proxy.h:68`），`ncclGinApi_Put<PROXY>::call` 最终调 `postGfd`——把请求写成一个 GFD 描述符放进共享内存（`proxyCtx->pis`/`cis` 是生产者/消费者索引），真正的网络操作由 4.5 的 progress 线程消费。
+
+### 4.5 Progress 线程：三种 backend 各靠什么推进
+
+GIN 的 Put/Get 是**异步**的：设备端提交完就返回，真正落定需要一个"推进者"。这就是 `ncclGinProgress`（`src/gin/gin_host.cc:43-76`）：
+
+```cpp
 void* ncclGinProgress(struct ncclGinState* ginState) {
   while (1) {
+    std::unique_lock<std::mutex> lock(ginState->mutex);
     if (ginState->ginProgress == 1) {
-      // 遍历所有 Device Comm，对每个 GIN Comm 调用进度函数
-      for (auto* dc = ginState->devComms; dc; dc = dc->next) {
-        for (int n = 0; n < ginState->ginCommCount; n++) {
-          ginState->ncclGin->ginProgress(dc->ginCtx[n]);
-        }
-      }
-    } else if (ginState->ginProgress == -1) {
-      // 退出
-      return NULL;
-    }
-    // 状态 == 0 时等待条件变量
+      for (auto* dc = ginState->devComms; dc; dc = dc->next)
+        for (int n = 0; n < ginState->ginCommCount; n++)
+          ginState->ncclGin->ginProgress(dc->ginCtx[n]);   // 逐个 context 推进
+      lock.unlock();
+      std::this_thread::yield();
+    } else if (ginState->ginProgress == -1) return NULL;
+    else if (ginState->ginProgress == 0) ginState->cond.wait(lock);   // 暂停时挂起
   }
 }
 ```
 
-Progress 线程的作用因 Backend 而异：
+关键点：**这个线程不是所有 backend 都需要**。`ginProgress` 是 `ncclGin_t` 接口里的一个可选回调（`gin_v14.h:60`，注释 "Will be called if devHandle.needsProxyProgress=1"）。三种 backend 的分工：
 
-- **Proxy Backend**：轮询 GPU 写入的共享内存描述符，调用 Net Plugin 的 `isend`/`irecv` 提交网络操作，完成后写回完成信号
-- **GPI/GDAKI Backend**：轮询 NIC 的完成队列（CQ），更新设备侧可用的 Credit/Window 状态
+- **PROXY**：设备端只写了共享内存里的 GFD 描述符，**必须有 Host 线程**读出来、调用 Net Plugin 的 `isend`/`irecv` 真正提交，完成后写回完成索引——所以 `needsProxyProgress = 1`，靠 progress 线程推进；
+- **GPI / GDAKI**：GPU 已经直接驱动网卡，progress 的作用退化为轮询 NIC 完成队列（CQ）、回收资源/更新 credit，是否另起线程取决于具体实现。
 
-Progress 线程的启停由 `ginState->ginProgress` 状态控制：`0`（暂停等待）、`1`（运行中）、`-1`（停止）。
+线程的启停由 `ginProgress` 状态控制：`0` 暂停等待（`cond.wait`）、`1` 运行、`-1` 退出（`ncclGinHostFinalize` 置 -1 并 `join`）。
 
-### 4.6 Host 发起 vs GIN 发起的对比
+### 4.6 与 Host 发起模式的对比
 
-| 维度 | Host 发起（传统 NCCL） | GIN 发起 |
-|------|------------------------|----------|
-| 通信触发者 | Host 侧 Proxy 线程通过 `ncclProxyProgress` | GPU Kernel 内直接调用 `ncclGinApi_Put` / `ncclGinApi_Get` |
-| Kernel 与通信的 overlap | 粗粒度：Kernel 结束 → Proxy 处理 → 下一个 Kernel | 细粒度：同一 Kernel 内计算与通信交替执行 |
-| 同步机制 | 通过 `ncclSendMem.head` / `ncclRecvMem.tail` 跟踪进度，Host 可读写 | 通过 `ncclGinSignalDescriptor` 和 `ncclGinCounter`，设备端直接操作 |
-| 数据路径 | 有 GDRDMA：GPU 显存 --(NIC DMA 直读)--> 网卡；无 GDRDMA：GPU 显存 → Host Buffer → 网卡 | GPU → GIN Backend → 网卡（始终不经 Host 中转） |
+| 维度 | Host 发起（传统 NET） | GIN 发起 |
+|------|----------------------|----------|
+| 通信触发者 | Host Proxy 线程轮询 head/tail 后调 `ncclNet->isend` | GPU kernel 内线程直接调 `ncclGinPut`/`ncclGinGet` |
+| 重叠粒度 | kernel 级（等 kernel 结束 + proxy 介入） | 线程级（kernel 内边算边发） |
+| 同步机制 | `ncclSendMem.head`/`ncclRecvMem.tail`（Host 读写） | 窗口 + 信号/计数器（设备端直接操作） |
+| 数据路径 | GPU 显存 →（GDRDMA 直读 或 Host buffer 中转）→ 网卡 | GPI/GDAKI：GPU 直接驱动网卡；PROXY：经 Host 代理 |
 | 代码位置 | `src/proxy.cc`、`src/transport/net.cc` | `src/gin/gin_host.cc` + `src/include/nccl_device/gin/` |
-| 延迟 | 较高（Host-Device 同步 + 线程调度） | 较低（消除 Host 参与） |
+| 延迟 | 较高（Host-Device 往返 + 线程调度） | 较低（GPI/GDAKI 消除 Host 参与） |
 
-**关键代码差异：**
+两者的核心差异：Host 发起模式下，GPU 是"数据生产者 + 进度标记写入者"，网卡要靠 Host 来驱动；GIN 模式下，GPU 是"数据生产者 + 网络操作发起者"，Host 只在 PROXY 回退时充当代理。
 
-- 传统模式：设备端操作完成后设置 `ncclSendMem.head`，Host Proxy 线程轮询该值并调用 `ncclNet->isend()`
-- GIN 模式：设备端在 Kernel 内直接调用 `ncclGinCall<ncclGinApi_Put>(ctx, coop, peer, ...)` 提交网络请求，`ncclGinApi_Flush` 确保请求发出
+> 需要澄清的一点：GIN 目前**不是 NCCL 自身集合通信（AllReduce 等）的主路径**——那些仍走第三章的 proxy 机制。GIN 是 NCCL 暴露给上层库（DeepEP、自研 MoE 通信层）的能力，让它们能在自定义 kernel 里直接发起网络操作。理解这一章，是为了看懂 DeepEP 这类库怎么绕过 NCCL 的集合接口、直接拿 GIN 当通信原语。
 
 ---
 
