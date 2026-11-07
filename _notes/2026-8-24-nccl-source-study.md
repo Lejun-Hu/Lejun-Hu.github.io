@@ -2394,7 +2394,45 @@ doca_gpu_dev_verbs_qp* qp = loadConst(&gdaki->gdqp) + peer;   // 按 peer 取本
 
 逻辑上「GPU 侧有一个 `qp[peer]`」是成立的，物理形态是 `ncclGinGdakiGPUContext`（`gin_gdaki_device_host_common.h:25-36`）里位于 GPU 可见内存的 `doca_gpu_dev_verbs_qp` 数组——Host 在 `createContext` 阶段用 `doca_gpu_verbs_export_multi_qps_dev` 把这批 QP 导出到设备（`transport/net_ib/gdaki/gin_host_gdaki.cc:747`）。GPU 运行时按索引直接取，不经过 Host。
 
-`contextIndex` 还要再拆一层：`ncclGinInitCommon`（`src/include/nccl_device/impl/gin__funcs.h:86-96`）把它拆成 `connectionId` 与 `contextId`，前者选 `ginHandles[]` 里的连接，后者选该连接内的 context。内核用 `blockIdx.x % ginContextCount` 决定 context（`device/symmetric/all_gather_gin.cuh:17`），于是不同 CTA 被分散到多条连接与多个 context 上，避免所有流量压在同一条 QP。
+前面看到设备侧用 `ctx.handle[ctx.contextId].gdqp + peer` 定位 QP，但 `handle` 与 `contextId` 都不是凭空来的：它们由 `ncclGinInitCommon` 从一个 `contextIndex` 拆出。之所以要拆两级，是因为设备侧 GIN 资源本身就是两级组织的——先按「连接」分，再在每条连接内按「context」分。下面先说明两级各自对应什么资源，再看拆分规则。
+
+**连接**对应 `ginConnectionCount`，其值是 `ginState->ginCommCount`（`gin_host.cc:215`），来源为 `ncclTopoGetLocalGinDevs` 给出的 `nLocalGinDevs`（`:113`、`:121`）。这里先说清「GIN 设备」指什么，因为它容易被误认为 GPU：**它是网卡侧的能力标记**。拓扑里 `NIC`/`NET`/`GIN`/`RMA` 是平级的节点类型（`src/graph/topo.h:45-50`），`ncclTopoAddNic` 遍历每个物理网卡下的 `<net>` 节点，只有 `gin="1"` 的才创建 GIN 节点（`topo.cc:488-506`、`:448-465`）；源码注释写明 NET/GIN/CollNet 共用同一批物理网卡节点（`:1811`）。以内置 GDAKI 插件为例，插件的 `devices(&ndev)` 遍历 IB 设备、只把 `ibProvider == IB_PROVIDER_MLX5` 的网卡计入（`transport/net_ib/gin.cc:63-69`、`:236-240`）——即「GIN 设备数」是支持 GPU 直驱的网卡数。
+
+为什么不是每个 GPU 对应一个 GIN 设备？因为 `nLocalGinDevs` 来自 `ncclTopoGetLocalGinDevs`（`topo.cc:2084-2092`）：它以当前 rank 所在 GPU 为起点，按 channel 依次查**与该 GPU 有本地路径**的 GIN 节点，直到设备号重复为止，得到的是这块 GPU 就近可达的网卡数。`topo.cc:2056-2072` 给出分配规则：`localGpuCount` 块 GPU 共享 `localNetCount` 张网卡，AUTO 策略下 `netsPerGpu = DIVUP(localNetCount, localGpuCount)`，起始网卡由 `gpu.dev % localGpuCount` 决定，再按 channelId 轮转。8 GPU 配 8 网卡时接近 1:1，8 GPU 配 4 网卡时每块 GPU 就近只有 2 张，这个数由 PCIe/NVLink 拓扑决定，与 GPU 数量没有必然对应关系。
+
+上限 4 来自 `NCCL_GIN_MAX_CONNECTIONS`（`gin_device_host_common.h:15`），它是 `ncclDevComm` 中固定长度数组的编译期容量（`ginHandles[4]`、`ginNetDeviceTypes[4]`，`impl/comm__types.h:48-50`），`gin__funcs.h:84` 的 `static_assert` 也依赖它做按位与取模——属于软件结构限制，不是硬件最多只能有 4 张网卡。此外 `gin_host.cc:130-134` 会 bootstrap 全 gather 后取所有 rank 的**最小值**：连接数必须全体一致，否则跨 rank 的通道与 QP 映射无法对齐。用户也可以通过 `NCCL_GIN_NCONNECTIONS` 显式指定（`:78`、`:127`）。
+
+每条连接是一次 `listen`/`connect` 建起来的 `ginComms[n]`，绑定一个本地 GIN 设备（`:157-161`）；4.3 第四步的 `createContext` 循环对每条连接各调一次，产出的句柄分别写入 `devComm->ginHandles[n]`、backend 类型写入 `ginNetDeviceTypes[n]`（`:289-291`）。因此选 `connectionId` 决定的是：**这次操作走哪条 GIN 连接（哪张网卡）、用哪一份设备侧资源表、以及该连接的 backend 类型**。多条连接用于把流量分散到多张网卡。
+
+**context**是连接内部的并发工作区。`ginContextCount` 是上层库申请的总数（DeepEP 里即 `num_allocated_qps`），Host 把它向上取整到连接数的倍数，得到 `nContextsPerComm = nContextsTotal / ginCommCount`（`gin_host.cc:210-225`），再作为 `ginConfig.nContexts` 传给该连接的 `createContext`（`:265-268`）。一个 context 拥有的独立资源因 backend 而异：GDAKI 里每个 context 一个 `ncclGinGdakiGPUContext`，含自己的 `gdqp`（QP 数组）、`counters_table` 与 `signals_table`，分配大小是 `ncontexts * NCCL_GIN_GDAKI_GPU_CONTEXT_MAX_SIZE`（`gin_host_gdaki.cc:516-518`），QP 总数为 `nqps_for_comm = ncontexts * nranks`（`:476-478`）；PROXY 里每个 context 一条独立的 GFD 队列与 `sis`/`cis` 索引（`gin_host_proxy.cc:32-38`、`:174`），signal 槽位按 `contextId * nSignalsPerContext` 分开（`:309`）。因此选 `contextId` 决定的是：**该连接内用哪一组 QP 或哪一条 GFD 队列、哪一段 signal 与 counter 槽位**。多个 context 让不同 CTA 各用一套队列与信号，避免争用同一个发送队列。
+
+下面这段是拆分逻辑，中文注释为笔记所加。注意三个字段分别以哪个下标为索引，这正体现了两级资源的分工：
+
+```cpp
+// src/include/nccl_device/impl/gin__funcs.h:81-97（节选，中文注释为笔记所加）
+template <typename GinType>
+NCCL_DEVICE_INLINE void ncclGinInitCommon(GinType* gin, ncclDevComm const& comm, int contextIndex) {
+  gin->nConnections = comm.ginConnectionCount;
+  // 低位交错：相邻 contextIndex 落到不同连接，把 CTA 流量分散到多张网卡
+  gin->connectionId = comm.ginConnectionCount == 3 ? uint32_t(contextIndex) % 3
+                                                     : contextIndex & (comm.ginConnectionCount - 1);
+  // 高位分组：同一连接内再区分第几套 QP / 队列（连接数为 3 时用除法，其余用移位）
+  gin->contextId = comm.ginConnectionCount == 3 ? uint32_t(contextIndex) / 3
+                                                  : contextIndex >> (comm.ginConnectionCount == 4 ? 2 : comm.ginConnectionCount - 1);
+  gin->_ginBackend = comm.ginNetDeviceTypes[gin->connectionId];  // backend 类型按连接选
+  gin->_ginHandle  = comm.ginHandles[gin->connectionId];          // 设备侧资源表按连接选
+  gin->_signalShadows = comm.ginSignalShadows + contextIndex * comm.ginSignalCount;  // 信号影子按完整 contextIndex 分片
+}
+```
+
+代入一组数值更清楚：设 2 条连接、每连接 4 个 context（共 8 个 `contextIndex`）。`contextIndex = 5` 时 `connectionId = 5 & 1 = 1`、`contextId = 5 >> 1 = 2`，即走连接 1 上的第 2 组 QP；而 CTA 依次取 0、1、2、3… 时 `connectionId` 交替为 0、1、0、1，天然把相邻 CTA 分散到两张网卡。两级下标的作用归纳如下：
+
+| 下标 | 计算方式 | 选中的资源 | 带来的影响 |
+|------|---------|-----------|-----------|
+| `connectionId` | `contextIndex` 低位（取模或按位与） | `ginComms[]`、`ginHandles[]`、`ginNetDeviceTypes[]` | 决定走哪张网卡、哪条 GIN 连接；多条连接实现跨 NIC 带宽聚合与 rail 覆盖 |
+| `contextId` | `contextIndex` 高位（整除或移位） | 该连接内的 QP 组 / GFD 队列 / signal 与 counter 槽位 | 决定并发工作区；多个 context 避免 CTA 之间争用同一发送队列与信号 |
+
+两级合起来，把 `ginContextCount` 个 `contextIndex` 映射到「连接 × context」的二维资源网格；再叠加上一节的 `peer` 下标，一次 Put 的完整定位就是 `ginHandles[connectionId]` → `[contextId]` → `gdqp + peer`。另外 `_signalShadows` 按**全局** `contextIndex` 而非 `contextId` 分片（`gin__funcs.h:97`），说明信号影子空间是按完整的二维组合隔离的，同一 `contextId` 落在不同连接上时也不会共用槽位。内核用 `blockIdx.x % ginContextCount` 选出 `contextIndex`（`device/symmetric/all_gather_gin.cuh:17`），因此 CTA 编号直接决定了它使用哪张网卡上的哪组 QP。
 
 **远端信息：QP 配对在建连时固化，WQE 携带的是地址与 rkey**。这里要区分两个阶段：
 

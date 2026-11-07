@@ -55,3 +55,9 @@ permalink: /learning/
 | 资料 | 说明 | 标签 |
 |------|------|------|
 | [How to Scale Your Model（JAX Scaling Book）](https://jax-ml.github.io/scaling-book/) | Google DeepMind 出品的大规模 LLM 训练系统教程：Roofline 分析、TPU 原理、sharding 与各类并行策略、LLaMA 3 训练/服务成本估算，含 GPU 专题章。 | 分布式训练 |
+
+## 🌐 网络与通信
+
+| 资料 | 说明 | 标签 |
+|------|------|------|
+| [Everything You Wanted to Know About RDMA（SNIA, 2025）](https://www.snia.org/educational-library/everything-you-wanted-know-about-rdma-were-too-proud-ask-2025) | SNIA 教育库的 RDMA 体系化入门长文：从 RDMA 的基本概念、RoCE / InfiniBand / iWARP 三种传输的差异，到 NVMe over Fabrics 与大规模存储网络，适合作为 RDMA 协议的导读资料。 | RDMA |
