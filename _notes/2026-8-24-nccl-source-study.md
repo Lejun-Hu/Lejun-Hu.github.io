@@ -2646,6 +2646,63 @@ NVTX（NVIDIA Tools Extension）是 NVIDIA 提供的**性能标记 API**：在�
 
 > **Range 名字 vs Payload 的分工**：名字是字符串，用于时间轴上的快速识别；Payload 是结构化数据，用于"按通信器筛选""按消息大小排序""按 op 分组"这类**机器可读**的分析。两者分开存储、各司其职。这正是 NVTX 便利 benchmark 的核心：一次抓取后，你既能宏观地看时间轴，也能微观地按任意维度下钻。
 
+#### （1）先看一次完整用法：`ncclAllReduce` 怎么标出一个区间
+
+在看 NCCL 的封装设计之前，先看一个真实调用点上 NVTX 到底做了什么。集合操作是最密集的插桩点，取最常用的 `ncclAllReduce` 为例，它的完整函数体只有三步（`src/collectives.cc:168-178`）：
+
+```cpp
+// src/collectives.cc:168-178（完整函数体）
+ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op,
+                           ncclComm* comm, cudaStream_t stream) {
+  NVTX3_FUNC_WITH_PARAMS(AllReduce, NcclNvtxParamsAllReduce,
+                         NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), op));
+
+  struct ncclInfo info = {
+    ncclFuncAllReduce,    "AllReduce",         sendbuff, recvbuff, count, datatype, op, 0, comm, stream, /* Args */
+    ALLREDUCE_CHUNKSTEPS, ALLREDUCE_SLICESTEPS
+  };
+  return ncclEnqueueCheck(&info);
+}
+```
+
+第一行的宏就是插桩的全部入口。它要携带三样东西：通信器哈希（区分是哪个 comm）、本次传输的字节数（`count * ncclTypeSize(datatype)`）、以及归约操作类型。这里没有出现任何 `nvtxRangePush`/`nvtxRangePop`，宏把这两步都包掉了。把 `NVTX3_FUNC_WITH_PARAMS`（`src/include/nvtx.h:125-135`）按传入参数展开，得到的是下面这段（中文注释为笔记所加）：
+
+```cpp
+// 展开后的等价代码，对应 nvtx.h:125-135 的宏体
+ncclOptionalNvtxScopedRange nvtx3_range__;          // 声明一个栈对象，此时还没有开启区间
+if (!ncclParamNvtxDisable()) {                       // 环境变量 NCCL_NVTX_DISABLE 为 1 时整段跳过
+  constexpr uint64_t schemaId = NVTX_PAYLOAD_ENTRY_TYPE_SCHEMA_ID_STATIC_START + NVTX_SID_AllReduce;
+  static const payload_schema schema{NcclNvtxParamsAllReduceSchema, ...};   // 只注册一次
+  static ::nvtx3::v1::registered_string_in<nccl_domain> const nvtx3_func_name__{__func__};
+  const NcclNvtxParamsAllReduce _payload = {comm ? comm->commHash : 0, count * ncclTypeSize(datatype), op};
+  nvtxPayloadData_t nvtx3_bpl__[] = {{schemaId, sizeof(_payload), &_payload}};
+  ::nvtx3::v1::event_attributes const nvtx3_func_attr__{nvtx3_func_name__, nvtx3_bpl__};
+  nvtx3_range__.push(nvtx3_func_attr__);             // 真正开启区间
+}
+```
+
+关键在于第一行声明的 `nvtx3_range__`：它是一个**局部变量**，作用域覆盖整个函数体。`push` 在这个对象上开启区间，而关闭区间的动作写在它的析构函数里（`nvtx.h:101-106`）。于是整个函数的执行过程是：
+
+```text
+ncclAllReduce 进入
+   │
+   ├─ 构造 nvtx3_range__（pushed = false，不做任何事）
+   ├─ 若 NVTX 启用 → nvtx3_range__.push() → nvtxDomainRangePushEx   ← 区间开始
+   │
+   ├─ 组装 ncclInfo → ncclEnqueueCheck(&info)                         ← 真正的通信逻辑
+   │
+   └─ return
+         │
+         └─ nvtx3_range__ 离开作用域 → ~ncclOptionalNvtxScopedRange()
+               └─ if (pushed) nvtxDomainRangePop()                      ← 区间结束
+```
+
+这张时序图说明了 NVTX 区间的两端分别由谁负责：**开始靠显式调用 `push`，结束靠对象析构自动完成**。所以 `ncclAllReduce` 的函数体里看不到任何 pop——它根本不需要写，因为无论从哪条路径离开这个函数（正常返回、中途 `return`、还是抛异常），栈对象都会析构，析构里那句 `nvtxDomainRangePop` 一定被执行。这就是「自动释放」的实际含义：把关闭动作绑定在作用域上，而不是绑定在某一行代码上。
+
+对照另一种情况能看得更清楚。`ncclCommInitRank`（`src/init.cc:2562-2578`）用的是一对宏 `NVTX3_RANGE` + `NVTX3_RANGE_ADD_PAYLOAD`：入口只开区间，等初始化完成、拿到 `commHash` 与 `cudaDev` 之后，才在返回前把 payload 补进去，析构时再连同 payload 一起交出。两种用法共用同一个 RAII 类，区别只在于 payload 是「入口就知道」还是「执行完才知道」。
+
+下面两节就沿这两条线索展开：为什么要用 RAII 对象而不是直接调 NVTX 函数，以及为什么需要两个类而不是一个。
+
 #### （2）NCCL 的两层 RAII 封装（`src/include/nvtx.h`）
 
 上一节说 Range 是「一次 push 配一次 pop」的成对操作，但把这两个调用直接写进业务代码，会遇到三个具体问题。**配对容易漏**：函数有多个返回路径、提前 `return`、或中途抛异常时，很容易 push 了却没 pop，时间轴上就会出现层层嵌套甚至跨函数错乱的区间。**NVTX 可能被关闭**：`NCCL_NVTX_DISABLE` 生效时不应调用 NVTX 函数，若每个调用点都手写 `if` 判断，样板代码会污染业务逻辑。**Payload 有时序要求**：payload 必须在 push 之后填充、并在 pop 时一并提交，手写很难保证顺序正确。
