@@ -2932,6 +2932,16 @@ struct RunWorkColl<ncclFuncAllReduce, T, RedOp, NCCL_ALGO_RING, NCCL_PROTO_SIMPL
 
 至于为何「push 在入口、pop 在末尾」就能覆盖整个函数：该宏声明的是局部栈对象 `nvtx3_range__`，C++ 保证局部对象在离开作用域（函数返回）时析构，而析构函数调用 `nvtxDomainRangePop`（`nvtx.h:101-106`）。区间的两个端点因此自然落在「执行到 push 那一行」与「函数返回」上，中间这段墙钟时间就是区间长度。关闭动作的位置由作用域固定，与是否手写 pop 无关。
 
+**哪些 API 用一次性宏、哪些用两段式**：判断标准不是「是不是初始化函数」，而是 payload 能否在入口确定、以及是否无条件需要填。下表按这两种情况归类：
+
+| 情形 | 例子 | 用的宏 |
+|---|---|---|
+| 字段全部来自入参 | 集合操作、`ncclCommDestroy` | `NVTX3_FUNC_WITH_PARAMS` |
+| 字段要等函数执行后才产生 | `ncclCommInitRank`：`cudaDev` 要等 `cudaGetDevice`，`commHash` 要等 comm 建好 | `NVTX3_RANGE` + `ADD_PAYLOAD` |
+| 字段只在成功分支才该填 | `ncclCommFinalize` 放在 `if (comm)` 内；`ncclCommSplit` 放在 `if (newcomm && *newcomm)` 内 | 同上 |
+
+`ncclCommFinalize`（`init.cc:2812-2817`）属于第二类之外的情形：它的 payload 只有 `comm->commHash`，而 `comm` 是入参、入口就能取到，仍然用两段式，原因是 `ADD_PAYLOAD` 被放在 `if (comm)` 分支里，comm 为空时不填。对照 `ncclCommDestroy`（`:2889`），四个字段全部来自入参且无条件需要，就用一次性宏。
+
 **关于数据去向**：时间戳与事件不存在 NCCL 的任何数据结构里。NCCL 进程内只维护三样东西：
 
 1. 一个 domain：`nccl_domain`，名字为 `"NCCL"`（`nvtx.h:53-55`），用于让 NCCL 的标记与其它库隔离；
