@@ -338,7 +338,7 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 | `enqueue.cc`（144KB） | Host | 集合操作入队：`ncclEnqueueCheck`、Kernel Plan 构建、Work Batch 组装、算法/协议选择 |
 | `group.cc`（34KB） | Host | Group 操作：`ncclGroupStart/End`、异步任务管理、Preconnect |
 | `collectives.cc`（16KB） | Host | 所有集合操作 API 入口：AllReduce、AllGather、ReduceScatter、Broadcast、SendRecv、RMA 等 |
-| `proxy.cc`（84KB） | Host | Proxy 线程机制：当 GPU 无法直接驱动网卡/CPU 拷贝时，由 Host 侧常驻线程代劳完成数据搬运（详见 5.3 节） |
+| `proxy.cc`（84KB） | Host | Proxy 线程机制：当 GPU 无法直接驱动网卡/CPU 拷贝时，由 Host 侧常驻线程代劳完成数据搬运（详见 3.4 节） |
 | `transport.cc`（22KB） | Host | 传输层调度：`selectTransport`、`ncclTransportP2pConnect`、传输类型检查 |
 | `bootstrap.cc`（57KB） | Host | 带外 Bootstrap 机制：TCP Socket 通信，用于初始化阶段的 AllGather/Barrier |
 | `channel.cc`（9KB） | Host | Channel 初始化与释放 |
@@ -461,7 +461,7 @@ NCCL 的源码虽然庞大，但整个框架其实是**围绕少数几个核心�
 
 - `canConnect`：判断两个节点之间能否用这类传输连通；
 - `send` / `recv`（两个 `ncclTransportComm` 结构体）：分别管发送侧和接收侧，内含 `setup`（建连接、交换 handle）、`connect`（完成连接）、`free`（释放连接）等生命周期函数；
-- `proxySetup` / `proxyConnect` / `proxyProgress`：**Proxy 线程侧**的操作（正好对应 5.3 节讲的 Proxy 机制——当 GPU 不能直接驱动该链路时，由 Host 侧线程代劳）。
+- `proxySetup` / `proxyConnect` / `proxyProgress`：**Proxy 线程侧**的操作（正好对应 3.4 节讲的 Proxy 机制——当 GPU 不能直接驱动该链路时，由 Host 侧线程代劳）。
 
 NCCL 提供了四种实例，分别对应四类链路：
 
@@ -497,7 +497,7 @@ NCCL 提供了四种实例，分别对应四类链路：
 - `transportResources`：传输层的具体连接资源（比如 RDMA 的 QP、P2P 的映射地址等）；
 - `conn`：连接信息（`ncclConnInfo`，含具体传输类型、地址等）；
 - `connected`：连接是否已建立的状态标志；
-- `proxyConn`：对应的 Proxy 连接器（呼应 5.3 节的 Proxy 机制）。
+- `proxyConn`：对应的 Proxy 连接器（呼应 3.4 节的 Proxy 机制）。
 
 在 `ncclChannelPeer` 里，每个 peer 都有 `send[NCCL_MAX_CONNS]` 和 `recv[NCCL_MAX_CONNS]` 两组 connector（`device.h:233-234`）——即对每个 peer，发送和接收各有一套连接描述。
 
@@ -1536,7 +1536,7 @@ for (int t = 0; t < NTRANSPORTS; t++) {                      // 顺序：P2P →
 
 > **补充：`ncclTransports[]` 里其实还有第 5 个成员 `profilerTransport`，但选路循环根本不会碰它。** 数组声明是 `NTRANSPORTS + 1` 项，而 `selectTransport` 只遍历前 `NTRANSPORTS` 项（P2P/SHM/NET/CollNet）；且它的 `canConnect` 干脆是 NULL——整个结构里只实现了 `recv` 侧的 `profilerProxyConnect` / `profilerProxyProgress` 两个函数（`src/transport/profiler.cc:57-61`），没有 `setup`、没有 `connect`，不参与任何数据搬运。
 >
-> **它存在的目的是复用 Proxy 框架来轮询 Profiler 插件的计数器**。计数器需要被周期性读取并上报，而"周期性后台轮询 + 生命周期管理 + 错误处理"正是 Proxy 线程已经解决的问题。NCCL 的做法是：借用 Transport 的结构外壳，把这两个函数挂在 proxy 槽位上——于是计数器轮询就成了一种特殊的 proxy op，完全复用既有的线程管理与调度（呼应 5.3 节）。代价是多了一个不参与通信的伪传输，换来的是无需另造一套轮询机制。
+> **它存在的目的是复用 Proxy 框架来轮询 Profiler 插件的计数器**。计数器需要被周期性读取并上报，而"周期性后台轮询 + 生命周期管理 + 错误处理"正是 Proxy 线程已经解决的问题。NCCL 的做法是：借用 Transport 的结构外壳，把这两个函数挂在 proxy 槽位上——于是计数器轮询就成了一种特殊的 proxy op，完全复用既有的线程管理与调度（呼应 3.4 节）。代价是多了一个不参与通信的伪传输，换来的是无需另造一套轮询机制。
 
 > **为什么找到第一个可用的就直接返回，不继续比较后面的？** 这是"静态选最优、不维护多路径"的设计决策，分三层理解：
 >
@@ -1656,7 +1656,7 @@ setupChannel（全部 channel 建连接表）
 | 字段 | 含义 |
 |------|------|
 | `buffs[NCCL_NUM_PROTOCOLS]` | 三个协议（LL/LL128/SIMPLE）各自的**缓冲区地址**——发送方向指向对端显存（或本地发缓冲），接收方向指向本地缓冲 |
-| `tail` / `head` | **进度指针**：head 由发送侧推进、tail 由接收侧推进；GPU 内核与 Host Proxy 线程就靠这两个指针交换进度状态（呼应 5.3 节的 Proxy 机制） |
+| `tail` / `head` | **进度指针**：head 由发送侧推进、tail 由接收侧推进；GPU 内核与 Host Proxy 线程就靠这两个指针交换进度状态（呼应 3.4 节的 Proxy 机制） |
 | `connFifo` | GPU ↔ Proxy 之间传递控制信息的**环形缓冲** |
 | `ptrExchange` / `redOpArgExchange` | 直连（direct pointer）模式下的**指针交换区**与 reduce 参数交换区 |
 | `mhandles[]` / `netDeviceHandle` | 内存**注册句柄**（RDMA 的 MR）、网卡设备句柄 |
@@ -2625,24 +2625,26 @@ while (1) {
 
 ---
 
-## 五、组件交互全景
+## 五、一些额外的补充知识
 
-组件交互不只是"数据怎么流动"，还包括"我们怎么**看见**这些流动"。在拆解 Channel/Connector/Proxy 这些通信组件之前，先讲一套贯穿所有 NCCL API 的可观测性基础设施——NVTX 插桩。它是性能分析和调优（后续所有章节的实验手段）的前提，也是一份非常好的 C++ 惯用法教材。
+前面 0~4 章讲的是"实现集合通信"这条主线：NCCL 是什么、怎么初始化、一次调用如何变成 GPU 内核、GIN 机制如何工作。本章换一个视角，补充几块与"实现集合通信"本身无直接关系、但能显著改善学习和调优体验的知识。它们不参与通信数据的搬运，却决定了你能否**看见**通信在做什么、能否**理解**为什么同一次操作在不同规模下跑的是不同的内核。
 
-### 5.1 性能可观测性：NVTX 插桩与零开销抽象
+本章按顺序分三节：NVTX 性能标记（怎么看见通信在时间轴上的执行）、算法与协议的选择（内核变体从哪里来、在哪里分叉）、以及一组待逐步补充的 Hot Questions。
 
-#### （1）NVTX 是什么
+### 5.1 NVTX：用性能标记看见通信的执行
 
-NVTX（NVIDIA Tools Extension）是 NVIDIA 提供的**性能标记 API**：在代码里插入时间区间标记（Range），Profiler（如 Nsight Systems）就能在时间轴上显示"这段时间在做什么"。
+调优一个通信库，第一个问题往往是"这一次 AllReduce 到底花了多少时间、时间花在哪一段"。不插桩的话，NCCL 对 Profiler 而言只是一段不可区分的黑盒执行。NVTX 解决的就是"看见"这件事：它让每一个集合操作、每一段初始化流程，都能在 Nsight Systems 的时间轴上显示成带名字、带结构化信息的区间，从而支撑起后续所有 benchmark 与分析。
+
+NVTX（NVIDIA Tools Extension）是 NVIDIA 提供的**性能标记 API**：在代码里插入时间区间标记（Range），Profiler（如 Nsight Systems）就能在时间轴上显示"这段时间在做什么"。NCCL 在每个对外 API（初始化、集合操作、Group、内存分配）的入口和出口都埋了 NVTX 标记，因此它贯穿了前面 0~4 章讲过的所有路径——这是它作为"横切基础设施"的价值。
 
 | 概念 | 含义 |
 |------|------|
 | **Range** | 一个时间区间标记，有名字（如 `"AllReduce"`），在时间轴上显示为色块 |
-| **Payload** | 附加在 Range 上的**结构化数据**（如通信器哈希、rank 号、消息大小），展开详情或做筛选分析时用 |
+| **Payload** | 附加在 Range 上的**结构化数据**（如通信器哈希、rank 号、消息大小、op），展开详情或做筛选分析时用 |
 | **Schema** | 定义 Payload 的数据格式（字段名、类型），Profiler 据此解析 |
 | **Domain** | Range 的命名空间，NCCL 用名为 `"NCCL"` 的独立 domain，避免和其他库的标记混在一起 |
 
-> **Range 名字 vs Payload 的分工**：名字是字符串，用于时间轴上的快速识别；Payload 是结构化数据，用于"按通信器筛选""按消息大小排序"这类**机器可读**的分析。两者分开存储、各司其职。
+> **Range 名字 vs Payload 的分工**：名字是字符串，用于时间轴上的快速识别；Payload 是结构化数据，用于"按通信器筛选""按消息大小排序""按 op 分组"这类**机器可读**的分析。两者分开存储、各司其职。这正是 NVTX 便利 benchmark 的核心：一次抓取后，你既能宏观地看时间轴，也能微观地按任意维度下钻。
 
 #### （2）NCCL 的两层 RAII 封装（`src/include/nvtx.h`）
 
@@ -2792,102 +2794,70 @@ Reduction 操作（`ncclSum`/`ncclMax`…）本质是个整数枚举，直接显
 | 零开销抽象 | 模板 + `static` 首次注册 + `NCCL_NVTX_DISABLE` 短路 | 不开 Profiler 时几乎无成本 |
 | 结构化数据 | 编译期 schema 宏 + 两段式 payload 填充 | Profiler 可按 comm/rank/消息大小筛选分析 |
 
-> **和本章主题的关系**：接下来要讲的 Channel/Connector/Proxy 都是"数据平面"的组件，而 NVTX 这一套是"控制平面 + 观测平面"的横切基础设施——它包在**每一个**对外 API（初始化、集合操作、Group、内存分配）的入口和出口上。读代码时你会反复撞见 `NVTX3_RANGE(...)`，现在你知道：它不是业务逻辑，只是"我进入/离开了这个函数"的时间轴标记，可以直接跳过不影响理解主线。
+> **和本章主题的关系**：NVTX 这一套是"观测平面"的横切基础设施——它包在**每一个**对外 API（初始化、集合操作、Group、内存分配）的入口和出口上，与"数据怎么搬"无关。读代码时你会反复撞见 `NVTX3_RANGE(...)`，现在你知道：它不是业务逻辑，只是"我进入/离开了这个函数"的时间轴标记，可以直接跳过不影响理解主线。配合 Nsight Systems 抓一次 trace，你就能在时间轴上逐段看到初始化、建连、每个集合操作的耗时——这是 5.2 节讲"为什么同一操作会跑不同内核"时验证猜想的工具。
 
-### 5.2 Channel 与 Connector
+### 5.2 算法与协议的选择：一次调用如何选中某个内核
 
-**Channel** 是 NCCL 并行通信的基本单位。每个 Channel 独立承载一个 Ring 或 Tree 连接子图。
+第三章讲"一次 `ncclAllReduce` 如何变成 GPU 内核"时，只说了"最终会启动一个内核"，没有回答这个内核**是哪一个**。实际上 NCCL 为同一种集合操作预编译了大量内核变体，最终只挑一个。理解"挑哪个、在哪挑、挑了之后代码怎么分叉"，是读懂设备端目录（`src/device/*.h`）里那些 `RunWorkColl<...>` 特化的前提。本节先厘清两个正交维度，再追选择链路，最后看分叉落到哪个文件。
 
-- 一个 NCCL 操作的数据被切分为 `nChannels` 份，每个 Channel 独立处理一个数据块
-- Channel 的数量由 Ring 和 Tree 图搜索决定，受 `minCTAs`/`maxCTAs` 配置限制（最大 `MAXCHANNELS`）
-- 每个 Channel 对应一个 CUDA CTA（Cooperative Thread Array），实现 Kernel 级并行
+**第一层：算法（Algorithm）与协议（Protocol）是两个正交维度。** "算法"指通信的**拓扑结构**——数据沿什么形状流动；"协议"指单个连接上**搬运数据的方式**——一次搬运多大粒度、如何同步。二者相乘才得到一个具体内核：
 
-**Connector**（`src/include/p2p.h`）是 Channel 内 Peer 间连接的具体描述：
+| 维度 | 取值 | 回答的问题 |
+|------|------|-----------|
+| 算法 `algorithm` | Tree / Ring / CollNet / NVLS / PAT 等（`ncclAlgoStr`，`init.cc:53-54`） | 数据流拓扑：树状、环状、还是交给交换机做网内归约 |
+| 协议 `protocol` | LL / LL128 / SIMPLE（`NCCL_PROTO_LL=0`、`LL128=1`、`SIMPLE=2`，`plugin/nccl_tuner.h:37-41`） | 一条连接上每步搬多少字节、用什么同步机制 |
 
-- `ncclConnector.conn`：指向具体的 Transport 资源（P2P/SHM/NET）
-- `ncclConnector.transportComm`：指向该传输的虚函数表
-- `ncclConnector.connected`：连接状态标志
-- 每个 Peer 对在一个 Channel 中有一个 send Connector 和一个 recv Connector
+**第二层：三种协议擅长什么场景。** 协议本质是"每步搬运粒度 + 同步开销"的取舍，设备端由三个 tag 类型描述（`primitives.h:25-75`），各自对应一份实现：
 
-### 5.3 Proxy 机制
+| 协议 | 每步搬运粒度（`calcBytePerStep`） | 擅长场景 | 设备端实现 |
+|------|--------------------------------|---------|-----------|
+| LL | 8 字节数据一行（`buffSizes[LL]/NCCL_STEPS/2`，一半给 flag） | 极小消息：粒度最细、同步开销低，用 `ld.volatile` 轮询 flag | `src/device/prims_ll.h` |
+| LL128 | 128 字节一行（`NCCL_LL128_LINESIZE=128`，15/16 是数据） | 中小消息：每步搬更多字节，折中延迟与吞吐 | `src/device/prims_ll128.h` |
+| SIMPLE | 512 字节一个 grain（`ncclProtoGrainSize`，`device.h:328-334`） | 大消息：直接读写大块，吞吐优先，同步靠 head/tail | `src/device/prims_simple.h` |
 
-先正面回答一个常见疑问：**Proxy 是不是"本卡 GPU 为了通过 Host 侧网卡发消息的一个交互"？** —— 你的直觉方向是对的，但可以更精确地说：
+**第三层：在哪一步选择。** 选择发生在 Host 侧的 `ncclPrepareTasks`（`enqueue.cc:363`），它对每个任务调用 `ncclGetAlgoInfo`（`:441`），最终由 `topoGetAlgoInfo`（`enqueue.cc:2028-2116`）拍板：
 
-> **Proxy 的本质是"代劳"**：当 GPU **无法直接驱动某个硬件链路**时（典型是跨节点的 RDMA 网卡、同机 SHM 的 CPU 拷贝），NCCL 在 Host 侧拉起一个**常驻线程（proxy 线程）**，由它来"代理"完成那部分物理搬运。GPU 内核负责"算好数据 + 标记就绪"，Proxy 线程负责"真正把数据经网卡/CPU 搬走或搬进来"。
+```cpp
+// enqueue.cc:2035-2047（节选）
+for (int a = 0; a < NCCL_NUM_ALGORITHMS; a++)
+  for (int p = 0; p < NCCL_NUM_PROTOCOLS; p++) {
+    if (table[a][p] == NCCL_ALGO_PROTO_IGNORE) continue;
+    if (table[a][p] >= 0.0 && table[a][p] < minTime) {  // 遍历所有 (算法, 协议) 组合
+      algorithm = a; protocol = p; minTime = table[a][p];   // 取预估时间最小者
+    }
+  }
+```
 
-**为什么需要 Proxy：**
+`table` 是每个 (算法, 协议) 组合的**预估耗时**，由 tuner 的带宽/延迟模型算出（`ncclTopoGetAlgoTime`，`tuning.cc:630-633` 用 `bandwidths`/`latencies` 折算）。所以"选择"不是一串 if-else 阈值，而是**枚举所有组合、取模型预估最快的一个**。用户可用 `NCCL_ALGO`/`NCCL_PROTO` 环境变量强制指定（选不中时 `enqueue.cc:2052-2065` 会告警）。
 
-- **NET transport（跨节点 RDMA）**：传统路径下 GPU 不能直接写网卡发送队列（doorbell），必须由 CPU 通过网卡驱动发起 `isend`/`irecv`；
-- **SHM transport**：需要通过 CPU 在共享内存和 GPU 显存之间做 `memcpy`；
-- **CollNet transport**：需要在 Host 侧管理网内计算（SHARP）资源。
+选出 (algo, proto) 之后，`topoGetAlgoInfo` 还会据此决定 `nChannels` 和 `nThreads`（`:2070-2115`），依据是 `threadThresholds[algo][proto]`（LL=8、LL128=8、SIMPLE=64，`comm.h:49-51`）——消息越小、并行度和线程数压得越低，避免"线程比字节还多"。
 
-（补充一句：有了 GIN 之后，NET 场景下 GPU 才能直接发起网络操作，从而绕开 Proxy——这正是前面第 0.4 节和第四部分讲 GIN 时的对比点。Proxy 和 GIN 本质上是"谁发起网络操作"的两种答案。）
+**第四层：选择之后如何分叉。** 选出 (algo, proto) 后，它被编码进一个内核 ID，再据此命中唯一的内核：
 
-**两侧代码各在哪（这是理解 Proxy 的关键）：**
+```cpp
+// enqueue.cc:442
+agg.devFuncId = ncclDevFuncId(agg.func, agg.opDev.op, agg.datatype, agg.algorithm, agg.protocol);
+```
 
-Proxy 是一个典型的 **Host/Device 协作机制**，两侧代码分布如下：
+`ncclDevFuncId`（`device.h:605`）把 `(集合操作, 数据类型, 算法, 协议)` 这个组合算成一个线性编号，查 `ncclDevFuncTable` 得到具体内核函数指针。这个表由 `generate.py` 在编译期生成，其枚举顺序与 `ncclDevFuncId` 的公式严格对应（`generate.py:164-178` 的 `enumerate_func_rows()`）。
 
-| 侧 | 文件 | 具体职责 |
-|----|------|----------|
-| **Host 侧**（proxy 线程） | `src/proxy.cc` | Proxy 线程主体：`ncclProxyProgress`（`proxy.cc:954`，线程主循环）、`progressOps`（`proxy.cc:801`）、`ncclProxyGetPostedOps`（`proxy.cc:835`）——轮询 op 队列并推进 |
-| Host 侧 | `src/transport/net.cc` | NET 的 proxy 实现：`sendProxyProgress`（`net.cc:1304`）、`recvProxyProgress`（`net.cc:1470`），真正调用 net plugin 的 `isend`/`irecv` |
-| Host 侧 | `src/transport/shm.cc` | SHM 的 proxy 实现：CPU `memcpy` 搬运 |
-| Host 侧 | `src/include/proxy.h` | 核心数据结构：`ncclProxyOp`（`proxy.h:73`）、`ncclProxyArgs`（`proxy.h:185`）、`ncclProxyState`（`proxy.h:333`）、`ncclProxyOpsPool`（`proxy.h:229`） |
-| **Device 侧**（GPU kernel） | `src/device/prims_simple.h` | 集合内核里更新 fifo 进度标记，例如 `peerPtr->send[connIndex].step += steps; st_relaxed_sys_global(...tail, ...)`（`prims_simple.h:307-308`） |
-| Device 侧 | `src/device/prims_ll.h` / `prims_ll128.h` | 同理，各协议内核里维护进度标记 |
-| Device 侧 | `src/include/comm.h` | 进度标记结构体：`ncclSendMem`（`comm.h:53`，含 `head`）、`ncclRecvMem`（`comm.h:67`，含 `tail`），就是 GPU 内核与 Proxy 线程之间交换进度状态的共享内存 |
+真正落到"写数据"这一步时，分叉发生在设备端内核内部：每个内核是一个 `RunWorkColl<func, T, RedOp, ALGO, PROTO>` 模板特化，它用 `using Proto = ProtoLL/ProtoLL128/ProtoSimple` 选定协议 tag，再把它传给 `Primitives`：
 
-**工作模式（以 NET 跨节点发送为例，串起上面两侧）：**
+```cpp
+// src/device/all_reduce.h:229-233（节选）
+struct RunWorkColl<ncclFuncAllReduce, T, RedOp, NCCL_ALGO_RING, NCCL_PROTO_SIMPLE> {
+  __device__ __forceinline__ void run(int tid, int nthreads, struct ncclDevWorkColl* work) {
+    using Proto = ProtoSimple<ALLREDUCE_CHUNKSTEPS / ALLREDUCE_SLICESTEPS, ALLREDUCE_SLICESTEPS>;
+    runRing<T, RedOp, Proto>(tid, nthreads, work);
+  }
+};
+```
 
-1. **Device 侧**：GPU 内核把数据算好放进发送缓冲区，然后**写共享内存里的进度标记**（`ncclSendMem.head` / 对应 fifo 的 `step`），表示"这一块数据已经就绪，可以发了"；
-2. **Host 侧**：proxy 线程（`ncclProxyProgress`）**轮询**这些进度标记，发现新数据后，构造/取出 `ncclProxyOp`，走对应的 `proxyProgress`（NET 是 `sendProxyProgress`）；
-3. **Host 侧**：`sendProxyProgress` 调用 net plugin 的 `isend()`，把 GPU 缓冲区里的数据经 RDMA 网卡发出去；
-4. **接收侧反向**：对端 proxy 线程 `irecv()` 收数据到 GPU 接收缓冲区，更新 `ncclRecvMem.tail`；对端 GPU 内核轮询到 `tail` 前进后，才消费数据。
+到这里就能回答开头的疑问：**`prims_ll.h` / `prims_ll128.h` / `prims_simple.h` 影响的是"内核里真正做 send/recv 的 `Primitives` 原语"这一步**——`Primitives<T, RedOp, Fan, Direct, Proto, ...>` 以协议 tag 为模板参数，三份文件分别给出 `ProtoLL` / `ProtoLL128` / `ProtoSimple` 的特化。算法层（`runRing`/`runTree`/`runNvls`）对协议是参数化的，不感知具体协议；协议 tag 决定的是"每步搬多少字节、用 flag 轮询还是 head/tail 同步"。因此同一段算法代码能被三个协议复用，分叉只发生在最底层的数据搬运原语上。
 
-**关键数据结构（Host 侧）：**
+### 5.3 Hot Questions
 
-- `ncclProxyOp`（`src/include/proxy.h:73`）：单个 Proxy 操作描述符，含连接指针、字节数、opCount、root 等；
-- `ncclProxyArgs`（`proxy.h:185`）：一批 Proxy 操作参数，带 `progress` 函数指针，传递给 Proxy 线程；
-- `ncclProxyState`（`proxy.h:333`）：Proxy 全局状态，含线程句柄、连接池、op 池等。
-
-Proxy 线程在建链开始**之前**就由 `ncclProxyCreate` 启动（`init.cc:1524-1530`，建连期间 NET 的 SharedInit 就需要它），其生命周期与通信器绑定。
-
-### 5.4 算法与协议的选择
-
-**算法选择**（在 `ncclPrepareTasks` 中），NCCL 根据以下因素选择算法：
-
-- 数据量大小（与 `threadThresholds[algo][proto]` 比较）
-- Tuner 插件返回的延迟和带宽表（`comm->latencies` / `comm->bandwidths`）
-- 硬件能力（CollNet 可用性、NVLS 可用性、PAT 可用性）
-- 配置覆盖（用户可通过环境变量强制选择）
-
-**协议选择（Protocol）：**
-
-| 协议 | 选择条件 | 设备端实现 |
-|------|----------|-----------|
-| LL | 数据量 < `threadThresholds[algo][LL]` | `src/device/prims_ll.h` |
-| LL128 | `LL <= 数据量 < LL128` | `src/device/prims_ll128.h` |
-| SIMPLE | 数据量 >= `threadThresholds[algo][LL128]` | `src/device/prims_simple.h` |
-
-**Cross-NIC 优化**：Ring 和 Tree 图支持跨 NIC 路由（`crossNic`），在 AllGather3 阶段确定是否需要跨 NIC 来充分利用多网卡带宽。
-
-**PAT (Parallel Aggregated Trees) 算法**（`NCCL_ALGO_PAT`）：针对 AllReduce 在小数据量下的优化，利用 PCIe 交换机或 NVSwitch 的聚合能力。实现在 `src/graph/` 和 `src/transport/`。
-
-### 5.5 值得深入研究的算法
-
-以下算法在 NCCL 中属于核心技术，不需要在初学阶段深入细节，但需要知道它们的存在、用途和在代码中的位置：
-
-| 算法/机制 | 位置 | 说明 |
-|-----------|------|------|
-| **Ring 搜索** | `src/graph/rings.cc` + `src/graph/search.cc` | 在拓扑图中搜索最优 Ring 排列。目标是最小化 Ring 中相邻节点间的路径总代价（综合考虑带宽和跳数） |
-| **Tree 搜索** | `src/graph/trees.cc` + `src/graph/search.cc` | 搜索平衡二叉树或多叉树。Tree 算法延迟为 O(log N)，适合小消息；Ring 延迟为 O(N)，适合大消息 |
-| **Double Binary Tree (DBT)** | 配置在 Tree 图中 | 通过两棵互补的二叉树实现全带宽利用，每棵树的叶子节点在另一棵树中为内部节点 |
-| **拓扑发现** | `src/graph/topo.cc` + `src/graph/xml.cc` | 通过 NVML API 获取 GPU ↔ NVSwitch ↔ NIC 的 PCIe 拓扑，构建加权图 |
-| **路径搜索** | `src/graph/paths.cc` | 计算节点间所有可能路径及其带宽，用于 Ring/Tree 搜索时的代价评估 |
-| **NVLS (NVLink SHARP)** | `src/transport/nvls.cc` | 利用 NVSwitch 的 Multicast/Reduction 硬件能力实现网内计算 |
-| **CollNet (SHARP)** | `src/transport/coll_net.cc` | 利用 InfiniBand 交换机的 SHARP 能力实现网内 Reduction |
-| **Tuner** | `src/graph/tuning.cc` + `src/plugin/tuner.cc` | 运行时调优：为不同大小的操作自动选择最优算法/协议组合 |
-| **PXN (PCIe + NVLink)** | 散布在 graph/ 和 transport/ | 利用 NVLink 跨 CPU Socket 的能力优化跨 NUMA 节点间通信 |
+（本节待补充。后续会把学习过程中值得单独记录的问题与结论汇总到这里。）
 
 ---
 
