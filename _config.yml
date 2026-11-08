@@ -7,12 +7,16 @@ title: "Egan's Personal Page"
 
 # 副标题/一句话介绍
 description: |
-  Software Engineer with 1+ year of industry experience in collective communication libraries for custom AI accelerators. Currently expanding expertise across the full AI infra stack:<br>
-  • RDMA/verbs & NCCL-level transport and in-network compute <br>
-  • CUDA kernel development & accelerator architecture (GPU/TPU/LPU) <br>
-  • LLM distributed inference/training — collective communication & dataflow <br>
+  Software Engineer with 1.5+ years building collective communication libraries for custom AI accelerators.<br>
+  My work spans the AI infrastructure stack, from device kernels up to distributed runtimes:<br>
+  • Device-side MoE communication kernels on custom ASICs<br>
+  • RDMA/verbs, in-network compute (SHARP), and scale-up/scale-out interconnect (NVLink, UALink, InfiniBand)<br>
+  • NCCL-level transport and collective communication — Ring/Tree graph search, protocol selection, GPU-initiated networking<br>
+  • Accelerator architecture: GPGPU vs DSA<br>
+  • LLM training and inference frameworks (vLLM, SGLang)<br>
   <br>
-  Passionate about bridging hardware capabilities with production‑grade distributed AI performance.
+  Closing the gap between what accelerators can do and what models actually achieve at scale.
+
 
 #旧版本个人描述
 # • Hardware drivers & low-level protocol interaction<br>
