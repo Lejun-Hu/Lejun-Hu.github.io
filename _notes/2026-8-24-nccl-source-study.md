@@ -2722,7 +2722,7 @@ private:
 
 #### （3）宏家族：把 RAII 对象"串"进函数
 
-裸用上面的类还是很啰嗦，NCCL 用几个宏把它们一行塞进函数。**这里有一个非常精妙的"两段式"设计**，先看用于通信器生命周期的这对宏：
+上一节的两个类已经能正确管理区间，但要在每个 API 里真正用起来，调用点仍得写一长串重复代码：声明一个对象、判断 NVTX 是否被关闭、把函数名注册成静态字符串、拼出 `event_attributes`、最后调用 `push`。这些步骤每个 API 都一样，NCCL 把它们收进宏里，调用点只留一个宏名。用于通信器生命周期的是一对配套宏，一个负责开头的区间开启，一个负责结尾的 payload 补填。之所以拆成两次调用而不是合成一次，原因在下面的用法示例里能直接看到：payload 中的部分字段（例如通信器哈希）在函数入口时还取不到，只能等函数体执行完再补进这个区间。先看这两个宏的定义：
 
 ```cpp
 // src/include/nvtx.h:191-197 —— 第一段：函数入口，先 push 一个只有名字的 Range
@@ -2761,7 +2761,7 @@ ncclResult_t ncclCommInitRank(ncclComm_t* newcomm, int nranks, ncclUniqueId comm
 }  // 4. 函数退出：RAII 析构，pop 时把 payload 一起交给 Profiler
 ```
 
-> **为什么要"先 push、后补 payload"，而不是构造时一起给？** 因为 **`commHash`、`cudaDev` 这些信息在函数入口时根本还不存在**——它们要等初始化完成后才能从 `*newcomm` 里读出来。所以 Range 必须从入口就开始计时，payload 只能等数据就绪后再填，最后析构时一并交给 Profiler。这是"**占坑在先、填数据在后**"的两段式设计，`NVTX3_RANGE_ADD_PAYLOAD` 宏里的 `do { ... } while (0)` 和 `isPushed()` 检查都是为了安全地配合这套流程。
+> 这段代码的关键在于：Range 从函数入口就开始计时，payload 要等初始化完成、数据就绪后才补填，最后析构时一并交给 Profiler。`NVTX3_RANGE_ADD_PAYLOAD` 宏里的 `do { ... } while (0)` 是为了让宏在 `if`/`else` 等语句中安全展开，`isPushed()` 检查则保证 NVTX 未启用时不会去填一份并不存在的区间。
 >
 > （集合操作 API 没有这个问题——`commHash`、字节数在入口就知道，所以用的是一步到位的 `NVTX3_FUNC_WITH_PARAMS` 宏，如 `src/collectives.cc:170` 的 `ncclAllReduce`：`NVTX3_FUNC_WITH_PARAMS(AllReduce, NcclNvtxParamsAllReduce, NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), op))`。）
 
