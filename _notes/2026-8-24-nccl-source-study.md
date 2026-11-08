@@ -2916,7 +2916,47 @@ struct RunWorkColl<ncclFuncAllReduce, T, RedOp, NCCL_ALGO_RING, NCCL_PROTO_SIMPL
 
 ### 5.3 Hot Questions
 
-（本节待补充。后续会把学习过程中值得单独记录的问题与结论汇总到这里。）
+本节汇总学习过程中值得单独记录、但放进正文会打断主线的问答。后续会继续补充。
+
+#### Q1：NVTX 宏放在函数入口和放在 `return` 前都能计时吗？记录的数据最终存在哪？
+
+**关于位置**：不是放哪都行。NCCL 的三类宏里只有两类会开启区间，它们的位置直接决定计时起点；第三类不开区间，位置才无所谓。
+
+| 宏 | 是否开启区间 | 该放哪 | 对计时的影响 |
+|---|---|---|---|
+| `NVTX3_FUNC_WITH_PARAMS` | 是（push 并附带 payload） | 必须在函数入口 | 决定区间起点 |
+| `NVTX3_RANGE` | 是（仅 push） | 必须在函数入口 | 决定区间起点 |
+| `NVTX3_RANGE_ADD_PAYLOAD` | 否（只往已开启的区间补 payload） | 任意位置，但须在对象析构前 | 无影响 |
+
+因此 `NVTX3_FUNC_WITH_PARAMS` 若挪到 `return` 之前，区间只剩那一瞬间到析构之间的时间，长度接近 0，不再标记整个调用。而 `ncclCommInitRank` 中的 `NVTX3_RANGE_ADD_PAYLOAD` 放在返回前是正确的：它只调 `setPayloadData` 往已开启的区间填数据，不涉及 push/pop。
+
+至于为何「push 在入口、pop 在末尾」就能覆盖整个函数：该宏声明的是局部栈对象 `nvtx3_range__`，C++ 保证局部对象在离开作用域（函数返回）时析构，而析构函数调用 `nvtxDomainRangePop`（`nvtx.h:101-106`）。区间的两个端点因此自然落在「执行到 push 那一行」与「函数返回」上，中间这段墙钟时间就是区间长度。关闭动作的位置由作用域固定，与是否手写 pop 无关。
+
+**关于数据去向**：时间戳与事件不存在 NCCL 的任何数据结构里。NCCL 进程内只维护三样东西：
+
+1. 一个 domain：`nccl_domain`，名字为 `"NCCL"`（`nvtx.h:53-55`），用于让 NCCL 的标记与其它库隔离；
+2. 一次性注册的元数据：schema 在 `payload_schema` 构造时经 `nvtxPayloadSchemaRegister` 注册（`nvtx.h:60-68`），归约枚举在启动时经 `nvtxPayloadEnumRegister` 注册为可读名称（`init_nvtx.cc:19-35`）；
+3. 运行时的调用入口：每次进入 API 调用 `nvtxDomainRangePushEx`。
+
+真正打时间戳的是 NVTX 运行时库（libnvToolsExt）。`nvtx3.hpp:2110` 的 `scoped_range_in` 构造函数只是转调这个 C API，时间戳、事件记录与缓冲都在库内部完成。下图描述一次 `ncclAllReduce` 调用中事件的流向，以及各环节分别由谁负责：
+
+```text
+NCCL 进程                                 NVTX 运行时 (libnvToolsExt)          Profiler (Nsight Systems)
+────────────                            ──────────────────────────────      ─────────────────────────
+ncclAllReduce 入口
+  nvtx3_range__.push(attr)
+    → nvtxDomainRangePushEx  ─────────►  打时间戳 T1、记录区间与 payload
+                                         写入 profiler 可见的事件缓冲  ─────►  注入库读取事件
+  ncclEnqueueCheck(...)
+  函数返回
+  析构 → nvtxDomainRangePop  ────────►  打时间戳 T2、关闭区间
+                                         （区间时长 = T2 − T1）
+                                                                              抓取结束后序列化为 .nsys-rep
+```
+
+所以供 Profiler 分析的数据结构有两处：抓取期间是 **NVTX 运行时维护的事件缓冲**，抓取结束后是 **Profiler 导出的报告文件**（如 `.nsys-rep`）。NCCL 里留存的只有 schema 与枚举注册，那是供 Profiler 解析 payload 字段名与枚举含义的元数据，不含时间信息。
+
+一个容易被忽略的细节：宏展开后 `_payload` 是 `if` 块内的局部变量，push 之后即可销毁。原因是 NVTX 在 `nvtxDomainRangePushEx` 调用期间按 schema 描述读取并复制了 payload 内容，调用返回后不再引用它。
 
 ---
 
