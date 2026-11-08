@@ -2648,7 +2648,9 @@ NVTX（NVIDIA Tools Extension）是 NVIDIA 提供的**性能标记 API**：在�
 
 #### （2）NCCL 的两层 RAII 封装（`src/include/nvtx.h`）
 
-NCCL 没有在代码里散落 `nvtxRangePush`/`nvtxRangePop`，而是封装了两个 RAII 类。先看最基础的：
+上一节说 Range 是「一次 push 配一次 pop」的成对操作，但把这两个调用直接写进业务代码，会遇到三个具体问题。**配对容易漏**：函数有多个返回路径、提前 `return`、或中途抛异常时，很容易 push 了却没 pop，时间轴上就会出现层层嵌套甚至跨函数错乱的区间。**NVTX 可能被关闭**：`NCCL_NVTX_DISABLE` 生效时不应调用 NVTX 函数，若每个调用点都手写 `if` 判断，样板代码会污染业务逻辑。**Payload 有时序要求**：payload 必须在 push 之后填充、并在 pop 时一并提交，手写很难保证顺序正确。
+
+NCCL 的解决办法是把「一段已开启的 NVTX 区间」做成一个栈对象：调用 `push` 时开启区间，对象离开作用域析构时自动关闭。这样区间生命周期严格由作用域决定，不需要在每个返回路径上手工 pop，而「是否真的启用 NVTX」也只在对象内部判断一次，调用方无需关心。封装分两层，对应两种需求：基础层 `ncclOptionalNvtxScopedRange` 只负责「开区间、关区间」；带 Payload 的层 `ncclOptionalNvtxPayloadRange` 在基础层之上多管理一份结构化数据，供那些需要在时间轴上携带 comm、消息大小、op 的操作使用。先看基础层，注意它的构造函数是默认的、真正的开启动作放在 `push` 里，这是为了配合下一节的宏做「先构造、再填参数、最后 push」的两段式调用：
 
 ```cpp
 // src/include/nvtx.h:93-116（节选）
@@ -2682,7 +2684,7 @@ private:
 > - **`noexcept`（析构不抛异常）**：C++11 起析构函数默认就是 `noexcept`，这里显式写出是自我文档化。若析构抛异常且发生在**栈展开**（异常传播时逐层退出调用栈、逐层析构局部对象的过程）中，会直接 `std::terminate()`。
 > - **`pushed` 标志**：push 是条件执行的（NVTX 被禁用时跳过，见下面的宏），析构时用这个标志判断"到底 push 没有"，避免不平衡的 pop。成员注释也写了：正常运行中它不该为 false，但逐一检查太贵，所以只在析构兜底。
 
-第二层是带 Payload 的模板版本：
+第二层不是在基础层上多加一个参数，而是解决基础层做不到的事。上一节讲过 Payload 是附在 Range 上的结构化数据，但它的提交有严格时序：必须先把区间 push 开，再填数据，最后在 pop 的那一刻随区间一起交给 Profiler。基础层的析构函数只调用一个不带数据的 `nvtxDomainRangePop`，没有存放 payload 的位置，也无法保证「先 push 后填数据」的顺序。因此 NCCL 在基础层之上又做了 `ncclOptionalNvtxPayloadRange`：它把 payload 的存储、schema 标识、以及「pop 时带不带数据」的判断一并纳入同一个对象，让 payload 的生命周期和区间完全重合。下面这段代码里，`payload` 成员就是留给调用方稍后填充的，`payloadData` 则把「类型 id、大小、数据指针」三元组预先备好：
 
 ```cpp
 // src/include/nvtx.h:147-187（节选）
