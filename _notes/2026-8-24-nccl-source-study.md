@@ -42,15 +42,15 @@ MoE 专家并行下的通信库 DeepEP 已拆分为独立笔记，见[《DeepEP 
 
 为什么需要专门的库？因为"把数据搬得快"这件事，在 GPU 集群上远比想象中复杂：
 
-- GPU 之间可能通过 **NVLink**（同机高速直连）、**PCIe**（同机较慢直连）、**RDMA 网卡（InfiniBand / RoCE）**（跨机）等多种物理链路相连。此外，其他公司自研的底层互联方案——例如 AMD 的 Infinity Fabric、国产网卡/IP 厂商自研的链路——也会在这一层接入，成为 xCCL（广义的CCL） 需要适配的"传输层"之一；
+- GPU 之间可能通过 **NVLink**（同机高速直连）、**PCIe**（同机较慢直连）、**RDMA 网卡（InfiniBand / RoCE）**（跨机）等多种物理链路相连。此外，其他厂商自研的底层互联方案——例如 AMD 的 Infinity Fabric、国产网卡厂商自研的链路——也会在这一层接入，成为各类 xCCL 实现（泛指面向其他加速器或私有互联的集合通信库）需要适配的"传输层"之一；
 - 同一种 AllReduce，用"环形（Ring）"还是"树形（Tree）"算法，在不同数据量、不同拓扑下性能差异巨大；
 - 还要处理拓扑感知、多流并发、故障恢复等一堆工程细节。
 
-NCCL 把这些复杂性全部封装起来，向上暴露一组简洁的 C API（`ncclAllReduce`、`ncclBroadcast`……），向下自动探测硬件拓扑并选择最优算法。于是上层框架只需要"我要做 AllReduce"，剩下的交给 NCCL。
+NCCL 把这些复杂性全部封装起来，向上暴露一组简洁的 C API（`ncclAllReduce`、`ncclBroadcast`……），向下自动探测硬件拓扑并选择最优算法。于是上层框架只需要"我要做 AllReduce"，剩下的交给 NCCL。这条"对上提供 C API、对下探测拓扑"的分界，正是接下来两节要分别展开的两侧：0.2 看上游如何调用进来，0.3 看下游打通了哪些硬件。
 
 ### 0.2 向上：PyTorch 是如何调用到 NCCL 的（代码视角）
 
-这是理解 NCCL 价值的关键一环。让我们沿着一条真实的调用链，从你写的 Python 代码走到 NCCL：
+0.1 说明了 NCCL 对外暴露什么；这一节看它的上游——PyTorch 究竟怎样调用到这些 C API。下面沿一条真实的调用链，从 Python 代码走到 NCCL：
 
 ```
 你的代码: torch.distributed.all_reduce(tensor)
@@ -73,15 +73,15 @@ NCCL 库:  libnccl.so → ncclAllReduce(...)
    - 管理 NCCL communicator（`ncclComm_t`）的创建与复用；
    - 处理 CUDA stream 的同步（确保通信和计算在同一流上有正确的先后关系）。
 
-3. **NCCL C API**：`ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream)`。看到这个签名你就明白了——NCCL 不关心张量形状、不关心梯度，它只关心"从哪块内存搬到哪块内存、多少字节、什么归约操作、在哪个 CUDA 流上执行"。
+3. **NCCL C API**：`ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream)`。这个签名说明 NCCL 不关心张量形状、不关心梯度，它只关心"从哪块内存搬到哪块内存、多少字节、什么归约操作、在哪个 CUDA 流上执行"。
 
    > 你可以去 PyTorch 源码里验证：在 `ProcessGroupNCCL.cpp` 里搜 `ncclAllReduce(`，会看到 `allreduce` 相关的函数里直接调用了它，把 `tensor.data_ptr()` 作为 `sendbuff`/`recvbuff` 传进去。
 
-   > 上面提到了两个初学者容易混淆、却又贯穿 NCCL 全程的概念，这里单独解释一下：
+上面三层描述的是调用链路本身。这条链上反复出现的两个参数 `comm` 与 `stream`，以及 `ncclComm` 里究竟装了什么，属于理解后文的背景知识，与本节主线关系不大，集中放在下面的引用块中；第一次读可以先跳过，等后文用到时再回来查看。
+
+   > 上面出现了一个贯穿 NCCL 全程的概念，这里先给出定义；`ncclComm` 的完整结构，以及"一个进程持有多个通信域"的用法，1.5 节专门展开。
    >
-   > **Communicator（通信器，`ncclComm_t`）**：它是"一次集合通信的参与范围 + 所有相关状态"的集合体。它记录了这次通信包含哪些 rank（进程/GPU）、它们之间已经建好的连接、拓扑信息、缓冲区等。只有**在同一个 communicator 里的 rank 才能互相通信**。它的创建（`ncclCommInitRank`）比较昂贵，所以框架会尽量复用，而不是每次通信都重新建一个——这正是 `ProcessGroupNCCL` 要"管理 communicator 的创建与复用"的原因。
-   >
-   > 一个 communicator 对应**一个"通信域"**。这个域里所有 rank 的地位是平等的、彼此可达的，域外的 rank 则无法参与进来。但要注意，**并不是"一个通信域只能有一个通信器"**——恰恰相反，同一个进程（GPU）可以同时属于多个 communicator。例如：8 卡做数据并行需要"全体 8 卡的 communicator"，同时每 2 卡之间又要做张量并行需要"局部 2 卡的 communicator"，这两个 communicator 可以并存，互不干扰。更准确的说法是：**每一次集合通信操作，必须在"某一个确定的 communicator"上进行，所有参与者拿到的必须是"同一个 communicator"**——这是它们能正确协作的前提。
+   > **Communicator（通信器，`ncclComm_t`）**：一次集合通信的参与范围与全部相关状态的集合体，记录参与通信的 rank、它们之间已建好的连接、拓扑与缓冲区。只有**同一个 communicator 内的 rank 才能互相通信**，且每次集合操作必须在某一个确定的 communicator 上进行。它的创建（`ncclCommInitRank`）开销较大，所以框架会尽量复用——这正是 `ProcessGroupNCCL` 要管理 communicator 创建与复用的原因。
    >
    > 那么这个 communicator 里到底存了什么？NCCL 源码里 `ncclComm` 结构体（定义于 `src/include/comm.h:523`）就是它的真身，字段非常多，我们挑几组最有代表性的来看：
 
@@ -150,15 +150,11 @@ struct ncclComm {
    > - **写入**：communicator 初始化完成的那一刻，NCCL 才把这两个字段设为 `NCCL_MAGIC`（`init.cc:2510`，注释原话就是 "Used to detect comm corruption"——"用于检测 comm 是否被破坏"）。而在此之前，它们被初始化为 `0`（`init.cc:210`）。
    > - **检查**：每次集合通信 API 的入口，都会先做一次校验（`argcheck.cc:40`）：`if (comm->startMagic != NCCL_MAGIC || comm->endMagic != NCCL_MAGIC)`，只要首尾任意一个哨兵不对，就打印 `"Error: corrupted comm object detected"` 并返回 `ncclInvalidArgument`，拒绝继续执行。
    >
-   > 于是形成了三重防线：**第 1 重**，如果某段代码发生**越界写**（比如写穿了 `ncclComm` 相邻的内存），最外层的 `startMagic` 或 `endMagic` 极可能被顺带破坏，下次调用就会被拦住；**第 2 重**，如果**传错了指针**（把别的对象的地址当成 `ncclComm_t` 传进来），那个地址处根本不会有 `NCCL_MAGIC`，同样会被识别出来；**第 3 重**，如果 communicator **尚未初始化完成**或**已经被释放/作废**，哨兵要么是 0、要么已被清掉，也能挡住误用。
+   > 于是形成了三重防线：**第 1 重**，如果某段代码发生**越界写**（比如写穿了 `ncclComm` 相邻的内存），最外层的 `startMagic` 或 `endMagic` 极可能被一并破坏，下次调用就会被拦住；**第 2 重**，如果**传错了指针**（把别的对象的地址当成 `ncclComm_t` 传进来），那个地址处根本不会有 `NCCL_MAGIC`，同样会被识别出来；**第 3 重**，如果 communicator **尚未初始化完成**或**已经被释放/作废**，哨兵要么是 0、要么已被清掉，也能挡住误用。
    >
-   > 需要注意：这是一种**低成本、非 100% 可靠**的防御手段——它只能"大概率"发现越界/误用，无法精确定位越界发生在哪里、也防不住"恰好把别的合法数据写进哨兵位置"的极端情况。要精确定位内存错误，还得靠 AddressSanitizer（ASan）、CUDA 的 compute-sanitizer 这类工具。但作为每次调用都执行的一道轻量闸门，它已经足够在"错误刚发生不久"就暴露出来，价值很大。
+   > 需要注意：这是一种**低成本、非 100% 可靠**的防御手段——它只能"大概率"发现越界/误用，无法精确定位越界发生在哪里、也防不住"恰好把别的合法数据写进哨兵位置"的极端情况。要精确定位内存错误，还得靠 AddressSanitizer（ASan）、CUDA 的 compute-sanitizer 这类工具。但作为每次调用都会执行的一次轻量校验，它已经足够在"错误刚发生不久"就暴露出来，价值很大。
    >
-   > **CUDA Stream（流，`cudaStream_t`）**：是 GPU 上任务执行的"队列"。同一流里的操作按顺序执行，不同流里的操作则可以并行。把通信操作放到哪个流上，决定了它相对计算操作是"串行等待"还是"并行重叠"。`ncclAllReduce` 的最后一个参数就是 stream，NCCL 会把通信内核"入队"到这个流上，从而与计算在正确的先后顺序下协调执行。理解了这两个概念，后文看源码时对 `comm` 和 `stream` 这两个反复出现的参数就不会再陌生了。
-
-
-
-**所以，"不同库承担的角色"可以这样概括：**
+   > **CUDA Stream（流，`cudaStream_t`）**：是 GPU 上任务执行的"队列"。同一流里的操作按顺序执行，不同流里的操作则可以并行。把通信操作放到哪个流上，决定了它相对计算操作是"串行等待"还是"并行重叠"。`ncclAllReduce` 的最后一个参数就是 stream，NCCL 会把通信内核"入队"到这个流上，从而与计算在正确的先后顺序下协调执行。理解了这两个概念，后文看源码时对 `comm` 和 `stream` 这两个反复出现的参数就不会再陌生了。把上面这条调用链按职责切开，各库/层承担的角色与各自关心的事情如下表所示：
 
 | 库/层 | 角色 | 它关心的事 |
 |-------|------|-----------|
@@ -166,6 +162,8 @@ struct ncclComm {
 | `torch.distributed` + `ProcessGroupNCCL` | 翻译与适配 | 把框架语义翻译成集合通信调用；管理设备、流、进程组 |
 | **NCCL** | **执行通信** | 探测拓扑、选算法、真正把数据在 GPU 间搬完 |
 | 底层驱动（CUDA driver、NIC 驱动） | 硬件抽象 | 提供对 NVLink、RDMA 网卡等硬件的访问接口 |
+
+读表可以得到一条分界：越往下越接近硬件、越不关心业务语义，越往上越关心"要做什么"。NCCL 位于中间偏下，已经是纯执行层——它只对内存地址、字节数与归约操作负责，既不能被训练框架取代，又必须被框架封装起来。这条分界确立之后，下面转到 NCCL 向下的那一侧。
 
 ### 0.3 向下：NCCL 打通了哪些硬件链路
 
@@ -181,6 +179,8 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 对应到源码，这些 transport 分别实现在 `src/transport/` 目录下的 `p2p.cc`、`net.cc`、`coll_net.cc` 等文件里。后文"传输层"部分会详细讲。
 
 > **带着这个整体认识读源码**：NCCL 的源码虽然庞大，但主线很清晰——"探测拓扑 → 选 transport → 选算法 → 启动内核 → 内核里通过 transport 搬数据"。后面每一节，本质上都是在展开这条主线的某个环节。
+
+到这里，〇章要交代的三件事已经齐了：NCCL 是什么、上游怎么调用它、它向下打通哪些链路。但这三件都建立在"一次完整的、独立的通信"这个前提上。真实训练里通信往往要与计算争夺时间，0.4 就补上这层前提之外的内容，并说明它与后面第四章 GIN 的关系。
 
 ### 0.4 通算融合、通信算子，与 GIN 的关系
 
@@ -213,7 +213,7 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 
 #### （3）这和 GIN 是什么关系？算不算 GIN 的内容？
 
-**结论先说：通算融合是一个"概念/目标"，GIN 是达成"细粒度通算融合"的一种底层"手段"，两者不是一回事。**
+**这里的判断是：通算融合是一个"概念/目标"，GIN 是达成"细粒度通算融合"的一种底层"手段"，两者不是一回事。**
 
 - 前面 0.1～0.3 讲的"host 下发任务到 device"（CPU 调用 `ncclAllReduce` → NCCL 把通信 kernel 入队），是**传统、也是最经典**的路径。它**已经能实现"kernel 间"层面的通算融合**——靠多条 stream 把计算 kernel 和通信 kernel 并行起来。但它的极限是"kernel 粒度"：一个通信 kernel 必须等上一个计算 kernel 整体结束（或至少整块结束）才能开始。
 
@@ -229,15 +229,19 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 
 > 三者的关系可以概括为：通算融合是"目的"，通信算子是"把它工程化的视角"，GIN 是"把重叠做到极致（kernel 内）的关键技术"。你现在看到的主流训练框架（Megatron、DeepSpeed 等）里各类"通算融合"优化，很多底层仍走的是传统 host 下发 + 多流重叠；而像 DeepEP 这种追求极致低延迟的库，才进一步用上了 GIN——它在通信库中的具体用法，见[《DeepEP 源码学习笔记》](/notes/deepep-source-study/)。
 
+〇章到此结束：NCCL 的定位、上游调用、下游链路，以及通算融合与 GIN 的关系已经交代完毕。接下来进入源码本身——第一章先给出仓库目录与核心数据结构的整体分布，为后面拆初始化流程与执行路径提供位置参照。
+
 ---
 
 ## 一、源码目录架构
 
 在深入具体机制之前，先建立对 NCCL 源码整体组织方式的认知。NCCL 的源码结构按照功能域清晰分层：`src/` 下的每个一级 `.cc` 文件通常对应一个核心子系统，其头文件放在 `src/include/` 中；设备侧代码统一在 `src/device/`，传输层实现在 `src/transport/`，插件适配层在 `src/plugin/`。
 
-> **阅读提示**：本章罗列的目录和各目录里的结构体、文件，只是作为一个**大致的框架介绍**，目的是让你先有一张"地图"，知道什么在哪儿。如果看到某个概念（比如 `ncclComm`、Channel、GIN、某个 transport）一时没看懂，**不必纠结，可以先跳过**——它们都会在后面的正式流程中（初始化、执行路径等）随着讲解逐步展开，到那时你对这些结构体和数据结构的理解会自然加深。现在先建立"哪个词大概在哪"的印象即可。
+> **阅读提示**：本章罗列的目录和各目录里的结构体、文件，只是作为一个**大致的框架介绍**，目的是先建立一个大致的空间印象，知道什么在哪儿。如果看到某个概念（比如 `ncclComm`、Channel、GIN、某个 transport）一时没看懂，**不必纠结，可以先跳过**——它们都会在后面的正式流程中（初始化、执行路径等）随着讲解逐步展开，到那时你对这些结构体和数据结构的理解会自然加深。现在先建立"哪个词大概在哪"的印象即可。
 
 ### 1.1 顶层目录
+
+先看仓库根目录的整体分布。下表按目录列出各自承担的职责，读的时候不必记住每一项，只需建立"哪一类代码放在哪里"的印象——后面各章遇到具体文件名时再回来对照：
 
 | 目录/文件 | 用途 |
 |-----------|------|
@@ -260,6 +264,8 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 | `bindings/` | 多语言绑定（详见 1.2 节） |
 | `nccl.h.in` | 公共 API 头文件模板 → `nccl.h` |
 | `CMakeLists.txt` | 构建系统入口 |
+
+读表可以看出一个规律：`src/` 内部按功能域切分（图搜索、传输、设备内核、插件），而工程性内容（构建脚本、语言绑定、公共头文件模板）都放在外层。`src/` 之外还有若干职责独立的目录，1.2 节逐一看过，本次阅读的注意力随后会收敛到 `src/`。
 
 ### 1.2 src 之外：仓库顶层的其他目录
 
@@ -286,9 +292,9 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 | `nccl_m2n/` | 跨 GPU 组（cross-group）数据搬运的独立实验库，核心是 **reshard**（数据重排）：把全局张量在两个不相交的 GPU 进程组之间重新分布，基于 NCCL 的 user-window API（`ncclWindow_t` + `ncclMemAlloc`），实现零拷贝、单边（one-sided）传输 |
 | `nccl_checkpoint/` | 检查点 KV-store 客户端（`kv_store_client.cc`），用于保存和恢复 NCCL 运行状态 |
 
-> 可以把 `contrib/` 整体理解为"与 NCCL 相关的周边实验项目"——不参与核心库构建，但展示了 NCCL 能力的多种扩展方向。
+> `contrib/` 整体是与 NCCL 相关的周边实验项目——不参与核心库构建，但展示了 NCCL 能力的多种扩展方向。
 >
-> ⚠️ 一个容易踩的坑：网上部分资料把上面"跨 GPU 数据重排"的项目写成 `nccl_xfer/`，但本仓库里**实际目录名是 `nccl_m2n/`**（M2N 即 many-to-n / 跨组搬运）。功能描述没错，目录名以源码为准。
+> 另需注意：网上部分资料把上面"跨 GPU 数据重排"的项目写成 `nccl_xfer/`，但本仓库里**实际目录名是 `nccl_m2n/`**（M2N 即 many-to-n，跨组搬运）。功能描述没错，目录名以源码为准。
 
 **`plugins/` —— 插件化扩展点（2.17 起正式引入）**
 
@@ -332,6 +338,8 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 
 ### 1.3 src/ 核心源码详解
 
+`src/` 是本次阅读的主体，文件多、体量也大。下表挑出与后文章节直接相关的一级源文件与设备侧文件，按执行位置（Host / Device）与职责列出；括号里的体积只是给一个相对规模的感觉，不必记忆：
+
 | 文件 | 执行位置 | 功能 |
 |------|----------|------|
 | `init.cc`（146KB） | Host | 初始化入口：`ncclCommInitRank`、`ncclCommInitRankDev`、`initTransportsRank`、通信器分配/释放 |
@@ -363,7 +371,11 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 | `graph/xml.cc` | Host | XML 拓扑解析（NVML 导出） |
 | `graph/tuning.cc` | Host | Tuner 集成 |
 
+读表要抓住两点：其一，Host 侧的分工大致沿着"初始化 → 入队 → 调度 → 传输"排开，正好是第二、三章展开的顺序；其二，设备侧按协议与集合算子分文件，第 5.2 节讲的协议分叉就落在 `prims_ll.h` / `prims_ll128.h` / `prims_simple.h` 这三个文件上。
+
 ### 1.4 include/ 头文件组织
+
+`src/include/` 存放内部头文件，其划分与 `src/` 的功能域基本对应。下表列出主要头文件及其定义的核心类型，用途是读某个 `.cc` 时能快速定位对应的数据结构声明：
 
 | 路径 | 内容 |
 |------|------|
@@ -386,6 +398,8 @@ NCCL 的核心价值之一，就是它把下面这些异构的物理链路**统�
 | `include/rma/` | RMA 内部接口 |
 | `include/compiler/` | 编译器适配（GCC/MSVC） |
 | `include/os/` | 操作系统适配 |
+
+两张表合起来就是本章要建立的"哪个词大概在哪儿"：遇到 `ncclComm` 查 `include/comm.h`，遇到传输接口查 `include/transport.h`。有了这个对应关系，1.5 节再从这些结构体里挑出四个最核心的展开。
 
 ### 1.5 关键数据结构总览
 
@@ -420,7 +434,7 @@ NCCL 的源码虽然庞大，但整个框架其实是**围绕少数几个核心�
 > - `ncclTeamLsa`（Local NVLink Accessible）：同一 NVLink 域内、通过 NVLink 直接可达的一组 GPU（通常就是同一节点内的卡）；
 > - `ncclTeamRail`：跨节点的"同一位置" GPU 组（例如每个节点的第 0 号 GPU 组成一个 rail，共享同一条网络路径）。
 >
-> 一句话记忆：**"通信域 vs 通信组"是跨层次的同义词；"communicator vs Team"则是"域边界 vs 域内拓扑分组"的关系。**
+> 辨析：**"通信域 vs 通信组"是跨层次的同义词；"communicator vs Team"则是"域边界 vs 域内拓扑分组"的关系。**
 
 回到字段本身，`ncclComm` 里装的都是"这一个通信域"的全部上下文：
 
@@ -434,7 +448,7 @@ NCCL 的源码虽然庞大，但整个框架其实是**围绕少数几个核心�
 
 #### 2. 通道 `ncclChannel`：并行通信的最小单位
 
-**`ncclChannel`**（定义于 `src/include/comm.h:150-172`）代表**一条独立的通信通道**，可以理解为"通信域里的一条并行管道"。
+**`ncclChannel`**（定义于 `src/include/comm.h:150-172`）代表**一条独立的通信通道**，即通信域内一条可以与其他通道并行工作的数据通路。
 
 为什么一个通信器里要有**多个** Channel？答案是**并行**。一个集合操作的数据会被切成 `nChannels` 份，每个 Channel 独立负责其中一份——每个 Channel 对应一条 Ring 或 Tree 连接，并由独立的 CUDA CTA 并行执行（**CTA 即 Cooperative Thread Array，也就是我们常说的 block/线程块**——它是 CUDA 里线程调度的基本单元，一个 CTA 内的线程在同一个 SM 上协同工作）。Channel 越多，能同时搬运的数据块就越多，带宽利用就越充分（当然也受硬件限制，最大 `MAXCHANNELS`）。
 
@@ -485,9 +499,9 @@ NCCL 提供了四种实例，分别对应四类链路：
 >
 > 而"选哪一个"的逻辑在 `selectTransport`（`src/transport.cc:20-34`）：它遍历 `ncclTransports[]`，对每个 transport 调用 `canConnect` 判断两节点能否用这类链路，能用就选中，并把它填进 `connector->transportComm`。因为数组顺序是 P2P → SHM → NET → CollNet，所以这本质是一条**"优先 P2P，不行退 SHM，再不行 NET"的兜底链**——这正好和下面第 4 点 讲的 connector 衔接起来：`selectTransport` 就是"给每个 connector 挑选 transport"的地方。
 
-#### 4. 连接器 `ncclConnector`：Channel 与 Transport 之间的桥梁
+#### 4. 连接器 `ncclConnector`：Channel 与 Transport 之间的衔接
 
-前面说 Channel 是"逻辑通道"、Transport 是"物理链路的抽象"，那这两者是怎么衔接起来的？答案就是 **connector（连接器）**。
+前面把 Channel 定义为逻辑上的并行通路，把 Transport 定义为对物理链路的统一抽象，那这两者靠什么对接起来？靠的就是 **connector（连接器）**。
 
 **`ncclConnector`**（定义于 `src/include/device.h:165-173`）描述的是"**本 rank 在某个 Channel 里，与某个具体 peer 之间的一条连接**"。它把 Channel 里那句逻辑的"我的下一跳是 rank X"，落实成"具体用哪套 transport、哪条物理链路、哪块连接资源"。
 
@@ -503,7 +517,7 @@ NCCL 提供了四种实例，分别对应四类链路：
 
 > **那"一个 Channel 里，本 rank 与不同 rank 之间的连接是怎么划分的？"** 答案藏在 `ncclChannel.peers` 这个字段里：它是一个**按 rank 编号索引的指针数组**（长度 `nRanks`），`peers[r]` 专门存放"本 rank 在这个 channel 里，与 rank r 之间的连接载体"（见 `channel.cc:35-38` 的分配逻辑：`channel->peers[r] = sharedRes->peers[channelId] + topParentRanks[r]`）。
 >
-> 换句话说，**每个 Channel 都维护一张覆盖全部 rank 的"连接表"**，下标就是 rank 编号，天然把"和谁连"分好了格。但**不是每个格子都有真实连接**——Channel 的 Ring/Tree 结构（`ring.prev`/`ring.next`/`tree.up`/`tree.down`）决定了"本 rank 应该连哪些 rank"：Ring 里只连 `prev`、`next` 两个邻居，所以只有 `peers[prev]`、`peers[next]` 这两个格子里的 connector 是真正建好的（`connected=1`），其余格子的 connector 都是空的、未建连接。
+> **每个 Channel 都维护一张覆盖全部 rank 的"连接表"**，下标就是 rank 编号，天然把"和谁连"分好了格。但**不是每个格子都有真实连接**——Channel 的 Ring/Tree 结构（`ring.prev`/`ring.next`/`tree.up`/`tree.down`）决定了"本 rank 应该连哪些 rank"：Ring 里只连 `prev`、`next` 两个邻居，所以只有 `peers[prev]`、`peers[next]` 这两个格子里的 connector 是真正建好的（`connected=1`），其余格子的 connector 都是空的、未建连接。
 >
 > ```text
 > comm->channels[16]                 // 16 个 channel
@@ -590,13 +604,15 @@ NCCL 提供了四种实例，分别对应四类链路：
 >
 > 其中每个 peer 的 `send`/`recv` 数组长度 `NCCL_MAX_CONNS = 2`（`device.h:231`），是因为一个 communicator 既要支持**集合通信**、又要支持**点对点通信**，两者是两套独立的连接：`connIndex = 0` 留给集合通信（Ring、Tree、CollNet 等**共用**这一个槽位，见 `ncclTransportRingConnect` 传 `0`、`ncclTransportTreeConnect` 也传 `0`，`generic.cc:26/55`），`connIndex = 1` 留给点对点 Send/Recv（见 `init.cc:1621/1625` 的 `send[1]`/`recv[1]`）。所以并不是"Ring 和 Tree 各占一个"，而是"集合通信与点对点通信各占一个"。
 
+第一章到此结束：目录分布、四个核心结构体及其数量关系已经建立，这是一份后面反复要查的"名词表"。接下来进入流程本身——从一次 `ncclCommInitRank` 调用开始，看这些结构体是怎样被一步步创建并串起来的。
+
 ---
 
 ## 二、初始化流程：从 ncclCommInitRank 到网络就绪
 
-> 第一章我们认清了 NCCL 的几个核心结构体（通信器、通道、连接子、传输层）。这一章回答一个更具体的问题：**当你（或 PyTorch）调用一次 `ncclCommInitRank` 之后，一个"可用的通信器"到底是怎么被一步步造出来的？**
->
-> 阅读建议：先读 **2.1**（认清 API 家族——先弄懂"五个公共 API 如何收敛到同一个执行体"这条主线）和 **2.2**（全景图——总共分四个阶段），再逐个阶段深入。若只想快速把握骨架，读完 2.1、2.2、2.6 即可。
+第一章认清了 NCCL 的几个核心结构体（通信器、通道、连接器、传输层）。这一章回答一个更具体的问题：当你（或 PyTorch）调用一次 `ncclCommInitRank` 之后，一个"可用的通信器"到底是怎么被一步步造出来的。
+
+阅读建议：先读 2.1（认清 API 家族，弄懂五个公共 API 如何收敛到同一个执行体）与 2.2（全景图，四个阶段的分界），再逐个阶段深入。若只想快速把握骨架，读完 2.1、2.2、2.6 即可。
 
 ### 2.1 先认清 API 家族：五个公共 API 如何收敛到同一个执行体
 
@@ -638,7 +654,9 @@ NCCL 提供了四种实例，分别对应四类链路：
 
 #### 2.1.1 门面层：5 个公共 API，差异只在三处参数
 
-| 公共 API | 一句话场景 | 关键差异 |
+本小节先看最外层。下表把 5 个公共 API 并排列出，重点看它们的参数差异——这些差异正是 NCCL 要把它们拆成多个函数、而不是只提供一个入口的原因：
+
+| 公共 API | 典型场景 | 关键差异 |
 |----------|-----------|----------|
 | `ncclGetUniqueId` | 生成全局唯一 ID（严格说不属于 init 家族，但**必须先做**） | 无 |
 | `ncclCommInitRank` | 最基础的初始化，多进程/多线程各自建 comm | 不包 Group → **同步阻塞** |
@@ -752,7 +770,7 @@ static ncclResult_t ncclInit() {
 
 #### 2.1.2 命名规范：`Dev` / `Func` / `AsyncJob` 后缀的含义
 
-（插叙一段：这几个后缀很容易被误读成"设备端"，先把这个命名约定讲清楚，后面看名字就不会被绊住；2.1.3 接回主线。）
+（补充说明：这几个后缀很容易被误读成"设备端"，这里先把命名约定讲清楚，后面看名字就不会混淆；2.1.3 接回主线。）
 
 这三个后缀是**"按层命名"**的产物，对应上面链条图里的三层：
 
@@ -851,9 +869,11 @@ groupJob->nonBlockingInit = true;
 ret = ncclInProgress;   // ← 立即返回"进行中"
 ```
 
+这三行就是非阻塞模式的全部动作：真正的初始化被交给另一个线程，调用方只拿到 `ncclInProgress` 就返回。至于这个返回值由谁产生、又该由谁负责轮询到真正完成，是下面要厘清的问题。
+
 ##### 先厘清：这个 `ncclInProgress` 到底是"谁"返回的？
 
-这是读这段代码最容易踩的坑。答案是：
+这也是读这段代码最容易出错的地方。答案是：
 
 > **`ncclInProgress` 是 `ncclGroupEndInternal()`（`src/group.cc:857`）返回的**——也就是统一启动 Group 内全部任务的触发点。
 > 上面代码里的 `ret` 是 `ncclGroupEndInternal` 的**局部变量**，随后由函数末尾的 `return ret` 抛出。
@@ -929,7 +949,7 @@ ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t* asyncError) {
   if (*asyncError == ncclSuccess && comm->proxyState) {
     *asyncError = COMPILER_ATOMIC_LOAD(&comm->proxyState->asyncResult, std::memory_order_acquire);
   }
-  // 后面还会顺带检查 GIN progress 线程的状态……
+  // 后面还会一并检查 GIN progress 线程的状态……
 }
 ```
 
@@ -994,7 +1014,7 @@ ncclResult_t ncclCommEnsureReady(ncclComm_t comm) {
 
 `ncclCommCount`、`ncclCommCuDevice`、`ncclCommUserRank`、集合通信、`ncclCommFinalize`……这些函数的第一句基本都是 `NCCLCHECK(ncclCommEnsureReady(comm))`。所以如果你在初始化还没完成时就去用这个 comm，会直接拿到 `ncclInvalidArgument` 和那条醒目的 WARN。
 
-**换句话说**：轮询这件事不是"可选的性能优化"，而是**非阻塞模式下的强制契约**——要么你自己轮询到 `ncclSuccess`，要么你就会被 `ncclCommEnsureReady` 挡在门外。
+**由此可以定性**：轮询不是"可选的性能优化"，而是**非阻塞模式下的强制契约**——要么你自己轮询到 `ncclSuccess`，要么你就会被 `ncclCommEnsureReady` 挡在门外。
 
 ##### Group 机制的作用
 
@@ -1056,7 +1076,7 @@ static ncclResult_t ncclCommInitRankFunc(struct ncclAsyncJob* job_) {
 > | `isGrow` | `ncclCommGrow`（扩容） |
 > | `funcName[NCCL_COMMINIT_FUNCNAME_LEN]` | 记录"是哪个 API 发起的"，用于日志与报错定位 |
 >
-> 也就是说，`split` / `shrink` / `grow` 复用这条链**不是"顺带省了点代码"，而是这套分层的有意设计**。把当前仓库里所有走这条链的入口数一遍，会看到一个很清晰的收敛结构：
+> 因此，`split` / `shrink` / `grow` 复用这条链**不是"省了几行代码"的偶然结果，而是这套分层的有意设计**。把当前仓库里所有走这条链的入口数一遍，会看到一个很清晰的收敛结构：
 >
 > **7 个公共 API → 3 个创建路径 → 1 个执行体（`ncclCommInitRankFunc`）**
 >
@@ -1094,7 +1114,7 @@ static ncclResult_t ncclCommInitRankFunc(struct ncclAsyncJob* job_) {
 > - **管理面足够简单可靠**：TCP 天然有序、可靠、跨机通用，用它传"建网指令"几乎不会出错，同机走 UDS 更是零成本；
 > - **数据面的建立因此变得高效且可编排**：元信息交换有了专属通道，建网流程可以按"探测 → 交换 → 建连"的固定节奏推进，不必为传几个小消息专门依赖任何高性能链路。
 >
-> 换句话说，**阶段 2、3 先搭的这个小网络，为后面那个更高效、更专一的高性能数据面网络创造了建立的可能性**。数据面建成之后，bootstrap 不再参与数据面，只继续承担少量控制消息（如错误通知、abort）。
+> **阶段 2、3 先搭的这个小网络，为后面那个更高效、更专一的高性能数据面网络创造了建立的可能性**。数据面建成之后，bootstrap 不再参与数据面，只继续承担少量控制消息（如错误通知、abort）。
 
 下面按 1 → 4 的顺序，把每个阶段逐一展开。
 
@@ -1200,6 +1220,8 @@ Bootstrap 之后向上提供的原语（`src/include/bootstrap.h`）：
 > 范围的规律值得记住：**第 1、3 次是全体**——因为要建立/对齐的是**全局认知**；**第 2 次只有机内**——因为"整机精确拓扑"只需要同主机的进程合作，远程机器反正只能当"叶子"（见 2.5.2）。
 
 #### 2.5.1 第 1 次交换【范围：全体】：`ncclPeerInfo` —— 交换成员描述
+
+第 1 次交换回答"参与这次通信的都有谁"。它只有两步：先填好自己的描述，再全体交换，让每个 rank 都拿到完整的成员表。下面的代码就是这两步：
 
 ```cpp
 // src/init.cc:1036-1037
@@ -1307,6 +1329,8 @@ ncclTopoCompute(comm->topo, nvlsGraph);
 
 #### 2.5.4 第 3 次交换【范围：全体】：把各自的图对齐
 
+各 rank 独立算出的图可能不同，第 3 次交换负责把它们对齐到同一份。调用形式仍是全体交换，区别只在交换的内容换成了各自算出的图参数：
+
 ```cpp
 // src/init.cc:1283 — 第 3 次全体交换（缓冲区就叫 allGather3Data，"3" 与 AllGather1 呼应）
 bootstrapAllGather(comm->bootstrap, allGather3Data, sizeof(*allGather3Data));
@@ -1376,9 +1400,9 @@ ncclComm（通信器）                          ← 一个通信域的全部上
 | 层 | 数据结构 | 职责 | 数量 | 代码位置 |
 |----|----------|------|------|----------|
 | **1. 通信器** | `ncclComm` | 一个通信域的全局上下文 | 1 | `comm.h:523-797` |
-| **2. 通道** | `ncclChannel` | 一条独立的并行通信管道（承载一份数据切片） | `nChannels`（≤ `MAXCHANNELS`=64） | `comm.h:150-172` |
+| **2. 通道** | `ncclChannel` | 一条独立的并行数据通路（承载一份数据切片） | `nChannels`（≤ `MAXCHANNELS`=64） | `comm.h:150-172` |
 | **3. 连接表** | `ncclChannelPeer* peers[]` | "本 rank 在这个通道里，与各 peer 的连接载体"；**下标就是 rank 号** | 每通道 `nRanks` 项 | `comm.h:151` |
-| **4. 连接子** | `ncclConnector` | 一条具体连接：走哪个传输、有哪些资源、进度指针在哪 | 每 peer `2 send + 2 recv` | `device.h:165-173` |
+| **4. 连接器** | `ncclConnector` | 一条具体连接：走哪个传输、有哪些资源、进度指针在哪 | 每 peer `2 send + 2 recv` | `device.h:165-173` |
 | **5. 传输虚函数表** | `ncclTransportComm` | 这条连接用**哪类**物理链路（P2P/SHM/NET/CollNet）及其操作集 | 全局 4 种实例 | `transport.h:117-134` |
 | **6. 物理资源** | `p2pResources` / `shm*Resources` / `sendNetResources` … | 真正的东西：显存映射、主机内存、网卡 QP | 每条连接一份 | 各 `transport/*.cc` |
 
@@ -1684,6 +1708,8 @@ send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE] / NCCL_STEPS;
 
 #### 2.6.6 四类传输各自对应哪些物理资源
 
+前面分别讲过四类传输各自的连接过程。下表把它们横向对比，标出每类传输的 resources 结构里究竟存了哪种物理资源——这是判断"一次搬运最终落到哪条硬件链路上"的依据：
+
 | 传输（虚函数表实例） | 常量 | resources 结构 | 物理资源 | 代码位置 |
 |---------------------|------|----------------|----------|----------|
 | `p2pTransport` | `TRANSPORT_P2P` (0) | `p2pResources` | 对端显存映射（IPC/cuMem 句柄）、进度标记内存（`ncclSendMem`/`ncclRecvMem`） | `p2p.cc:80-95` |
@@ -1759,7 +1785,7 @@ ncclCommInitRankFunc（异步任务体，真正干活）
 
 ## 三、集合通信的执行路径
 
-前两章拆的是 NCCL 的**静态骨架**：一是核心结构体的形状（通信器 / 通道 / 连接子 / 传输层），二是一个通信器如何从零被建起来——探测拓扑、搜索图、逐条建立连接、映射物理资源。第二章结束时，连接已经全部就绪，但"就绪"只意味着**可以使用**，还没有真正被使用过。
+前两章拆的是 NCCL 的**静态骨架**：一是核心结构体的形状（通信器 / 通道 / 连接器 / 传输层），二是一个通信器如何从零被建起来——探测拓扑、搜索图、逐条建立连接、映射物理资源。第二章结束时，连接已经全部就绪，但"就绪"只意味着**可以使用**，还没有真正被使用过。
 
 **NCCL 的网络从来不是静态的。** 前面看到的每一个设计，目的都是为集合通信的执行服务：`channels[]` 是为了把数据切开、并行搬运；`connector` 是为了让 GPU 内核知道往哪读、往哪写；协议（LL/LL128/Simple）是为了匹配不同消息大小下的延迟与带宽诉求。脱离执行过程去看这些结构，只能知道它们"长什么样"，看不出"为什么长成这样"。
 
@@ -2053,11 +2079,11 @@ while (ncclShmem.aborted == 0) {
 | LL128 | 小到中等 | 单 Warp 处理，128 字节粒度流水线；480 字节 Warp 对齐 |
 | SIMPLE | 大消息 | 多 CTA 并行，利用全部带宽；16 × Warp × 8 × 16 对齐 |
 
-> 一句话：**Host 把"算法 / 协议 / 类型"在编译期特化成一个内核符号，用 grid/block/args 启动它；内核内按 `funcId` 查 `ncclDevFuncTable` 分发到对应集合操作的模板实现**。协议表不是运行时的 if/else，而是"到底生成了多少个内核变体"的根源。
+> 归纳：**Host 把"算法 / 协议 / 类型"在编译期特化成一个内核符号，用 grid/block/args 启动它；内核内按 `funcId` 查 `ncclDevFuncTable` 分发到对应集合操作的模板实现**。协议表不是运行时的 if/else，而是"到底生成了多少个内核变体"的根源。
 
 ### 3.4 Transport 层数据路径
 
-**本节目的**：前 3 节追的是"任务怎么从一次调用变成 GPU 上正在跑的内核"——到 3.3 结束时内核已经启动，但**数据还没有真正流动**。这一节补上最后一块：内核跑起来之后，字节到底怎么从这块 GPU 走到那块 GPU。它把第二章建好的连接在这一刻"用起来"——`ncclConnector` 里的 `conn`/`connFifo`、head/tail 进度指针、P2P 映射、NET QP，前面都是"建好了但没用"，这里就是它们被内核消费的地方。换句话说：**3.1~3.3 是"控制流"（怎么调度），3.4 是"数据流"（怎么搬运）**，两者合起来才是一条完整的集合通信执行路径。
+**本节目的**：前 3 节追的是"任务怎么从一次调用变成 GPU 上正在跑的内核"——到 3.3 结束时内核已经启动，但**数据还没有真正流动**。这一节补上最后一块：内核跑起来之后，字节到底怎么从这块 GPU 走到那块 GPU。它把第二章建好的连接在这一刻"用起来"——`ncclConnector` 里的 `conn`/`connFifo`、head/tail 进度指针、P2P 映射、NET QP，前面都是"建好了但没用"，这里就是它们被内核消费的地方。两者的分工是：**3.1~3.3 讲"控制流"（怎么调度），3.4 讲"数据流"（怎么搬运）**，合起来才是一条完整的集合通信执行路径。
 
 内核侧的搬运统一由 `Primitives`（`src/device/prims_simple.h`）封装：它持有 `ncclConnInfo`（`conn`）和 `ncclConnFifo`（`connFifo`），进度靠 `conn->head`/`conn->tail` 两个指针推进（`st_relaxed_sys_global(connStepPtr, step)`），数据本身分两条路：**同机 P2P 直写**、**跨机经 Proxy 走 NET**。
 
@@ -2094,7 +2120,7 @@ while (ncclShmem.aborted == 0) {
 
 **GIN = GPU Initiated Network，即"由 GPU 发起的网络通信"。** 它回答一个具体问题：跨节点的数据搬运，能不能不经过 Host CPU、而是由 GPU kernel 里的线程直接发起？
 
-回顾第三章的 NET 路径：GPU 内核算完 → 更新 `head`/`tail` 进度标记 → Host 侧的 Proxy 线程轮询到这个标记 → 调用 `ncclNet->isend()/irecv()` 提交 RDMA → 网卡才真正开始搬数据。这条链里，**通信的"发起权"在 Host**：GPU 只能把数据准备好、把标记写好，然后等 Host 来"接棒"。每次从"GPU 算完"到"网卡开动"，中间隔着 Host 的轮询周期和线程调度，这对 MoE、KV cache 这类延迟敏感场景已经不够。
+回顾第三章的 NET 路径：GPU 内核算完 → 更新 `head`/`tail` 进度标记 → Host 侧的 Proxy 线程轮询到这个标记 → 调用 `ncclNet->isend()/irecv()` 提交 RDMA → 网卡才真正开始搬数据。这条链里，**通信的发起权在 Host**：GPU 只能把数据准备好、把标记写好，然后等 Host 线程来推进。每次从"GPU 算完"到"网卡开动"，中间隔着 Host 的轮询周期和线程调度，这对 MoE、KV cache 这类延迟敏感场景已经不够。
 
 GIN 把发起权下放给 GPU：kernel 内的线程直接调用设备端 API 提交 Put/Get/信号量。收益有两点：**消除 Host-Device 往返与线程调度延迟**；**让"计算-通信重叠"从 kernel 级细化到线程级**——同一个 kernel 里可以一边算一边发，而不必等整个 kernel 结束、下一轮 proxy 介入。
 
@@ -2160,7 +2186,7 @@ typedef enum {
 
 前面讲了 GIN 是什么、有哪几种硬件形态，这一节看主机侧代码怎么把它变成"可用"。先说清时机：**这些准备工作并不在同一个阶段完成**。
 
-- **通信器初始化期**：第二章的阶段四里，`ncclCommInitRank` 会顺带调用 `ncclGinInit`（`init.cc:477`，与 `ncclNetInit`/`ncclRmaInit` 并列）。这一步只加载插件、选定一个后端，**不建立任何连接**——因为此时还不知道上层库会不会用 GIN。
+- **通信器初始化期**：第二章的阶段四里，`ncclCommInitRank` 会一并调用 `ncclGinInit`（`init.cc:477`，与 `ncclNetInit`/`ncclRmaInit` 并列）。这一步只加载插件、选定一个后端，**不建立任何连接**——因为此时还不知道上层库会不会用 GIN。
 - **上层库激活期**：当上层库（如 DeepEP）调用公共 API `ncclDevCommCreate`（`src/dev_runtime.cc:1502`）申请设备侧通信上下文、并在 `reqs` 里声明需要 GIN 时，才触发剩下的三步——建连接、注册内存窗口、创建设备侧 context（`ginActivated` 控制，首次激活时执行一次，`dev_runtime.cc:1137`）。
 
 这也解释了为什么 GIN 不是 AllReduce 的主路径：它由上层库按需激活，而不是每个通信器初始化时都建一套。按代码执行顺序，主机侧共四步：
@@ -2551,7 +2577,7 @@ laddr.key  = loadConst(&srcMh->lkey);                      // 本地 lkey
 
 最后补一个决定「peer 覆盖哪些 rank」的配置——连接范围。前面说的按 peer 索引的 QP 数组、rkey 数组，其 peer 到底覆盖哪些 rank，由 `ginConnectionType` 决定，取 FULL 或 RAIL 两种，依据全体 rank 是否支持跨 NIC 自动判定（`init.cc:1668-1671`）。
 
-rail 是跨节点网络拓扑里的「轨道」概念。以 rail-optimized 组网为例：每个节点有 `lsaSize` 块 GPU，每块 GPU 绑定一张网卡，这张网卡对应的 rail 贯穿所有节点、连接每个节点的「同一槽位」GPU。`ncclTeamRail`（`nccl_device/core.cc:36-45`）返回的正是与自己同 rail 的 rank 集合：`nRanks = 总 rank 数 / lsaSize`（即节点数）、`rank = 本 rank / lsaSize`（自己在第几个节点）、`stride = lsaSize`。也就是说，rail 成员是「各节点中与自己同槽位的 GPU」，成员数等于节点数。
+rail 是跨节点网络拓扑里的「轨道」概念。以 rail-optimized 组网为例：每个节点有 `lsaSize` 块 GPU，每块 GPU 绑定一张网卡，这张网卡对应的 rail 贯穿所有节点、连接每个节点的「同一槽位」GPU。`ncclTeamRail`（`nccl_device/core.cc:36-45`）返回的正是与自己同 rail 的 rank 集合：`nRanks = 总 rank 数 / lsaSize`（即节点数）、`rank = 本 rank / lsaSize`（自己在第几个节点）、`stride = lsaSize`。因此 rail 成员是「各节点中与自己同槽位的 GPU」，成员数等于节点数。
 
 两种连接范围在 GDAKI 里的区别（`gin_host.cc:141-155`）：
 
@@ -2609,6 +2635,8 @@ while (1) {
 到这里，GIN 从主机侧准备（4.3）、设备侧提交（4.4）到请求落定（4.5）的路径就完整了。下一节把这条路径与第三章的 Host 发起模式并排比较，看发起权下放给 GPU 之后，控制流与数据流分别改变了什么。
 
 ### 4.6 与 Host 发起模式的对比
+
+本节把两者的差异按维度并排列出。下表每一行都对应前面已经讲过的某处机制，读的时候可以逐行回扣 4.1 与 4.3~4.5 的内容：
 
 | 维度 | Host 发起（传统 NET） | GIN 发起 |
 |------|----------------------|----------|
@@ -2844,6 +2872,8 @@ NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(
 Reduction 操作（`ncclSum`/`ncclMax`…）本质是个整数枚举，直接显示没有可读性。NCCL 在 `src/init_nvtx.cc:19-35` 的 `initNvtxRegisteredEnums` 里把这些枚举值注册成可读字符串（"Sum"、"Product"、"Max"…），Profiler 展示 Payload 时就能翻译。整个过程受环境变量 `NCCL_NVTX_DISABLE` 控制（`NCCL_PARAM(NvtxDisable, "NVTX_DISABLE", 0)`），设为 1 时所有宏都短路，插桩几乎零开销。
 
 #### （6）小结：这套设计的启发
+
+把上述设计手段与各自收益归纳如下表，作为 5.1 的收束：
 
 | 设计 | 手段 | 收益 |
 |------|------|------|
