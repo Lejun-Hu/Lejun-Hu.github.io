@@ -4,7 +4,7 @@ permalink: /notes/nccl-source-study/
 date: 2026-11-08
 category: "集合通信"
 tags: ["NCCL", "集合通信", "源码分析", "AllReduce", "Ring", "Tree", "GIN", "GPU互联", "CUDA"]
-description: "NCCL 源码学习笔记（初稿）：从零开始讲清 NCCL 是什么、它如何支撑 PyTorch 分布式训练、底层打通了哪些硬件链路，以及初始化流程、执行路径与 GIN 机制。"
+description: "从软件栈定位、源码结构到初始化、执行路径与 GIN 机制，逐层拆解 NCCL 如何完成 GPU 间集合通信。"
 published: true
 ---
 
