@@ -2256,7 +2256,7 @@ for (int n = 0; n < ginState->ginCommCount; n++) {
 
 **第三步：注册对称内存窗口 —— `ncclGinRegister`（`gin_host.cc:374`）**
 
-连接建好后，还要把"哪些内存可以被远端访问"登记下来。GIN 通信的对象是窗口（window）：`ncclGinRegister` 对一块地址调 `regMrSym`，拿到 host 侧句柄（`ginHostWins`）和设备侧窗口（`ginDevWins`）——设备端 `ncclGinPut` 用的 `dstWin`/`srcWin` 就是这里注册出来的。`ncclDevCommCreate` 在首次激活时会遍历已有的对称内存逐一注册（`dev_runtime.cc:1150-1154`，源码注释说明窗口句柄要等拿到 stream 后再更新）；跨多个物理 segment 的地址需要 DMABUF 支持（`gin_host.cc:379-387`）。
+连接建好后，还要把"哪些内存可以被远端访问"登记下来。GIN 通信的对象是窗口（window）：`ncclGinRegister` 对一块地址调 `regMrSym`，拿到 host 侧句柄（`ginHostWins`）和设备侧窗口（`ginDevWins`）——设备端 `ncclGinPut` 用的 `dstWin`/`srcWin` 就是这里注册出来的。`ncclDevCommCreate` 在首次激活时会遍历已有的对称内存逐一注册（`dev_runtime.cc:1150-1154`，源码注释说明窗口句柄要等拿到 stream 后再更新）；跨多个物理 segment 的地址还需 DMABUF 支持（`gin_host.cc:379-387`），原因见下面窗口 API 一段末尾的说明。
 
 **从公共 API 看窗口注册：`ncclWindow_t` 与 `ncclMemAlloc`。** 上面讲的是 GIN 插件内部的 `regMrSym`。对上层库（如 DeepEP）来说不会直接调到这一层，它们用的是 NCCL 的公共窗口 API，由 NCCL 内部转换成对每条 GIN 连接的 `regMrSym`。这套 API 的中心是 `ncclWindow_t`，下面把它讲清楚，因为后面 4.4 的设备端参数、以及 DeepEP 的整个通信缓冲区都建立在它之上。
 
@@ -2276,6 +2276,44 @@ typedef struct ncclWindow_vidmem* ncclWindow_t;
 | `stride4G` | 每个 rank 在平铺空间中的步长（4 GiB 对齐） |
 | `ginWins[]` | 每条 GIN 连接对应的插件侧窗口句柄（对应上面 `regMrSym` 的产物） |
 
+**这个结构怎么到设备侧的。** 这里容易产生一个误解：以为 `ncclWindow_vidmem` 是放在主机内存里、让 device 远程读取的。实际做法是「**显存副本 + Host 镜像**」的配对，由 shadow pool 统一管理。`ncclShadowPoolAlloc`（`allocator.cc:406-416`）一次分配两样东西并登记映射关系：
+
+- `devObj`：从 `cudaMemPool` 分配的显存（`allocType = Pinned`，`location = Device`，`allocator.cc:340-346`），device 直接可读；
+- `hostObj`：一块普通 Host 堆内存（`malloc`），作为写入前的暂存镜像。
+
+两者以 `devObj` 为键存在哈希表里，`ncclShadowPoolToHost(devObj)` 可以反查出对应的 Host 镜像。写入流程因此是「填镜像 → 一次性 memcpy 到显存」，而不是 Host 直接解引用显存指针。`symWindowCreate`（`dev_runtime.cc:734-752`）就是按这个流程做的：
+
+```cpp
+// src/dev_runtime.cc:734-752（节选，中文注释为笔记所加）
+struct ncclWindow_vidmem* winDev;
+struct ncclWindow_vidmem* winDevHost;
+NCCLCHECK(ncclShadowPoolAlloc(&devr->shadows, &winDev, &winDevHost, stream));  // 分配显存副本 + Host 镜像
+win->vidmem = winDev;                                    // Host 侧结构记住显存副本地址
+winDevHost->lsaFlatBase = (char*)devr->lsaFlatBase + win->bigOffset;  // 窗口自己的基址（team 基址 + 窗口偏移）
+winDevHost->mcOffset4K  = win->bigOffset >> 12;          // NVLS 组播基址偏移，以 4 KiB 为单位
+winDevHost->stride4G    = devr->bigSize >> 32;           // rank 跨距，以 4 GiB 为单位
+winDevHost->lsaRank     = devr->lsaSelf;
+winDevHost->worldRank   = comm->rank;
+winDevHost->winHost     = (void*)win;                    // 反向指回 Host 结构
+winDevHost->ginOffset4K = memOffset >> 12;
+winDevHost->numSegments = mem->numGinSegments;
+for (int i = 0; i < NCCL_GIN_MAX_CONNECTIONS; i++) winDevHost->ginWins[i] = mem->ginDevWins[i];
+CUDACHECK(cudaMemcpyAsync(winDev, winDevHost, sizeof(struct ncclWindow_vidmem),
+                          cudaMemcpyHostToDevice, stream));   // 一次性同步到显存
+```
+
+读这段代码要注意两点。第一，**所有字段都在 Host 上算好后一次拷过去**，此后 kernel 只读这份显存副本，不再与 Host 交互。第二，两个名字带单位的字段其实是为省空间做的压缩：`stride4G` 存的是 `bigSize >> 32`（因为 `bigSize` 向上对齐到 4 GiB，低 32 位恒为 0，device 侧左移 32 位即可还原），`mcOffset4K` / `ginOffset4K` 同理以 4 KiB 为单位。这也是字段名里带 `4G`、`4K` 后缀的原因。
+
+**kernel 怎么拿到这个指针。** 公共 API 返回的 `ncclWindow_t` 就是上面那个显存副本的地址（`*outWinDev = winDev`，`dev_runtime.cc:786`）。设备侧取用有三条路径，取决于调用方是谁：
+
+| 路径 | 谁在用 | 机制 |
+|---|---|---|
+| 作为 kernel 参数传入 | DeepEP 的 JIT kernel、NCCL 的对称内核 | 启动内核时把 `ncclWindow_t` 放进 `args`，最直接 |
+| 从 `ncclDevComm` 读 | NCCL 内置的对称集合通信 | `ncclDevComm` 里有 `resourceWindow` 字段（`devcomm/devcomm_v22902.cc:47`） |
+| 按地址反查 | NCCL 内部由用户缓冲区定位窗口 | `ncclDevCommWindowTable` 记录 `userAddr → window`，也是一张下发到显存的表（`dev_runtime.cc:762-766`） |
+
+device 侧拿到指针后，读的就是上面那些字段：用自己的 `lsaRank` 确定所在槽位、用 `stride4G << 32` 还原 rank 跨距、用 `lsaFlatBase` 作为本窗口基址，于是能独立算出任意 rank 的地址——这正是「kernel 执行期间不再向 Host 查询」在窗口这一层的落地。GIN 激活后 `ginWins[]` 需要更新，做法也一样：改 Host 镜像再 memcpy 一次（`dev_runtime.cc:1262`）。
+
 **为什么需要它。** 普通 `cudaMalloc` 或 `torch.empty` 得到的地址只在本进程有效，对端 kernel 无从知道"同一块数据在对方那里是什么地址"。而单边操作（GIN 的 `put`/`get`、`ncclPutSignal`）恰恰要求发送方自己指定远端地址与 rkey——这正是 4.4.2 讲的「WQE 必须显式给出远端虚拟地址与 rkey」。窗口解决的就是这件事：把一块内存注册成**对称窗口**后，所有 rank 约定「同一 `offset` 对应同一逻辑位置」，NCCL 便能把 `offset` 换算成任意 rank 的可达地址。换算公式在 `ncclDevrGetLsaRankPtr`（`dev_runtime.cc:1649`）：
 
 ```c
@@ -2283,6 +2321,49 @@ typedef struct ncclWindow_vidmem* ncclWindow_t;
 ```
 
 四项依次是：team 基址、目标 rank 的步长、该窗口在对方地址空间中的偏移、窗口内偏移。可见「对称」并不要求各 rank 的物理地址相同，只要求**用同一个 `offset` 能各自算出自己的可达地址**。
+
+**这个公式对应怎样的内存排布。** 关键在于 NCCL 在每个 rank 的进程里都预留了一段**连续虚拟地址**，长度是 `lsaSize × bigSize`，这段空间的起点就是 `lsaFlatBase`（由 `cuMemAddressReserve` 一次性预留，`dev_runtime.cc:323`）。随后它把全体 rank 的物理内存分别映射进这段地址的不同槽位——第 `r` 个 rank 的数据总是落在 `lsaFlatBase + r × bigSize` 开始的那一段里（映射动作见 `dev_runtime.cc:281`）。各 rank 拿到的 `lsaFlatBase` 数值可以不同，但内部布局完全一致。
+
+下图以 4 卡（`lsaSize = 4`）、每卡显存 80 GiB、`bigSize = 80 GiB` 为例，画出单个 rank 的地址空间。图里同时标出 `bigOffset` 的作用：同一条槽位里放多个窗口时，靠 `bigOffset` 区分它们：
+
+```text
+单个 rank 的虚拟地址空间（设该 rank 的 lsaFlatBase = 0x7f00_0000_0000）
+每个槽位宽 bigSize = 80 GiB = 0x14_0000_0000
+
+0x7f00_0000_0000  ┌────────────────────────────┐  ┐
+                  │ rank0 窗口A（+ bigOffset A）│  │ rank0 槽位
+                  │ rank0 窗口B（+ bigOffset B）│  ┘ = lsaFlatBase + 0×bigSize
+0x7f14_0000_0000  ├────────────────────────────┤  ┐
+                  │ rank1 窗口A / 窗口B         │  │ rank1 槽位
+                  │                            │  ┘ = lsaFlatBase + 1×bigSize
+0x7f28_0000_0000  ├────────────────────────────┤  ┐
+                  │ rank2 窗口A / 窗口B         │  │ rank2 槽位
+                  │                            │  ┘ = lsaFlatBase + 2×bigSize
+0x7f3c_0000_0000  ├────────────────────────────┤  ┐
+                  │ rank3 窗口A / 窗口B         │  │ rank3 槽位
+                  │                            │  ┘ = lsaFlatBase + 3×bigSize
+0x7f50_0000_0000  └────────────────────────────┘
+```
+
+读图要点：每一段里放的都是**别人（或自己）的物理显存**，它们被映射进本进程的地址空间；因此本进程用普通的 `st.global` 写某个槽位，数据就落到对应 rank 的显存里。下面把公式里的五个量逐个对应到这张图上：
+
+| 变量 | 含义 | 上例取值 |
+|---|---|---|
+| `lsaFlatBase` | 连续 VA 区的起点，`cuMemAddressReserve` 一次预留 `lsaSize × bigSize`（`dev_runtime.cc:323`） | `0x7f00_0000_0000` |
+| `bigSize` | 每个 rank 槽位的跨距。默认取全体 rank 中**最大的显存容量**再向上对齐到 4 GiB（`dev_runtime.cc:136-143`），可由 `NCCL_WIN_STRIDE` 显式指定 | 80 GiB |
+| `bigOffset` | 同一条槽位内多个窗口之间的偏移，由 `ncclSpaceConstruct` 统一分配（`dev_runtime.cc:146`） | 窗口 A = 0 |
+| `lsaRank` | 目标 rank 在 LSA team 中的编号，范围 `[0, lsaSize)` | 0 ~ 3 |
+| `offset` | 窗口内部的字节偏移 | 例如 `0x1000` |
+
+代入一次寻址：在 rank 1 上要把数据写到 **rank 2 的窗口 A、偏移 `0x1000`** 处，代入公式得
+
+```text
+lsaFlatBase + 2 × bigSize + bigOffset_A + 0x1000
+= 0x7f00_0000_0000 + 0x28_0000_0000 + 0 + 0x1000
+= 0x7f28_0000_1000
+```
+
+这个地址就落在图上 rank2 槽位的窗口 A 内。由此可见两个容易混淆的点：`bigSize` 是**rank 之间**的跨距（决定去哪个槽位），`bigOffset` 是**窗口之间**的偏移（决定槽位里哪个窗口），两者是正交的两级。也正因为 `bigSize` 默认取最大显存容量，当注册的内存总量超过单卡显存时（如 GPU+CPU 混合），必须调大 `NCCL_WIN_STRIDE`，否则相邻 rank 的槽位会在虚拟地址上重叠。
 
 **怎么用。** 对外只有四个函数，按生命周期排列：
 
@@ -2292,6 +2373,24 @@ typedef struct ncclWindow_vidmem* ncclWindow_t;
 4. `ncclCommWindowDeregister(comm, win)`（`nccl.h.in:355`）：注销窗口。
 
 `winFlags` 有三个取值（`nccl.h.in:63-68`）：`NCCL_WIN_DEFAULT`、`NCCL_WIN_COLL_SYMMETRIC`（参与集合通信的对称内存，会额外触发 symmetric kernel 初始化）、`NCCL_WIN_STRICT_ORDERING`（要求严格顺序）；窗口地址还需满足 `NCCL_WIN_REQUIRED_ALIGNMENT = 4096` 对齐。
+
+**多物理段注册为什么必须依赖 DMABUF。** `ncclCommWindowRegister` 接收的是一段**连续虚拟地址**，但它背后未必是连续物理内存：`ncclCuMemGetAddressRange` 会数出这块 VA 跨越了多少个物理分配段（`numSegments`，`dev_runtime.cc:872-874`）。常见来源有两种——多次分配后再拼成连续 VA，以及 GPU 显存与 CPU 内存混合排布（DeepEP 的 `ElasticSymmetricMemory` 就是后者：前半段 GPU VRAM、后半段 CPU NUMA 内存，拼成一段连续 VA 后整体注册，`csrc/kernels/backend/symmetric.hpp:142-146`）。
+
+单段时，网卡可以用 peermem 这类机制一次性把整块显存注册成 MR；多段时 peermem 不再适用（它要求来自单次 `cudaMalloc` 的地址），必须把每个物理段分别导出成 dma-buf 描述符再逐个交给网卡。因此 `ncclGinRegister`（`gin_host.cc:379-387`）在 `multiSegment` 为真时会先做一次前置检查：
+
+```cpp
+// src/gin/gin_host.cc:379-387（节选）
+if (multiSegment) {
+  for (int n = 0; n < ginState->ginCommCount; n++) {
+    if (!(ginState->ginProps[n].ptrSupport & NCCL_PTR_DMABUF)) {   // 该连接不支持 DMABUF
+      WARN("Window registration of addresses that span multiple physical segments requires DMABUF support with GIN.");
+      return ncclInvalidArgument;
+    }
+  }
+}
+```
+
+不支持时**不会降级，而是直接失败**：上面这段返回 `ncclInvalidArgument`，`ncclCommWindowRegister` 随之失败，调用方拿不到 `ncclWindow_t`，后续依赖该窗口的 GIN 通信、以及基于窗口的 LSA 地址换算（`ncclGetLsaDevicePointer`）都无法建立。注意这个检查只针对多段；单段注册不受限制，所以只注册一块 `ncclMemAlloc` 显存的常见用法根本遇不到这条约束。另外要把它与连接建立阶段的 GDR 检查区分开：`ncclGinIbGdrGpuSupport`（`transport/net_ib/gin.cc:31-44`）判断的是「peermem 或 DMABUF 至少有一个可用，否则整个 GIN 都不可用」，而这里是「已经能用 GIN，但这段地址跨多段，所以必须有 DMABUF」。
 
 **DeepEP 怎么用它。** DeepEP 把窗口当作整个通信缓冲区的根句柄。`NCCLSymmetricMemoryContext`（`csrc/kernels/backend/api.cuh:47-72`）持有其中三个关键成员：
 
@@ -2319,7 +2418,19 @@ void* get_sym_ptr(void* ptr, int dst_rank_idx) const {
 }
 ```
 
-这就是上面 `ncclDevrGetLsaRankPtr` 公式的用户态版本：**`offset` 不变、只换基址**。于是 NVLink 域内任意 rank 的缓冲区都能被直接寻址，无需走 GIN `put`——这是 DeepEP「scaleup 走 NVLink 直写」的基础；只有跨机那部分才用 GIN，此时 `window` 作为参数传入 kernel，设备端 `ncclGinPut` 依靠窗口里的 `ginWins[]` 与 rkey 完成远端写入（即 4.4.2 的内容）。
+这段代码与上面 `ncclDevrGetLsaRankPtr` 的公式看起来不同，其实完全等价，差别只在于**什么时候算基址**。先看 `ncclGetLsaDevicePointer(win, 0, i)` 做了什么：它内部就是 `ncclDevrGetLsaRankPtr`，且 `offset` 传的是 0，所以返回的正是 `lsaFlatBase + i × bigSize + bigOffset`。把它记为「第 i 个 rank 的窗口基址」，两个式子就对齐了：
+
+| 量 | 含义 | 等于 |
+|---|---|---|
+| `mapped_window_ptr` | 本 rank 的窗口基址 | `lsaFlatBase + my_rank × bigSize + bigOffset` |
+| `offset` | 本地指针相对窗口基址的偏移 | `ptr - mapped_window_ptr` |
+| `nvl_window_ptrs[dst] + offset` | 对端同一位置的地址 | `lsaFlatBase + dst × bigSize + bigOffset + offset` |
+
+最后一行与前面那个公式一字不差。放入 4 卡例子中验证：`nvl_window_ptrs[2]` 就是 `0x7f28_0000_0000`，于是 `get_sym_ptr(ptr, 2)` 直接得到 `0x7f28_0000_0000 + offset`，与手算结果一致。
+
+因此两者的区别只是分工：NCCL 的 `ncclDevrGetLsaRankPtr` 是 Host 侧函数，每次调用现算一遍；DeepEP 在初始化时就把每个 rank 的「基址部分」算好存进 `nvl_window_ptrs[]`，运行时只做一次加法。这样做的原因是**内核里不能再调 Host API**，只能提前把基址备好。
+
+于是 NVLink 域内任意 rank 的缓冲区都能被直接寻址，无需走 GIN `put`——这是 DeepEP「scaleup 走 NVLink 直写」的基础；只有跨机那部分才用 GIN，此时 `window` 作为参数传入 kernel，设备端 `ncclGinPut` 依靠窗口里的 `ginWins[]` 与 rkey 完成远端写入（即 4.4.2 的内容）。
 
 一个实操细节：DeepEP 通过 `NCCL_WIN_STRIDE` 环境变量设置窗口步长（`deep_ep/buffers/elastic.py:293-298`），原因是 NCCL 内部把 stride 向上对齐到 4 GiB，注册字节数超过单步容量时必须显式调大，否则各 rank 的窗口在平铺空间里会重叠。
 
