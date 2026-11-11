@@ -12,9 +12,27 @@ published: true
 
 DeepEP 是 DeepSeek 开源的专家并行（Expert Parallelism, EP）通信库，全名 DeepEveryParallel（`README.md:3`）。它面向 MoE（Mixture of Experts，混合专家）模型训练与推理中的 token 分发与回收，提供高吞吐、低延迟的 all-to-all GPU 内核；all-to-all 指每个 rank 都向其余 rank 发送数据、同时从其余 rank 接收数据的通信模式，`README.md:3` 还说明该库另外提供 PP、CP、Engram 的实验性原语。本笔记基于 **DeepEP v2.1.0** 源码（`deep_ep/__init__.py:97` 的 `__version__ = '2.1.0'`），并对照 NCCL master 分支核实所有 NCCL 侧 API。文中 `deep_ep/...`、`csrc/...` 等路径相对 DeepEP 仓库根目录，`src/...`、`docs/...` 等路径相对 NCCL 仓库根目录，两个仓库的链接见文末参考资料；每个函数、字段都标注源码位置，方便打开源码对照。
 
-全文反复用到几个底层缩写，先在此给出定义与官方出处，后文涉及具体机制时再展开其作用。GIN 是 GPU-Initiated Networking（NCCL `docs/userguide/source/usage/deviceapi.rst:20`），指由 GPU 内核线程直接发起网络传输的设备侧 API；LSA 是 Load/Store Accessible（同文档 `:13`，GIN 设计文档 `docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:94` 写作 Load/Store Access），指同节点内用 load/store 指令访问对端显存的能力。SM 是 Streaming Multiprocessor（`docs/legacy.md:9`），QP 是 InfiniBand/RDMA 的 Queue Pair（NCCL `docs/userguide/source/env.rst:1015` 称 queue pairs，DOCA 头文件 `src/transport/net_ib/gdaki/doca-gpunetio/include/device/doca_gpunetio_dev_verbs_qp.cuh:52` 给出全称），TMA 是 Tensor Memory Accelerator（NCCL `contrib/nccl_ep/README.md:36`）。这些能力的内部机制见 NCCL 笔记第四章，本文只关心 DeepEP 调用它们的接口与时机。
+全文的许多设计选择都取决于一个区分：一次通信是用普通访存指令完成的，还是作为一次网络传输提交给网卡完成的。NCCL 的设备侧能力正按这条界线分成两类。同一 P2P 可达域内的设备之间，取到对端地址后就能用普通的 load/store 指令读写，NCCL 把这类设备称为 LSA（Load/Store Accessible；GIN 设计文档 `docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:94` 写作 Load/Store Access，同一定义见 `docs/userguide/source/usage/deviceapi.rst:13`）；跨节点的 RDMA 网络则必须由网卡转发，调用方提交的是一次传输请求而不是一条访存指令，这类能力称为 GIN（GPU-Initiated Networking，`docs/userguide/source/usage/deviceapi.rst:20`），指由 GPU 内核线程直接发起网络传输的设备侧 API。NCCL 的 GIN 设计文档把这条界线写得很直接：对称内存把分布式系统中的对端内存抽象进平坦虚拟地址空间，但「通信路径本身仍需要不同的语义」——NVLink/PCIe 点对点用普通内存语义即可，RDMA 横向扩展网络则需要 GIN 在设备侧发起「消息语义（message-semantic）」的网络传输（同文档 `:12-16`）。
 
-按初学者的阅读顺序，全文分三章：先讲清楚「MoE 的通信为什么需要专门的库」，再沿真实调用链逐层读代码，最后归纳设计要点与源码阅读路径。下表给出三章各自的问题与阅读收获，读表时抓住一条因果链：第一章确认通信形态，第二章定位实现层次，第三章归纳设计取舍；第二章是全文重点，后续两章都建立在它的调用链之上。
+内存语义（memory semantics，也称访存语义）的表现形式是一条 load 或 store 指令，没有独立的「提交」与「完成」步骤。地址本身就是目的地的标识；写入的可见性由指令的内存序决定，例如 DeepEP 发布计数时用的 `st.relaxed.sys` 是 system 作用域的 relaxed 存储，只保证写入对系统内可见、不提供排序；能否使用只取决于两端是否处于同一 P2P 可达域——NCCL 以 `nvidia-smi topo -p2p p` 报告的 P2P 连通性判定，涵盖 NVLink 互连与部分 PCIe P2P 互连的设备（`docs/userguide/source/usage/deviceapi.rst:13-17`）。它的局限也来自这里：目标一旦在另一台机器，其显存并不在本进程地址空间内，load/store 无从表达。
+
+消息语义（message semantics）的表现形式是「提交请求 → 网卡执行 → 完成通知」三段。调用方描述的是「把哪段本地数据写到对端窗口的哪个偏移、写到哪个 rank」，请求进入网卡的发送队列后由网卡异步执行，完成情况通过完成队列或信号回告。NCCL 文档在讲 GIN 的 put 实现时给出的正是这个过程：在 QP 的发送队列里分配一个 WQE 槽位、按 IB/RoCE 规范填好（`opcode=RDMA_WRITE`、远端地址、rkey/lkey、SGL）、最后写 doorbell 通知网卡取走（同文档 `:1113-1121`；这些填充内容属 GDAKI/DOCA 后端的实现细节，此处只取其操作模型）。因此消息语义的接口需要窗口句柄、窗口内偏移与目标 rank 三项信息（对应 2.5 节 `handle.cuh:183-196` 的 `gin.put`），而不是一个裸指针；它不受访存域限制，代价是请求队列与完成通知带来的额外延迟。
+
+下表把两类语义的差别归纳成五行，读表时关注「目的地如何标识」与「完成如何得知」两行，它们决定了两套接口的参数形态。
+
+| 维度 | 内存语义（LSA） | 消息语义（GIN） |
+|------|----------------|----------------|
+| 通信的表现形式 | 一条 load/store 指令 | 一次提交给网卡的传输请求 |
+| 目的地如何标识 | 虚拟地址 | 窗口句柄 + 窗口内偏移 + 目标 rank |
+| 适用范围 | 同 P2P 可达域（NVLink、部分 PCIe） | 跨节点 RDMA 网络 |
+| 完成如何得知 | 由指令内存序与硬件一致性保证 | 完成队列或 signal 通知，需显式 flush 与等待 |
+| DeepEP 中的体现 | `put_value` 直写、`get_sym_ptr` 直写（`handle.cuh:200-206`、`:64-92`） | `gin.put` / `gin.get`（`handle.cuh:183-196`、`:127-144`） |
+
+读表结论：两类语义不是替代关系。DeepEP 在同一份内核里按目标 rank 是否可达选择其一，2.4 节 `dst_ptr != nullptr` 的分流与 2.5 节 `put_value` 的两条分支都由这张表决定。
+
+另外几个贯穿全文的术语在此一并交代定位。QP（Queue Pair）是发送队列与接收队列的合称，也是消息语义的队列载体，NCCL 文档在两个 rank 的连接语境下直接称其 queue pairs（`docs/userguide/source/env.rst:1015`）；DeepEP 用 `num_allocated_qps` 申请数量、用 `kGinQPDepth = 1024` 指定队列深度（`deep_ep/include/deep_ep/common/compiled.cuh:84`），2.2 节说明这些数字如何传给 NCCL，2.5 节说明 warp 与 QP 并非一一对应。TMA（Tensor Memory Accelerator，NCCL `contrib/nccl_ep/README.md:36`）是 SM90 起提供的异步批量拷贝单元，负责 global memory 与 shared memory 之间的大块搬运，由专用指令触发、以 mbarrier 通知完成（2.4 节）；它与 load/store 的差别在批量与异步，适合搬整个 token 的 hidden 向量，不适合搬单个计数。SM（Streaming Multiprocessor，`docs/legacy.md:9`）是 GPU 的基本计算单元，内核的 thread block 被调度到 SM 上执行，DeepEP 用 SM 数量度量通信占用的计算资源（`num_sms`）。Team 是 communicator 内的 rank 子集，NCCL 预定义 World、Lsa、Rail 三个（`src/include/nccl_device/core.h:45-47`），DeepEP 用它们判断目标 rank 属于哪个域（2.5 节）。这些能力的内部机制见 NCCL 笔记第四章，本文只关心 DeepEP 调用它们的接口与时机。
+
+按初学者的阅读顺序，全文分三章：先讲清楚「MoE 的通信为什么需要专门的库」，再沿真实调用链逐层读代码，最后归纳设计要点与源码阅读路径。下表给出三章各自的问题与阅读收获，读表时抓住一条因果链：第一章确认通信形态，第二章定位实现层次，第三章归纳设计取舍；第二章是全文重点，第三章建立在它的调用链之上。
 
 | 章节 | 关注的问题 | 读完应掌握 |
 |------|-----------|-----------|
@@ -22,9 +40,9 @@ DeepEP 是 DeepSeek 开源的专家并行（Expert Parallelism, EP）通信库�
 | 二、代码骨架 | 一次 `dispatch` 从 Python 调用到 GPU 内核经过了哪些层 | 完整调用链、每层的职责、NCCL 能力在何处被消费 |
 | 三、设计要点 | 这些实现解决了什么工程问题 | 定制内核、通信计算重叠、低延迟设计与阅读路径 |
 
-读表结论：三章按「问题 → 实现 → 归纳」推进，第二章的调用链是后两章所有判断的依据；若只关心 DeepEP 如何复用 NCCL，可以从第二章直接进入。
+读表结论：三章按「问题 → 实现 → 归纳」推进，第三章的设计取舍全部建立在第二章的调用链之上；若只关心 DeepEP 如何复用 NCCL，可以从第二章直接进入。
 
-前置知识：第二章大量引用 NCCL 的 `ncclDevComm`、`ncclWindow_t`、GIN 与 Team 语义。`ncclDevComm` 是 NCCL 为设备侧准备的资源上下文，`ncclWindow_t` 是对称内存窗口句柄，Team 是 communicator 内的 rank 子集（`src/include/nccl_device/core.h:45-47` 定义 `ncclTeam`，`docs/userguide/source/usage/deviceapi.rst:211-228` 给出 World/Lsa/Rail 三个预定义 Team）。建议先读 NCCL 笔记的第四章（GIN 详解），特别是设备侧 context、窗口注册与 QP 参数传递部分。
+前置知识：第二章大量引用 NCCL 的 `ncclDevComm`、`ncclWindow_t` 与 Team 语义。`ncclDevComm` 是 NCCL 为设备侧准备的资源上下文，`ncclWindow_t` 是对称内存窗口句柄，Team 与 QP 的定义见前文术语说明。建议先读 NCCL 笔记的第四章（GIN 详解），特别是设备侧 context、窗口注册与 QP 参数传递部分。
 
 ---
 
