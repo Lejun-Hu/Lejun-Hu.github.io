@@ -56,7 +56,9 @@ DeepEP 是 DeepSeek 开源的专家并行（Expert Parallelism, EP）通信库�
 
 DeepEP 目前有两代实现，**架构差异很大，尤其是对 NCCL 的依赖**。当前源码是 v2.1.0（`deep_ep/__init__.py:97`），两代接口并存：`deep_ep/buffers/legacy.py` 的 `Buffer` 是 V1，`deep_ep/buffers/elastic.py` 的 `ElasticBuffer` 是 V2。
 
-官方 README 对 V2 的定位（`README.md:9`）：V2 是对专家并行的完整重构，用少得多的 SM 资源达到极致性能，支持更大的 scale-up 与 scale-out 规模，并把后端从 NVSHMEM 切换为更轻量的 NCCL Gin 后端。README 的 New features 部分还给出了可核对的具体变化（`README.md:13-25`）：全量 JIT（Just-In-Time，运行期编译）编译、复用已有 NCCL communicator、高吞吐与低延迟 API 统一为单个 `ElasticBuffer` 接口、EP 规模上限到 2048、SM 占用从 24 降到 4–6。其中 scale-up 指节点内 NVLink 域，scale-out 指跨节点 RDMA 域，这一划分由 `csrc/kernels/backend/nccl.cu:56-60` 的 `get_logical_domain_size` 决定，2.2 节会给出具体赋值。
+官方 README 对 V2 的定位是「对专家并行的完整重构，用少得多的 SM 资源达到极致性能，并把后端从 NVSHMEM 切换为更轻量的 NCCL Gin 后端」（`README.md:9`），New features 部分列出了五项可核对的变化（`README.md:13-25`）。这五项不是并列的功能清单，而是一组有先后依赖的改动：后端换了，才谈得上复用 NCCL 的 communicator；有了 communicator 与对称内存，内核才有窗口与 Team 可用；内核改成运行期编译，SM 数、warp 数、QP 数才能变成编译期常量；接口统一之后，SM 与 QP 才能从静态配置变成可计算的参数。下面先给出两代依赖关系的总览，再逐项说明每项改了什么、为什么这样改、结果是什么；每项末尾指明第二章或第三章对应的小节，读代码时可以从那里接上。
+
+其中 scale-up 指节点内 NVLink 域，scale-out 指跨节点 RDMA 域，这一划分由 `csrc/kernels/backend/nccl.cu:56-60` 的 `get_logical_domain_size` 决定，2.2 节会给出具体赋值。
 
 下表只列两代在实现依赖上的差别，不含性能数据。这些差别决定了读代码时该打开哪些文件，其中「跨节点后端」与「NCCL communicator」两行最关键，直接决定了第二章的主路径。
 
@@ -70,6 +72,87 @@ DeepEP 目前有两代实现，**架构差异很大，尤其是对 NCCL 的依�
 | 内核交付方式 | 安装期编译 | 运行期 JIT 编译（`README.md:13`） |
 
 读表结论是：V2 把对 NCCL 的依赖从「无」变成「贯穿初始化与内核」，因此本文必须以 V2 为主路径。需要特别指出一处容易误判的点：**V1 代码里完全没有 `ncclComm_t`**。V1 的 `Buffer.__init__`（`deep_ep/buffers/legacy.py:33-136`）先构造 C++ runtime（`:92-93`），随后交换设备 ID（`:95-97`）、CUDA IPC handles（`:99-101`）与 NVSHMEM unique ID（`:103-132`），并在 `:106-126` 设置一批 NVSHMEM/IBGDA 环境变量，最后调用 `self.runtime.sync(device_ids, ipc_handles, root_unique_id)`（`:135`）；整个过程不涉及任何 NCCL communicator。相对地，`csrc/kernels/backend/nccl.cu:20-41` 里的 `get_local_unique_id` / `create_nccl_comm` 虽名字像自建通信器，实际只在 V2 的 `comm.py` 走自建分支时调用。2.1 节会沿三条分支说明 V2 何时才需要它们，2.8 节再回到 V1 的初始化路径。
+
+从下面的第 1 项开始，按 README 的顺序逐项说明每项改了什么、为什么这样改、得到了什么结果；每项末尾指明对应小节，读第二章时可以接上。
+
+**第 1 项：跨节点后端从 NVSHMEM 换成 NCCL Gin。** 先看 V1 里的 NVSHMEM 承担什么角色。它是一个独立的对称堆通信库，与 NCCL 平级：V1 要求单独安装 NVSHMEM 3.3.9 及以上（`docs/nvshmem.md:17-18`），并按说明配置驱动或安装 GDRCopy 才能启用 IBGDA（`docs/nvshmem.md:32-61`、`docs/legacy.md:54-56`）；运行时要先由某个 rank 生成 unique ID，其余 rank 收集后各自执行 `nvshmemx_init_attr`（`csrc/kernels/backend/nvshmem.cu:49-57`），再按 `team_split_stride` 切出跨节点子 team（`:60-71`），收发内存则通过 `nvshmem::alloc` 从它自己的对称堆分配（`csrc/legacy/buffer.hpp:255-285`）。跨节点的 put/get/signal 由它提供，此外还要在启动前设置一批环境变量，例如 P2P 开关、每 PE 的 RC 数、QP 深度、team 上限与分配粒度（`deep_ep/buffers/legacy.py:106-126`）。
+
+V2 的 GIN 提供的是同一组原语：put、get、写单个值、signal。两者的差别不在原语，而在基础设施由谁维护。DeepEP 在 V2 路径上只 include 两个头文件（`deep_ep/include/deep_ep/common/handle.cuh:3-4`），GIN 的上下文数量、队列深度、signal 数量、连接类型都在 `ncclDevCommCreate` 的一次调用里声明（`csrc/kernels/backend/nccl.cu:82-108`），收发内存用 NCCL 对称内存窗口（`:134-147`）。README 把这一点概括为 "Header-only & lightweight" 与 "Able to reuse existing NCCL communicators"（`README.md:15-16`）。
+
+所谓「更轻量」对应三处具体减少，都能在代码里对上。第一，少一套初始化与运行期状态：NVSHMEM 需要 unique ID 交换、`init_attr`、team 划分、独立对称堆与一批环境变量，GIN 只需要一个已存在的 communicator 加上 2.2 节会讲的六个需求字段。第二，少一套内存体系：V1 同时维护 CUDA IPC 映射的机内显存与 NVSHMEM 对称堆两套（`csrc/legacy/buffer.hpp:49,132-136`、`:255-285`），V2 只有一段 NCCL 窗口，机内的 LSA 访问与跨机的 GIN 传输共用同一段对称内存与同一套地址换算（`nccl.cu:137-147`）。第三，少一套连接与 QP 管理：V1 把 QP 数量交给 NVSHMEM 的 IBGDA 参数（`legacy.py:110`），V2 只在需求里申请 GIN 上下文数与队列深度（`nccl.cu:92-98`），连接建立与 QP 表由 NCCL 的 communicator 与 transport 负责（`src/gin/gin_host.cc:141-155`）。
+
+需要区分的是，这不等于 V2 不再需要 NVSHMEM：旧接口仍在，`README.md:82-84` 说明 legacy 方法依然依赖它，`setup.py:93` 还留着 "TODO: make NVSHMEM and legacy optional"，安装时仍会链接 NVSHMEM。准确的说法是 V2 的通信路径不再初始化 NVSHMEM，也不使用它的对称堆与 team，2.8 节会给出这个判断的代码依据。需求字段的含义见 2.2 节，设备侧封装见 2.5 节，两代路径的对照表在 2.8 节。
+
+**第 2 项：内核改为运行期 JIT 编译。** 改的原因在于 V1 的内核在安装期就编译进扩展模块（`setup.py:100` 列出 `csrc/kernels/legacy/*.cu`），编译时并不知道部署环境的 SM 数、hidden 大小、专家数、top-k 数与 QP 数，这些只能作为运行期参数传入，循环边界与分支留在运行期判断。V2 把它们改成模板参数（`deep_ep/include/deep_ep/impls/dispatch.cuh:17-30`），由 Host 侧在调用前拼成具体特化（`csrc/kernels/elastic/dispatch.hpp:51-65`），循环次数、warp 数量、是否走 RDMA 分支于是成为编译期常量（`dispatch.cuh:338`、`:382` 的 `if constexpr`），运行期不留判断与动态边界。
+
+附带收益有三项。安装阶段不需要 CUDA 编译（`README.md:3`），装包环境不必有匹配版本的 nvcc 与目标架构；只编译实际用到的形状组合，因为缓存键包含完整源码文本（`csrc/jit/compiler.hpp:112-117`）；代码按当前 GPU 的架构生成（`compiler.hpp:215`）。
+
+实现上改了三处。内核主体从 `.cu` 移到 `deep_ep/include/deep_ep/impls/` 下的 `.cuh`，随包以头文件分发（`setup.py:201-205` 的 `package_data`），不再参与安装期编译。Host 侧为每个内核对一个 `*Runtime` 类（`dispatch.hpp:14` 的 `DispatchRuntime` 继承 `jit::LaunchRuntime`），实现 `generate_impl` 与 `launch_impl` 两个钩子，前者拼源码、后者配启动参数。编译器由 `jit::compiler` 单例提供（`compiler.hpp:265-267`），包导入时 `init_jit` 把 CUDA 与 NCCL 路径传给它（`deep_ep/__init__.py:71-84`）。
+
+代价同样明确：某个形状第一次被用到时要执行一次编译，之后命中磁盘缓存（缓存目录形如 `kernel.<name>.<hash>`，`compiler.hpp:113-117`）；运行环境必须能调用 nvcc（`README.md:347`）。这是用安装期的编译时间与二进制体积换运行期的特化质量。完整链路见 2.3 节。
+
+**第 3 项：复用已有的 NCCL communicator。** 为什么 V2 才需要复用，答案在 V2 的初始化入口：设备上下文、窗口、GIN 连接三项都以 `ncclComm_t` 为第一个参数（`nccl.cu:108`、`:140`、`:98`），没有 communicator 就没有 V2 的通信能力。V1 相反，它的通信建立在 CUDA IPC 与 NVSHMEM 之上，整个 Python 与 C++ 路径没有 `ncclComm_t`（本节前面已核对，2.8 节再给依据），因此不存在「复用」这个选项。
+
+V1 并不是缺少通信器就少做了什么，而是把通信器通常承担的职责分散给了另外两套机制。一个 communicator 在功能上要解决四件事：确定参与通信的 rank 集合、交换彼此的内存地址、建立可用连接、分配收发资源。V1 用 CUDA IPC 解决机内的地址交换（`csrc/legacy/buffer.hpp:49,132-136`），用 NVSHMEM 的 unique ID 与 `init` 确定跨节点 PE 集合（`legacy.py:103-132`、`nvshmem.cu:49-76`），用 `team_split_stride` 与每 PE 的 RC 数组织连接与 QP（`nvshmem.cu:60-71`、`legacy.py:110`），用 NVSHMEM 对称堆提供收发内存（`csrc/legacy/buffer.hpp:255-285`）。四件事做完，V1 已经能发 put/get，不需要 NCCL 参与。
+
+复用的直接好处有三点。其一，不必为同一组 rank 再建一套连接与 QP，省掉一次跨 rank 建链的同步与资源开销。其二，直接继承训练框架 communicator 的拓扑信息，GIN 的 RAIL 与 FULL 两种连接方式正是按它决定的（`nccl.cu:98`、`src/gin/gin_host.cc:141-155`）。其三，与 PyTorch 共享同一个 NCCL 运行时，避免两套 NCCL 并存带来注册与地址冲突。
+
+第三点不是自然成立的，DeepEP 为此加了一道检查：`deep_ep/__init__.py:46-68` 的 `check_nccl_so` 会扫描 `/proc/self/maps` 找出已加载的 libnccl，发现重复加载就断言失败，并用 `filecmp.cmp` 把运行时库与链接时的库做二进制比对，不一致同样报错。这也解释了 `README.md:70` 为什么要求 NCCL 2.30.4 及以上。复用是默认路径，但保留两条自建分支：旧版 PyTorch 不暴露 `_comm_ptr`，以及启用 CPU 弹性内存段时强制新建（`deep_ep/utils/comm.py:60-74`、`elastic.py:301`）。三条分支的判断逻辑见 2.1 节。
+
+**第 4 项：高吞吐与低延迟 API 合并为单个 `ElasticBuffer`。** V1 是两套接口、两套约束。高吞吐走 `Buffer.dispatch` / `Buffer.combine`，调用前要用 `get_dispatch_config` / `get_combine_config` 按 rank 数挑一组 chunk 配置（`legacy.py:233-257`、`:263-287`），并用静态方法 `set_num_sms` 设定 SM 数（`:154-163`）；低延迟走 `low_latency_dispatch` / `low_latency_combine`（`:553`、`:624`），配套 `clean_low_latency_buffer`、`low_latency_update_mask_buffer` 等专用接口，handle 是元组（`:617`）。两条路径的 buffer 生命周期、SM 设定与错误处理各有一套。
+
+V2 只保留 `ElasticBuffer.dispatch` / `combine`（`elastic.py:855`、`:1046`），差异改由参数表达：`handle`（`EPHandle`）、`do_cpu_sync`、`async_with_compute_stream`、`do_expand`，以及可选的 `num_sms` / `num_qps`。SM 与 QP 数默认不再人工设定，而由 `get_theoretical_num_sms` / `get_theoretical_num_qps` 算出（`:928-929`）。
+
+合并不只是接口变少。调用方只需要一套代码路径；两套 buffer 生命周期与两种 handle 类型合并成一份，布局信息可以在同一接口内以缓存 handle 的形式复用（2.6 节）；配置也不再依赖按 rank 数查表或自测调优，`README.md:20` 把它概括为 "Analytical SM & QP count calculation — no more auto-tuning needed"，与 `docs/legacy.md:139-140` 中「可以用自测的调优结果替换 `get_*_config`」的说明形成对照。代价是 V1 那种零 SM 占用的 RDMA 低延迟方案没有再保留（`README.md:30`），3.3 节讨论这个取舍。接口细节见 2.3 与 2.6 节。
+
+**第 5 项：SM 占用从 24 降到 4–6。** 这一项最需要解释，因为「SM 变少」容易被误读成「内核变简单」，实际原因是资源单位与配置方式都变了。V1 的资源单位是 block（SM）：一个 channel 固定占两个 block，偶数 block 负责发送、奇数 block 负责接收（`csrc/legacy/buffer.hpp:435-437`、`csrc/kernels/legacy/intranode.cu:619-621`）。于是 `num_sms` 直接决定通道数，通道数又决定 buffer 的分段与流水深度——`Config` 按 `num_sms / 2` 计算通道（`csrc/legacy/config.hpp:62`），再按通道数计算 NVL 与 RDMA 的 buffer 大小（`:65-70`、`:87-96`），dispatch 的尺寸断言也逐项乘以通道数（`csrc/legacy/buffer.hpp:627-637`）。这段关系值得看原文，它解释了 V1 为什么必须给足 SM：
+
+```cpp
+// 中文注释为笔记所加（以「笔记：」开头）；以下为 csrc/legacy/buffer.hpp:435-437 原文，未省略
+        // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
+        EP_HOST_ASSERT(config.num_sms % 2 == 0);
+        int num_channels = config.num_sms / 2;
+```
+
+读码结论：在 V1 里 SM 数是通道数的两倍，通道数决定缓冲区分段，所以多给 SM 既是增加并行通道，也是增加流水缓冲。
+
+V1 的 SM 数本身是静态配置：`Buffer.num_sms` 默认 20（`deep_ep/buffers/legacy.py:31`），`set_num_sms` 要求偶数（`:154-163`），文档示例把它设为 24（`docs/legacy.md:132`），与 README 所说的 24 一致。它不随拓扑、带宽、token 数变化；chunk 参数按 rank 数取硬编码表（`legacy.py:246-257`），想更快只能靠自测调优替换。跨节点时每个 block 内还要按 RDMA 发送与 NVL peer 再分多组 warp（`csrc/kernels/legacy/internode.cu:1310` 的 `(kNumDispatchRDMASenderWarps + 1 + LEGACY_NUM_MAX_NVL_PEERS) * 32`），这些 warp 都落在同一批 block 上。
+
+V2 把资源单位从 block 换成 warp。grid 仍是 `num_sms` 个 block（`csrc/kernels/elastic/dispatch.hpp:226`），但一个 block 内的 warp 分成通知、scaleout、forward 三类角色，多个 channel 共享同一个 SM；hybrid 模式下每个 SM 能容纳多少 channel 由共享内存容量算出（`csrc/elastic/buffer.hpp:846-866`，上限是 `32 - kNumNotifyWarps`，再按两类 warp 各占一半折算），总通道数是 `num_sms * num_channels_per_sm`（`:864`）。通道不再独占 SM，SM 数与通道数解耦。
+
+SM 数也不再静态设定，而是按带宽算出来。`get_theoretical_num_sms`（`deep_ep/buffers/elastic.py:729-834`）先用组合数估算期望的 top-k 分布（`:770-778`），据此把每个 token 的流量拆成 SM 读、SM 写、RDMA、NVLink 四项（`:780-806`），取 RDMA 与 NVLink 中真正的瓶颈（`:809-812`），再让 SM 提供的 HBM 读写能力与瓶颈带宽匹配：
+
+```python
+# 中文注释为笔记所加（以「笔记：」开头）；以下为 deep_ep/buffers/elastic.py:809-825 原文，未省略
+        # Found the bounded one
+        # 笔记：先判断 RDMA 与 NVLink 谁是瓶颈，取出对应流量与带宽
+        if self.num_scaleout_ranks > 1 and (rdma_traffic / rdma_gbs) > (nvlink_traffic / nvlink_gbs):
+            bounded_traffic, bounded_gbs = rdma_traffic, rdma_gbs
+        else:
+            bounded_traffic, bounded_gbs = nvlink_traffic, nvlink_gbs
+
+        # Calculate SM count
+        # NOTES: will try to use more SMs if not overlap with compute
+        num_device_sms = torch.cuda.get_device_properties('cuda').multi_processor_count
+        num_sms = num_device_sms  # No traffic, e.g., EP=1
+        if bounded_traffic > 0:
+            # 笔记：瓶颈带宽 / 每 token 流量，再乘以单 SM 应承担的读、写比例，除以单 SM 的 HBM 带宽
+            num_sms = max(
+                bounded_gbs / bounded_traffic * sm_read / sm_read_gbs,
+                bounded_gbs / bounded_traffic * sm_write / sm_write_gbs,
+            )
+        # 笔记：至少 4 个、向上留 1.25 倍余量、对齐到偶数
+        num_sms = align(max(4, math.ceil(num_sms * 1.25)), 2)
+        # 笔记：不要求与计算重叠时反而放大到至少 64，把通信分布到更多 SM 上
+        num_sms = num_sms if self.prefer_overlap_with_compute else max(num_sms, 64)
+        num_sms = min(num_sms, num_device_sms)
+```
+
+读码结论：SM 数在这里是带宽匹配结果。函数默认按单 SM 200 GB/s 读、50 GB/s 写估算（`:733`），算出的是「刚好能与网卡或 NVLink 带宽匹配」的数量，多给 SM 不会提高上限，少给才会成为瓶颈。
+
+由此可以回答「为什么 4–6 个就够、V1 差在哪」。通信内核的吞吐上限由网卡与 NVLink 带宽决定，SM 只需要提供足够快的 HBM 读写与足够的并发请求；V2 让一个 SM 内的多个 warp 分担多个 channel，并用 TMA 一次搬运整个 token（`dispatch.cuh:283-312`）、每个 token 一次 `gin.put`（`:389-390`），单 warp 的搬运效率足以匹配瓶颈带宽，因此少量 SM 就能达到带宽上限。V1 的通道必须独占 block 才能维持多条独立流水，SM 数又是静态给定，24 这个数字来自使用方式而不是带宽计算。需要说明的是，`get_theoretical_num_sms` 的 docstring 明确指出它假设均衡门控，并注明「For V3.0's group-limited gate, please do not use this function」（`elastic.py:734-757`），所以 4–6 是均衡分布下的典型值，不是所有负载的保证。内核内的 warp 分工见 2.4 节。
+
+五项改动之间存在依赖，这条依赖链正好对应第二章的阅读顺序：2.1 与 2.2 节讲复用 communicator 并在此基础上建设备上下文、对称内存与窗口；2.3 节讲 JIT 如何把运行期参数变成编译期常量；2.4 与 2.5 节讲内核内的 warp 分工与按拓扑选路；2.6 至 2.8 节补齐 handle 传递、内存形态与两代后端对照。
 
 本笔记第二章以 **V2 主路径** 为主，因为它完整使用了 NCCL 的对称内存与 GIN；V1 的 NVSHMEM 与低延迟内核放在 2.8 和 3.3 单独说明。要理解 V2 为何值得单独读，下一节先看它要处理的通信形态。
 
@@ -146,7 +229,7 @@ ElasticBuffer.dispatch()                     deep_ep/buffers/elastic.py:855
 
 ### 2.1 初始化期：取得 NCCL communicator
 
-上一节总览的第 1 步是取得 communicator，本节回答「DeepEP 手里为什么要有 `ncclComm_t`、它从哪里来」。这个问题从 1.1 节「V1 完全没有 `ncclComm_t`、V2 却重度依赖」的对比引出：`ncclComm_t` 是 NCCL communicator 的句柄类型，也是后续 `ncclDevCommCreate`、`ncclCommWindowRegister` 等底层 API 的必需参数，而不是用来发起 `ncclAllReduce` 之类集合操作的。读完应能回答：三条获取分支的触发条件、复用与自建在生命周期上的差别、以及哪些情况会强制自建。
+上一节总览的第 1 步是取得 communicator，本节回答「DeepEP 手里为什么要有 `ncclComm_t`、它从哪里来」。这个问题从 1.1 节「V1 完全没有 `ncclComm_t`、V2 却重度依赖」的对比引出，1.1 节第 3 项还说明了复用为什么是默认路径，本节给出三条分支的判断细节：`ncclComm_t` 是 NCCL communicator 的句柄类型，也是后续 `ncclDevCommCreate`、`ncclCommWindowRegister` 等底层 API 的必需参数，而不是用来发起 `ncclAllReduce` 之类集合操作的。读完应能回答：三条获取分支的触发条件、复用与自建在生命周期上的差别、以及哪些情况会强制自建。
 
 V2 的获取逻辑集中在 `get_nccl_comm_handle`（`deep_ep/utils/comm.py:42-75`），有三条分支。下面这段代码要重点看 `:57`、`:62` 与 `:68-74` 三个判断点：`comm.py` 的参数 `group` 是 PyTorch 的 `ProcessGroup`（`torch.distributed` 中一组 rank 的通信组），`backend._comm_ptr()` 是较新 PyTorch 暴露的 NCCL communicator 裸指针 getter。
 
@@ -187,7 +270,7 @@ V2 的获取逻辑集中在 `get_nccl_comm_handle`（`deep_ep/utils/comm.py:42-7
 
 ### 2.2 初始化期：设备上下文、对称内存与窗口注册
 
-上一节拿到 communicator，本节回答「有了句柄之后还要准备哪些资源、按什么顺序准备」。它从 2.1 节的结论引出：communicator 只是控制面句柄，GPU 内核还不能直接用它发 RDMA。读完应能回答：构造 `NCCLSymmetricMemoryContext` 的四步各自依赖什么、每步产出的字段被谁消费、以及 GIN 需求参数从哪里来。
+上一节拿到 communicator，本节回答「有了句柄之后还要准备哪些资源、按什么顺序准备」。它从 2.1 节的结论引出：communicator 只是控制面句柄，GPU 内核还不能直接用它发 RDMA。读完应能回答：构造 `NCCLSymmetricMemoryContext` 的四步各自依赖什么、每步产出的字段被谁消费、以及 GIN 需求参数从哪里来。1.1 节第 1 项提到「GIN 只需一个 communicator 加上六个需求字段」，这六个字段的含义就在第 1 步展开。
 
 拿到 communicator 后，`ElasticBuffer.__init__` 构造 C++ runtime（`deep_ep/buffers/elastic.py:346-354`），后者在 `csrc/elastic/buffer.hpp:107-114`（创建语句在 `:111-114`）创建 `NCCLSymmetricMemoryContext`。这个构造函数（`csrc/kernels/backend/nccl.cu:62-148`）是 DeepEP 与 NCCL 衔接最密集的一段，按真实执行顺序分四步。之所以必须分成四步，是因为存在一条时序依赖链：设备上下文要靠 communicator 查询能力后才能声明；通信域划分排在 `ncclDevCommCreate` 之后执行，但查询本身用的是 Host 侧 communicator（`ncclTeamLsa(comm)`，`nccl.cu:111`），并不依赖设备上下文；内存分配要按域的大小决定形态；窗口注册又必须等内存就绪并让全体 rank 同步，最后才能逐 peer 取 LSA 指针。下表给出这条依赖链的总览，读表时关注「依赖」一列，它解释了为什么不能把四步合并成一次调用。
 
@@ -309,7 +392,7 @@ LSA 的定义见 `docs/userguide/source/usage/deviceapi.rst:13`（Load/Store Acc
 
 ### 2.3 调用期：从 `dispatch()` 到内核启动
 
-上一节把初始化期资源准备完毕，本节回答「每次调用时 Host 侧做了什么、内核是怎么被编译出来的」。它从 2.2 节的结论引出：控制面只需一次，调用期只做参数整理与启动。读完应能回答：Python 层整理哪些参数、C++ 启动器如何填 `Args`、JIT 三步各自由哪个文件实现、以及运行期才知道的信息如何变成编译期常量。
+上一节把初始化期资源准备完毕，本节回答「每次调用时 Host 侧做了什么、内核是怎么被编译出来的」。它从 2.2 节的结论引出：控制面只需一次，调用期只做参数整理与启动。读完应能回答：Python 层整理哪些参数、C++ 启动器如何填 `Args`、JIT 三步各自由哪个文件实现、以及运行期才知道的信息如何变成编译期常量。1.1 节第 2 项说明了改成 JIT 的动机与改动范围，本节把这条链路从头走到尾。
 
 现在进入每次调用的路径。Python 侧 `ElasticBuffer.dispatch`（`deep_ep/buffers/elastic.py:855-1033`）先做参数整理：自动推断 SM 与 QP 数（`:926-930`，未指定时调用 `get_theoretical_num_sms` / `get_theoretical_num_qps`，并断言 `num_qps <= self.num_allocated_qps`）、解包 FP8 的 `(x, sf)`（`:932-933`，FP8 是 8 位浮点格式，输入为「数据张量 + SF 缩放因子张量」的二元组）、复用已有 `handle` 中的缓存布局（`:937-956`），然后把一长串参数交给 C++ runtime（`:976`）。下面这段代码重点看 `:964-976` 的返回值解包与 `:976` 的调用入口。
 
@@ -380,7 +463,7 @@ static void __instantiate_kernel() {{
 
 ### 2.4 内核期：`dispatch_impl` 的三个阶段
 
-上一节把模板特化编译并启动，本节回答「内核拿到逐 token 的路由后怎样算出接收布局并搬运数据」。它从 2.3 节的结论引出：既然 `topk_idx` 只在运行期可知、布局又必须精确，内核就必须自己计算，而不能依赖 Host 预先排好。读完应能回答：三个阶段各自解决什么、哪些 warp 参与、产物被谁使用、以及机内与跨机两条数据路径如何分流。
+上一节把模板特化编译并启动，本节回答「内核拿到逐 token 的路由后怎样算出接收布局并搬运数据」。它从 2.3 节的结论引出：既然 `topk_idx` 只在运行期可知、布局又必须精确，内核就必须自己计算，而不能依赖 Host 预先排好。读完应能回答：三个阶段各自解决什么、哪些 warp 参与、产物被谁使用、以及机内与跨机两条数据路径如何分流。1.1 节第 5 项提到 V2 把资源单位从 block 换成 warp，本节的第 1 阶段正是这种分工的落点。
 
 `dispatch_impl`（`deep_ep/include/deep_ep/impls/dispatch.cuh:17-45`，模板参数在 `:17-30`、`__global__` 函数声明在 `:31-45`、函数体至 `:409`）的模板参数就是上一节 JIT 拼进去的那些，内核签名接收 `x`、`topk_idx`、workspace、缓冲区以及 `ncclDevComm_t` / `ncclWindow_t`。内核内部按 warp 角色分三段，这样分段的动机是一条数据依赖：不知道各 rank 收多少 token，就无法确定接收区的分段；没有分段偏移，就无法给 token 分配目标 slot；slot 未定，数据搬运就不能开始；搬运完成还需要一个全体 rank 的到达保证。下表给出各段的职责与产物，读表时关注「产物」一列，它串起了后面的 `EPHandle` 与 combine。
 
@@ -464,7 +547,7 @@ static void __instantiate_kernel() {{
 
 ### 2.5 设备侧 GIN 封装：Team 判定与两条数据路径
 
-上一节出现了 `NCCLGin::put` / `get_sym_ptr` / `put_value`，也留下了「分流判定依据」这个未闭合点；1.3 节末同样预告过 `is_nvlink_accessible` 的作用，本节一并回答：DeepEP 如何把 NCCL 设备侧 GIN API 包装成「按目标 rank 自动选路」的接口。读完应能回答：三个 Team 各自的 rank 集合、对称指针何时可用、各封装方法映射到哪个 NCCL API、以及 QP 与 warp 的对应关系。代码在 `deep_ep/include/deep_ep/common/handle.cuh`。
+上一节出现了 `NCCLGin::put` / `get_sym_ptr` / `put_value`，也留下了「分流判定依据」这个未闭合点；1.3 节末同样预告过 `is_nvlink_accessible` 的作用，本节一并回答：DeepEP 如何把 NCCL 设备侧 GIN API 包装成「按目标 rank 自动选路」的接口。1.1 节第 1 项把这次后端切换概括为「更轻量」，轻量之后的实现代价就集中在这一层封装上。读完应能回答：三个 Team 各自的 rank 集合、对称指针何时可用、各封装方法映射到哪个 NCCL API、以及 QP 与 warp 的对应关系。代码在 `deep_ep/include/deep_ep/common/handle.cuh`。
 
 先交代术语。Team 是 communicator 内的 rank 子集（`src/include/nccl_device/core.h:45-47` 的 `ncclTeam { nRanks, rank, stride; }`），NCCL 预定义 World（全体 rank）、Lsa（同 NVLink 域）、Rail（跨节点中处于相同 rail 位置的 rank）三个，`core.h:55-57` 定义对应的 tag 类型 `ncclTeamTagWorld` / `ncclTeamTagLsa` / `ncclTeamTagRail`；rail 的定义见 `docs/userguide/source/usage/deviceapi.rst:221-222`，即各节点内编号相同的 GPU 组成的集合。构造时（`handle.cuh:11-35`）保存 `ncclDevComm_t` 与 `ncclWindow_t`，用 `qp_idx` 构造 NCCL 提供的 `ncclGin` 对象，并一次性取好三个 Team 与本 rank 的 LSA 窗口基址。下面这段代码重点看初始化列表里三个 Team 的取得方式与 `:34` 的 `lsa_base_ptr`。
 
@@ -561,7 +644,7 @@ Hybrid 实现还多一层进程间协作：每个 rank 用 `create_cpu_handle`�
 
 ### 2.8 两代后端：从 NVSHMEM 到 NCCL Gin
 
-前面各节都沿 V2 路径，本节补齐 V1 的跨节点实现，回扣 1.1 节「V1 完全没有 `ncclComm_t`」与 2.1 节「V2 何时自建 communicator」两处伏笔。读完应能回答：V1 初始化交换了哪些资源、IBGDA 的作用、V2 切换后端后在两个通信域里各改用哪条路径、以及这次切换损失了什么能力。
+前面各节都沿 V2 路径，本节补齐 V1 的跨节点实现，回扣 1.1 节「V1 完全没有 `ncclComm_t`」、第 1 项的后端切换与 2.1 节「V2 何时自建 communicator」三处伏笔。读完应能回答：V1 初始化交换了哪些资源、IBGDA 的作用、V2 切换后端后在两个通信域里各改用哪条路径、以及这次切换损失了什么能力。
 
 V1 的初始化分两条线，都不经过 NCCL：机内用 CUDA IPC 共享内存，跨节点用 NVSHMEM。Python 侧 `Buffer.__init__`（`deep_ep/buffers/legacy.py:33-136`，其中 `:92-136` 是构造 runtime 与资源交换的部分）先构造 C++ runtime（`:92-93`），再交换设备 ID（`:95-97`）、IPC handles（`:99-101`）与 NVSHMEM unique ID（`:103-132`），最后调用 `runtime.sync`（`:135`）。其中启用 **IBGDA**（InfiniBand GPU Direct Async，GPU 直接访问网卡）的环境变量设置在 `legacy.py:108-110`，下面这段代码重点看三个变量分别控制什么。
 
@@ -622,7 +705,7 @@ V2 去掉了这条依赖：`deep_ep/buffers/elastic.py` 中不再有任何 NVSHM
 
 ### 3.3 面向推理的低延迟设计
 
-1.3 节把低延迟列为第三类场景，本节回答「这一场景的具体取舍是什么、两代接口如何变化」。它从 3.2 节的「重叠粒度」引出来：decode 阶段 batch 小，等待与同步的固定开销比带宽更关键。读完应能回答：V1 低延迟内核的四项取舍、V2 用哪些参数表达同类诉求、以及哪项能力并未迁移。
+1.3 节把低延迟列为第三类场景，本节回答「这一场景的具体取舍是什么、两代接口如何变化」。它从 3.2 节的「重叠粒度」引出来：decode 阶段 batch 小，等待与同步的固定开销比带宽更关键。读完应能回答：V1 低延迟内核的四项取舍、V2 用哪些参数表达同类诉求、以及哪项能力并未迁移。1.1 节第 4 项说 API 合并的代价是零 SM 占用的低延迟方案不再保留，本节给出这个判断的依据。
 
 V1 提供了独立的 `low_latency_dispatch` / `low_latency_combine` 接口（`deep_ep/buffers/legacy.py:553`、`:624`），专为推理 decode 的小批量、延迟敏感场景设计。几个可核对的取舍：
 
