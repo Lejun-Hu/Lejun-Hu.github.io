@@ -2385,6 +2385,32 @@ lsaFlatBase + 2 × bigSize + bigOffset_A + 0x1000
 
 两种通路的差别根源在于访问内存的方式不同：LSA 是**本地地址空间内的映射**，寻址只需基址加偏移；RDMA 是**网卡代替 GPU 写远端内存**，所以必须把远端的地址与密钥一并交给网卡。窗口把这两套信息放进同一个结构，kernel 拿到一个指针就能应付两类 peer。
 
+**LSA 地址为什么真能落到对端显存。** 靠的是 CUDA 的虚拟内存管理（VMM），不是软件拷贝。第 4 步的 `cuMemMap` 是关键：它把导入的物理句柄绑定到预留的 VA 上，在 GPU 页表里建立 `VA → 对端物理地址` 的映射；紧接着 `cuMemSetAccess` 授予本 GPU 对该范围的读写权限（`dev_runtime.cc:226`、`:267-268`）：
+
+```cpp
+// src/dev_runtime.cc:246-268（节选，中文注释为笔记所加）
+cuMemImportFromShareableHandle(&impHandle, fd_or_fabricHandle, ncclCuMemHandleType);  // 导入对端物理段
+cuMemMap(addr, msg->segmentSize, 0, impHandle, 0);   // 绑定到本地 VA：页表建立 VA→对端物理页
+symMemorySetAccessForVASegment(comm, msg, addr);     // 授予本 GPU 读写权限
+```
+
+此后 kernel 执行一条普通的 `st.global` 写到这个 VA，GPU 的 MMU 查页表得到 rank2 的物理地址，再经 NVLink（或 PCIe P2P）路由过去。整个过程没有拷贝、没有专用指令、也不需要 CPU 参与——就是一次带地址翻译的内存写。前提是两块 GPU 之间 P2P 可达：拓扑上不通的 GPU 不会被划进同一个 LSA team，`cuMemSetAccess` 也要求设备确实能访问该物理页。
+
+**跨机时窗口怎么参与寻址。** 跨机不能靠地址翻译，因为对端显存根本不在本地页表里；此时必须把「远端窗口句柄 + 远端偏移」显式交给网卡。官方文档给出了这两行的算法（`docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:1055-1062`）：
+
+```cpp
+// 远端地址 = 窗口在 GIN 内存中的 4 KB 偏移 + 窗口中偏移
+size_t dst_ginAddr = 4096 * size_t(dst->ginOffset4K) + dstOff;
+// 远端窗口句柄 = 第 connectionId 条 GIN 连接的设备侧句柄（即 regMrSym 输出的 mhandle）
+ncclGinWindow_t dstGinWin = dst->ginWins[connectionId];
+// 两者一起交给 put，由网卡完成地址翻译与 rkey 校验
+ncclGinPut(ctx, coop, peer, dstGinWin, dst_ginAddr, ...);
+```
+
+这里 `dst` 就是远端窗口的 `ncclWindow_vidmem` 描述符，`ginWins[connectionId]` 正是窗口注册时 `regMrSym` 写进去的设备侧句柄（文档同处 `:349` 明确 "used as the GIN put/get target"）。`connectionId` 来自 4.4.1 讲的连接拆分，所以跨机寻址要同时用到「窗口」与「连接」两套信息。
+
+回到你的问题：`ncclWindow_t` **不是只有跨机才用**。它同时服务两条通路——LSA 路径从它里面取 `lsaFlatBase` 与 `stride4G` 算出本地可写的对端地址，GIN 路径从它里面取 `ginWins[connectionId]` 与 `ginOffset4K` 作为远端句柄与偏移。区别只在「算出的是本地虚拟地址」还是「交给网卡的远端句柄」。
+
 **怎么用。** 对外只有四个函数，按生命周期排列：
 
 1. `ncclMemAlloc(&ptr, size)`（`allocator.cc:17`）：分配可被注册的显存。必须用它（或 cuMem 系列可导出的地址）分配，普通 `cudaMalloc` 无法注册。
