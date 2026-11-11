@@ -58,7 +58,7 @@ DeepEP 目前有两代实现，**架构差异很大，尤其是对 NCCL 的依�
 
 官方 README 对 V2 的定位（`README.md:9`）：V2 是对专家并行的完整重构，用少得多的 SM 资源达到极致性能，支持更大的 scale-up 与 scale-out 规模，并把后端从 NVSHMEM 切换为更轻量的 NCCL Gin 后端。README 的 New features 部分还给出了可核对的具体变化（`README.md:13-25`）：全量 JIT（Just-In-Time，运行期编译）编译、复用已有 NCCL communicator、高吞吐与低延迟 API 统一为单个 `ElasticBuffer` 接口、EP 规模上限到 2048、SM 占用从 24 降到 4–6。其中 scale-up 指节点内 NVLink 域，scale-out 指跨节点 RDMA 域，这一划分由 `csrc/kernels/backend/nccl.cu:56-60` 的 `get_logical_domain_size` 决定，2.2 节会给出具体赋值。
 
-下表按「依赖什么」而不是「性能数字」对比两代，因为前者决定读代码时该打开哪些文件；读表时重点看「跨节点后端」与「NCCL communicator」两行，它们直接决定了第二章的主路径。
+下表只列两代在实现依赖上的差别，不含性能数据。这些差别决定了读代码时该打开哪些文件，其中「跨节点后端」与「NCCL communicator」两行最关键，直接决定了第二章的主路径。
 
 | 维度 | V1（`Buffer`） | V2（`ElasticBuffer`） |
 |------|----------------|----------------------|
