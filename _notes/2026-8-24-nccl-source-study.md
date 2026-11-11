@@ -2256,6 +2256,71 @@ for (int n = 0; n < ginState->ginCommCount; n++) {
 
 连接建好后，还要把"哪些内存可以被远端访问"登记下来。GIN 通信的对象是窗口（window）：`ncclGinRegister` 对一块地址调 `regMrSym`，拿到 host 侧句柄（`ginHostWins`）和设备侧窗口（`ginDevWins`）——设备端 `ncclGinPut` 用的 `dstWin`/`srcWin` 就是这里注册出来的。`ncclDevCommCreate` 在首次激活时会遍历已有的对称内存逐一注册（`dev_runtime.cc:1150-1154`，源码注释说明窗口句柄要等拿到 stream 后再更新）；跨多个物理 segment 的地址需要 DMABUF 支持（`gin_host.cc:379-387`）。
 
+**从公共 API 看窗口注册：`ncclWindow_t` 与 `ncclMemAlloc`。** 上面讲的是 GIN 插件内部的 `regMrSym`。对上层库（如 DeepEP）来说不会直接调到这一层，它们用的是 NCCL 的公共窗口 API，由 NCCL 内部转换成对每条 GIN 连接的 `regMrSym`。这套 API 的中心是 `ncclWindow_t`，下面把它讲清楚，因为后面 4.4 的设备端参数、以及 DeepEP 的整个通信缓冲区都建立在它之上。
+
+**它是什么。** `ncclWindow_t` 在公共头文件里只有一行定义（`nccl.h.in:37`）：
+
+```c
+typedef struct ncclWindow_vidmem* ncclWindow_t;
+```
+
+即一个**设备侧指针**（`devcomm/devcomm_v22902.cc:46` 的注释直说 "ncclWindow_t is just a (device) pointer"）。它指向的 `ncclWindow_vidmem`（`include/nccl_device/impl/core__types.h:27-35`）记录这块窗口在对称地址空间中的位置信息，下表是其中决定「怎么定位到对端」的几个字段：
+
+| 字段 | 含义 |
+|---|---|
+| `winHost` | 指向 Host 侧完整窗口描述 `ncclDevrWindow`，其中含 `userPtr`、`bigOffset`、rkey 等 |
+| `lsaFlatBase` | LSA team 中 rank 0 的窗口基址，即平铺地址空间的起点 |
+| `lsaRank` / `worldRank` | 本 rank 在 LSA team 与世界中的编号 |
+| `stride4G` | 每个 rank 在平铺空间中的步长（4 GiB 对齐） |
+| `ginWins[]` | 每条 GIN 连接对应的插件侧窗口句柄（对应上面 `regMrSym` 的产物） |
+
+**为什么需要它。** 普通 `cudaMalloc` 或 `torch.empty` 得到的地址只在本进程有效，对端 kernel 无从知道"同一块数据在对方那里是什么地址"。而单边操作（GIN 的 `put`/`get`、`ncclPutSignal`）恰恰要求发送方自己指定远端地址与 rkey——这正是 4.4.2 讲的「WQE 必须显式给出远端虚拟地址与 rkey」。窗口解决的就是这件事：把一块内存注册成**对称窗口**后，所有 rank 约定「同一 `offset` 对应同一逻辑位置」，NCCL 便能把 `offset` 换算成任意 rank 的可达地址。换算公式在 `ncclDevrGetLsaRankPtr`（`dev_runtime.cc:1649`）：
+
+```c
+*outPtr = (uintptr_t)lsaFlatBase + lsaRank * bigSize + winHost->bigOffset + offset;
+```
+
+四项依次是：team 基址、目标 rank 的步长、该窗口在对方地址空间中的偏移、窗口内偏移。可见「对称」并不要求各 rank 的物理地址相同，只要求**用同一个 `offset` 能各自算出自己的可达地址**。
+
+**怎么用。** 对外只有四个函数，按生命周期排列：
+
+1. `ncclMemAlloc(&ptr, size)`（`allocator.cc:17`）：分配可被注册的显存。必须用它（或 cuMem 系列可导出的地址）分配，普通 `cudaMalloc` 无法注册。
+2. `ncclCommWindowRegister(comm, buff, size, &win, winFlags)`（`nccl.h.in:351`）：把这块内存注册成窗口并返回 `ncclWindow_t`。**这是 collective 调用**——内部会做一次 bootstrap barrier，因此调用返回后不需要再手工同步（DeepEP 源码注释专门强调了这一点）。
+3. `ncclGetLsaDevicePointer(win, offset, lsaRank, &ptr)`（`dev_runtime.cc:1744`）：求同一 `offset` 在指定 LSA rank 上的地址，`lsaRank` 需落在 `[0, lsaSize)` 内；另有 `ncclGetPeerDevicePointer` 面向任意 world rank（含跨机 peer）。
+4. `ncclCommWindowDeregister(comm, win)`（`nccl.h.in:355`）：注销窗口。
+
+`winFlags` 有三个取值（`nccl.h.in:63-68`）：`NCCL_WIN_DEFAULT`、`NCCL_WIN_COLL_SYMMETRIC`（参与集合通信的对称内存，会额外触发 symmetric kernel 初始化）、`NCCL_WIN_STRICT_ORDERING`（要求严格顺序）；窗口地址还需满足 `NCCL_WIN_REQUIRED_ALIGNMENT = 4096` 对齐。
+
+**DeepEP 怎么用它。** DeepEP 把窗口当作整个通信缓冲区的根句柄。`NCCLSymmetricMemoryContext`（`csrc/kernels/backend/api.cuh:47-72`）持有其中三个关键成员：
+
+| 成员 | 用途 |
+|---|---|
+| `ncclWindow_t window` | 注册得到的窗口，作为参数传给每个 JIT kernel |
+| `void* mapped_window_ptr` | 本 rank 的窗口基址，由 `ncclGetLsaDevicePointer` 取得 |
+| `std::vector<void*> nvl_window_ptrs` | 所有 LSA peer 的窗口基址，按下标索引 |
+
+创建时它一次性把全部 peer 的基址算好存进数组（`csrc/kernels/backend/nccl.cu:140-147`），因为内核里不能再调 Host API：
+
+```cpp
+NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, num_bytes, &window, NCCL_WIN_STRICT_ORDERING));
+NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, nvl_rank_idx, &mapped_window_ptr));
+for (int i = 0; i < num_nvl_ranks; ++ i)
+    NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, i, &nvl_window_ptrs[i]));
+```
+
+此后 kernel 内访问对端不必再问 Host，直接用 `get_sym_ptr`（`nccl.cu:150-153`）换算：
+
+```cpp
+void* get_sym_ptr(void* ptr, int dst_rank_idx) const {
+  const auto offset = static_cast<uint8_t*>(ptr) - static_cast<uint8_t*>(mapped_window_ptr);  // 本地偏移
+  return static_cast<uint8_t*>(nvl_window_ptrs[dst_rank_idx]) + offset;                       // 对端基址 + 同一偏移
+}
+```
+
+这就是上面 `ncclDevrGetLsaRankPtr` 公式的用户态版本：**`offset` 不变、只换基址**。于是 NVLink 域内任意 rank 的缓冲区都能被直接寻址，无需走 GIN `put`——这是 DeepEP「scaleup 走 NVLink 直写」的基础；只有跨机那部分才用 GIN，此时 `window` 作为参数传入 kernel，设备端 `ncclGinPut` 依靠窗口里的 `ginWins[]` 与 rkey 完成远端写入（即 4.4.2 的内容）。
+
+一个实操细节：DeepEP 通过 `NCCL_WIN_STRIDE` 环境变量设置窗口步长（`deep_ep/buffers/elastic.py:293-298`），原因是 NCCL 内部把 stride 向上对齐到 4 GiB，注册字节数超过单步容量时必须显式调大，否则各 rank 的窗口在平铺空间里会重叠。
+
 **第四步：创建设备侧 context —— `ncclGinDevCommSetup`（`gin_host.cc:190`）**
 
 这一步为上层库创建的 `ncclDevComm` 分配设备侧 context 并下发句柄，核心是循环 `createContext`（`gin_host.cc:277-292`），之后**按需启动 progress 线程**：
