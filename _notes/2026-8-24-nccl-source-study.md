@@ -2189,7 +2189,9 @@ typedef enum {
 - **通信器初始化期**：第二章的阶段四里，`ncclCommInitRank` 会一并调用 `ncclGinInit`（`init.cc:477`，与 `ncclNetInit`/`ncclRmaInit` 并列）。这一步只加载插件、选定一个后端，**不建立任何连接**——因为此时还不知道上层库会不会用 GIN。
 - **上层库激活期**：当上层库（如 DeepEP）调用公共 API `ncclDevCommCreate`（`src/dev_runtime.cc:1502`）申请设备侧通信上下文、并在 `reqs` 里声明需要 GIN 时，才触发剩下的三步——建连接、注册内存窗口、创建设备侧 context（`ginActivated` 控制，首次激活时执行一次，`dev_runtime.cc:1137`）。
 
-这也解释了为什么 GIN 不是 AllReduce 的主路径：它由上层库按需激活，而不是每个通信器初始化时都建一套。按代码执行顺序，主机侧共四步：
+由这两个阶段可以看清 GIN 在 NCCL 中的位置：它是**按需启用**的设备侧通信能力，而不是集合通信的内置实现路径。NCCL 自己的 `ncclAllReduce` 等操作走第二、三章那套 Channel/Transport 路径——建连接、起 proxy 线程、启动内核，全程不涉及上面这两个阶段；只有当上层库调用 `ncclDevCommCreate` 并在 `reqs` 里声明 GIN 需求时，这套连接与窗口才会被建立（`ginActivated` 仅在此刻为真，`dev_runtime.cc:1137`）。这也印证了第三步里那句「首次激活时遍历已有的对称内存逐一注册」：激活之前分配的内存只登记给了非 GIN 通路，必须等激活后再补注册一次。
+
+按代码执行顺序，主机侧共四步：
 
 | 步骤 | 时机 | 入口函数 | 产物 |
 |------|------|----------|------|
