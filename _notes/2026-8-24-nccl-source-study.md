@@ -2365,6 +2365,26 @@ lsaFlatBase + 2 × bigSize + bigOffset_A + 0x1000
 
 这个地址就落在图上 rank2 槽位的窗口 A 内。由此可见两个容易混淆的点：`bigSize` 是**rank 之间**的跨距（决定去哪个槽位），`bigOffset` 是**窗口之间**的偏移（决定槽位里哪个窗口），两者是正交的两级。也正因为 `bigSize` 默认取最大显存容量，当注册的内存总量超过单卡显存时（如 GPU+CPU 混合），必须调大 `NCCL_WIN_STRIDE`，否则相邻 rank 的槽位会在虚拟地址上重叠。
 
+**访问对端不需要对方的 `lsaFlatBase`。** 这里容易形成一个误解：既然要把数据写到 rank2 的显存，是不是得先拿到 rank2 的 `lsaFlatBase`，或者靠一份「其他 rank 同步过来的窗口数组」？都不是。`lsaFlatBase` 是每个 rank **各自** reserve 的，数值互不相同（`dev_runtime.cc:323`）；它们之所以能互相访问，靠的是把对端的物理内存**映射进自己的地址空间**，而不是去读对方的基址。
+
+映射发生在窗口注册阶段（`symMemoryMapLsaTeam`，`dev_runtime.cc:294-331`），按四步完成：
+
+1. 每个 rank 把自己的物理段导出成一条消息，消息里带的是 **物理内存句柄** `CUmemGenericAllocationHandle`（`symMemoryExportSegmentHandle`，`:311`）——导出的是句柄，不是 window 结构，也不是 `lsaFlatBase`；
+2. 在 LSA team 内用 `bootstrapIntraNodeAllGather` 交换这批句柄（`:316-318`）；
+3. 每个 rank 各自 `cuMemAddressReserve` 预留 `lsaSize × bigSize` 的连续 VA（`:323`），得到自己的 `lsaFlatBase`；
+4. 对每个 rank r，用第 2 步换来的句柄做 `cuMemMap`，映射到 `lsaFlatBase + r × bigSize + bigOffset`（`:281`、`:287`）。
+
+四步之后，**每个 rank 的地址空间里都出现了一模一样的布局**：偏移 `r × bigSize` 处就是 rank r 的物理内存。所以写「本地 `lsaFlatBase` + 2 × bigSize + offset」，数据在物理上落到 rank2 的显存——整个过程中没有用到 rank2 的任何地址。这也是为什么前面强调「各 rank 的 `lsaFlatBase` 数值可以不同，但内部布局完全一致」。
+
+**那 `ncclWindow_t` 起什么作用。** 它不是「同步其他 rank 的窗口」，而是**从本 rank 视角出发、访问全体 peer 的定位信息包**。它把两类信息装在一起（即前面字段表里的内容），对应两种通路：
+
+| 通路 | 用到窗口里的字段 | 为什么这样就能寻址 |
+|---|---|---|
+| LSA（同节点 NVLink） | `lsaFlatBase`（本 rank 基址）+ `stride4G`（rank 跨距） | 对端内存已经映射进本进程地址空间，有基址和跨距就能算出槽位 |
+| GIN（跨机 RDMA） | `ginWins[]` + `ginOffset4K` | 网卡代发的单边写，必须显式携带远端窗口句柄与 rkey（见 4.4.2） |
+
+两种通路的差别根源在于访问内存的方式不同：LSA 是**本地地址空间内的映射**，寻址只需基址加偏移；RDMA 是**网卡代替 GPU 写远端内存**，所以必须把远端的地址与密钥一并交给网卡。窗口把这两套信息放进同一个结构，kernel 拿到一个指针就能应付两类 peer。
+
 **怎么用。** 对外只有四个函数，按生命周期排列：
 
 1. `ncclMemAlloc(&ptr, size)`（`allocator.cc:17`）：分配可被注册的显存。必须用它（或 cuMem 系列可导出的地址）分配，普通 `cudaMalloc` 无法注册。
