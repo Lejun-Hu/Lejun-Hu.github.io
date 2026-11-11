@@ -431,7 +431,7 @@ NCCL 的源码虽然庞大，但整个框架其实是**围绕少数几个核心�
 > **communicator 是"域"的边界**（不同 communicator 之间不能通信），**Team 是"域内"的子划分**。同一个 communicator 里，NCCL 会按硬件拓扑自动划分出逻辑子域（team），用来决定某对 rank 之间该走哪条物理链路。最常见的三种 Team：
 >
 > - `ncclTeamWorld`：全体 rank；
-> - `ncclTeamLsa`（Local NVLink Accessible）：同一 NVLink 域内、通过 NVLink 直接可达的一组 GPU（通常就是同一节点内的卡）；
+> - `ncclTeamLsa`（Load/Store Access）：同一节点内可以直接读写彼此显存的一组 GPU，通常就是一个 NVLink 域。全称取 Load/Store Access，指这些 GPU 之间能用普通 load/store 指令互相访问内存（`docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:94`）；
 > - `ncclTeamRail`：跨节点的"同一位置" GPU 组（例如每个节点的第 0 号 GPU 组成一个 rail，共享同一条网络路径）。
 >
 > 辨析：**"通信域 vs 通信组"是跨层次的同义词；"communicator vs Team"则是"域边界 vs 域内拓扑分组"的关系。**
@@ -2266,7 +2266,7 @@ for (int n = 0; n < ginState->ginCommCount; n++) {
 typedef struct ncclWindow_vidmem* ncclWindow_t;
 ```
 
-即一个**设备侧指针**（`devcomm/devcomm_v22902.cc:46` 的注释直说 "ncclWindow_t is just a (device) pointer"）。它指向的 `ncclWindow_vidmem`（`include/nccl_device/impl/core__types.h:27-35`）记录这块窗口在对称地址空间中的位置信息，下表是其中决定「怎么定位到对端」的几个字段：
+即一个**设备侧指针**（`devcomm/devcomm_v22902.cc:46` 的注释直说 "ncclWindow_t is just a (device) pointer"）。它指向的 `ncclWindow_vidmem`（`include/nccl_device/impl/core__types.h:27-35`）记录这块窗口在对称地址空间中的位置信息。下表是其中决定「怎么定位到对端」的几个字段；表里反复出现的 **LSA team** 是 1.5 节介绍过的 team 之一，LSA 全称 Load/Store Access，指同一节点内能用 load/store 指令直接读写彼此显存的一组 GPU（通常就是一个 NVLink 域），`ncclTeamLsa` 返回的正是这个集合：
 
 | 字段 | 含义 |
 |---|---|
