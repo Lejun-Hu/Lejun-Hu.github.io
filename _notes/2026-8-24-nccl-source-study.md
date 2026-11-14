@@ -2383,6 +2383,19 @@ symMemorySetAccessForVASegment(comm, msg, addr);     // 授予本 GPU 读写权�
 
 这里要特别说明第二样，因为它容易引起误解。`ginWins[connectionId]` **是本 rank 自己的句柄，不是从对端取来的**。它由注册时的 `regMrSym` 输出，内部结构是 `ncclGinGdakiMemHandle`，其中的 `rkeys` 是一个**按 peer 索引的数组**——注册时已经通过 AllGather 把每个对端的 rkey 都收了进来（具体过程见 4.4.2）。所以只需要自己窗口里的这一个句柄，就能查到任意 peer 的密钥，不必向对端索取任何东西。
 
+把这个句柄拆开看，它只有两个字段（`gin_gdaki_device_host_common.h:38-41`），下表把它们与前面那三样东西对应起来：
+
+| 字段 | 类型 | 含义 | 在 put 里怎么用 |
+|---|---|---|---|
+| `rkeys` | `__be32*` | 远端 rkey 数组，每个 peer 一项 | `rkeys[peer]` 作为 `raddr.key`，供对端网卡校验写权限 |
+| `lkey` | `__be32` | 本窗口的本地 lkey，单值 | 该窗口作为**源**时取用，作为 `laddr.key` |
+
+也就是说，访问远端所需的三类信息各有来源、互不重叠：**队列**来自 `gdqp + peer`（走哪张网卡、哪条 QP），**密钥**来自 `ginWins[connectionId]->rkeys[peer]`，**目标位置**来自 `4096 * ginOffset4K + dstOff`。`ginWins` 只承担其中「密钥」一项，另外两项都在别处。注意 `lkey` 不参与跨机组装——它是本端发数据时给本地网卡看的，对应 `put` 的 `srcWin` 参数。
+
+**那本端并不知道对端的虚拟地址，凭什么只给一个偏移就能写对位置？** 这是理解这套机制时最容易卡住的地方。答案在于窗口是**对称注册**的。官方文档对 `regMrSym` 有一句明确要求：它不同于普通的 MR 注册，要求「每个 peer 的对称地址在虚拟地址空间上一一对应」，做法是先用 `cuMemAddressReserve` 预留一段 VA，再把本地物理页映射进去（`docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:998-1000`）。窗口里的第 k 个字节，在 rank A 上是偏移 k，在 rank B 上同样是偏移 k——**偏移本身就是跨 rank 通用的坐标**，不需要再叠加各 rank 的基地址。
+
+至于基地址由谁管：对端在注册 MR 时，已经把自己窗口的起始地址与长度登记给了**自己的网卡**，并换回一个 rkey；这个 rkey 通过 AllGather 传到本端，存进 `rkeys[peer]`。发送时网卡拿着 `rkey + addr` 就能找到对应 MR 并定位到具体位置。所以本端不需要持有对端的基地址——**基地址留在对端网卡的 MR 记录里，本端只持有钥匙和偏移**。
+
 三样凑齐后交给网卡，实际代码在 `gin_gdaki.h:59-72`：
 
 ```cpp
