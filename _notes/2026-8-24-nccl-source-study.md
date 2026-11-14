@@ -2551,7 +2551,27 @@ void* get_sym_ptr(void* ptr, int dst_rank_idx) const {
 
 最后一行与前面那个公式一字不差。放入 4 卡例子中验证：`nvl_window_ptrs[2]` 就是 `0x7f28_0000_0000`，于是 `get_sym_ptr(ptr, 2)` 直接得到 `0x7f28_0000_0000 + offset`，与手算结果一致。
 
-所以两者的区别只是分工：NCCL 的 `ncclDevrGetLsaRankPtr` 是 Host 侧函数，每次调用现算一遍；DeepEP 在初始化时就把每个 rank 的「基址部分」算好存进 `nvl_window_ptrs[]`，运行时只做一次加法。原因是**内核里不能再调 Host API**，只能提前把基址备好。
+这里需要澄清一处容易误读的地方。`ncclDevrGetLsaRankPtr`（以及对外暴露的 `ncclGetLsaDevicePointer`）确实是 Host 侧函数、每次调用都重新算一遍，但它**不在任何运行时路径上**——它只是一个供初始化阶段使用的换算工具。NCCL 自己的对称内核并不调用它，而是在设备侧用 `ncclGetLsaPointer` 现算（`src/include/nccl_device/impl/core__funcs.h:114-119`）：
+
+```cpp
+// src/include/nccl_device/impl/core__funcs.h:114-119
+NCCL_DEVICE_INLINE void* ncclGetLsaPointer(ncclWindow_t w, size_t offset, int peer) {
+  char* base = loadConst(&w->lsaFlatBase);
+  uint32_t stride4G = loadConst(&w->stride4G);
+  return (void*)(nccl::utility::add4G(base, peer * stride4G) + offset);
+}
+```
+
+所以三方共用的是同一个前提：**常量由 Host 预先算好、随窗口结构一次性下发到显存**——这正是 `lsaFlatBase` 与 `stride4G` 存在的意义。区别只在于最后那次加法在哪儿完成：
+
+| 做法 | 谁在使用 | 加法发生的时机与位置 |
+|---|---|---|
+| 读窗口字段按 stride 现算 | NCCL 自己的对称内核（`ncclGetLsaPointer`） | 设备侧，每次访问时算 |
+| 初始化时算出每个 peer 的地址并缓存成数组 | DeepEP（`ncclGetLsaDevicePointer` → `nvl_window_ptrs[]`） | Host 侧，仅初始化时算一次 |
+
+DeepEP 之所以选择缓存而不是每次去调 API，还有一个实际原因：`ncclGetLsaDevicePointer` 每次都要用窗口指针反查所属的 comm 与 Host 侧窗口描述（`findCommAndHostWindowFromDeviceWindow`，`dev_runtime.cc:1683`），而那张表是全局的、受 `ncclWindowMapMutex` 保护的。批量取一次存成数组，就避免了反复加锁查表。
+
+因此两种做法并不矛盾，也不是「谁预先算、谁现场算」的对立：内核里确实不能调 Host API，所以 NCCL 把**常量**提前下发；至于**地址本身**，既可以留在设备侧按 stride 现算（NCCL 内核的做法），也可以由 Host 提前算好存成数组传进去（DeepEP 的做法），取决于哪边用起来更方便。
 
 于是 NVLink 域内任意 rank 的缓冲区都能被直接寻址，无需走 GIN——这是 DeepEP「scaleup 走 NVLink 直写」的基础；只有跨机那部分才用 GIN，此时 `window` 作为参数传入 kernel，设备端依靠窗口里的 `ginWins[]` 与 rkey 完成远端写入（即前面跨机寻址那一节讲的内容）。
 
