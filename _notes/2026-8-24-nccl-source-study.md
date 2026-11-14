@@ -2484,7 +2484,22 @@ CUDACHECK(cudaMemcpyAsync(winDev, winDevHost, sizeof(struct ncclWindow_vidmem),
 
 **一块地址跨多个物理段时，为什么必须有 DMABUF。** `ncclCommWindowRegister` 接收的是一段**连续虚拟地址**，但它背后未必是连续物理内存：`ncclCuMemGetAddressRange` 会数出这块虚拟地址跨越了多少个物理分配段（`numSegments`，`dev_runtime.cc:872-874`）。常见来源有两种——多次分配后再拼成连续虚拟地址，以及 GPU 显存与 CPU 内存混合排布（DeepEP 的 `ElasticSymmetricMemory` 就是后者：前半段 GPU VRAM、后半段 CPU NUMA 内存，拼成一段连续地址后整体注册，`csrc/kernels/backend/symmetric.hpp:142-146`）。
 
-单段时，网卡可以用 peermem 这类机制一次性把整块显存注册成 MR；多段时 peermem 不再适用（它要求地址来自单次 `cudaMalloc`），必须把每个物理段分别导出成 dma-buf 描述符，再逐个交给网卡。因此 `ncclGinRegister`（`gin_host.cc:379-387`）在 `multiSegment` 为真时会先做一次前置检查：
+要理解这种形状为什么需要 DMABUF，得先看清 DMABUF 是什么。**DMA-BUF 是 Linux 内核提供的一套缓冲区共享机制**：一块内存由它的属主驱动「导出」成一个文件描述符，其它驱动拿到这个 fd 就能「导入」同一块物理内存并直接对它发起 DMA，全程不经过 CPU 拷贝，也不需要任何一方知道物理地址。用在 GPU 上时，是 NVIDIA 驱动负责导出，网卡驱动（如 mlx5）负责导入。它要解决的核心问题是「两个设备驱动之间如何安全地共用同一块物理内存」。
+
+把它和传统路径对比，必要性就清楚了。常规的 `ibv_reg_mr` 要求内核把用户给的这段地址「钉住」（pin）成物理页、建好 IOMMU 映射再交给网卡；GPU 显存走的是 peermem 这条老路，而它只认**单次分配得到的连续物理内存**。一旦窗口跨了多个由 `cuMemCreate` 各自分配出来的物理段，这段虚拟地址在物理上就是几块互不相邻的内存，peermem 无从下手——它拿不到「一条连续物理区间」。DMABUF 的接口是按段划分的，恰好补上这个缺口：
+
+```cpp
+// src/transport/net_ib/gdaki/gin_host_gdaki.cc:129-131（节选，中文注释为笔记所加）
+// 1. 把一段物理内存导出成 dma-buf 文件描述符
+CUCHECK(cuMemGetHandleForAddressRange((void*)&dmabuf_fd, (CUdeviceptr)addr, aligned_size,
+                                      CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0));
+// 2. 让网卡导入这个 fd 并注册成 MR，此后即可对它直接 DMA
+status = wrap_ibv_reg_dmabuf_mr(mr, pd, 0, aligned_size, 0, dmabuf_fd, access);
+```
+
+`cuMemGetHandleForAddressRange` 以 `CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD` 为参数，为一段物理内存产出 fd；`ibv_reg_dmabuf_mr`（`reg.cc:35`）完成导入与注册。既然这个接口是「一段一个 fd」，多段就重复多遍：每个物理段各自导出、各自注册成 MR，最后这组 MR 由窗口里的 `ginMultiSegmentWins` 逐个串起来（`core__types.h:27-35` 中它是「每段一组 GIN 窗口」的数组，正是为这种情形准备的，单段时则直接把唯一的 win 存进 `ginWins[]`）。所以有了 DMABUF，多段窗口不再是障碍，只是注册动作从一次变成 N 次；没有它，多段地址就完全无法交给网卡。
+
+正因为这是硬性前提，`ncclGinRegister`（`gin_host.cc:379-387`）在 `multiSegment` 为真时会先确认每条网卡连接都支持 DMABUF：
 
 ```cpp
 // src/gin/gin_host.cc:379-387（节选）
