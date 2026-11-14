@@ -2280,6 +2280,8 @@ NCCL_IR_EXTERN_C NCCL_DEVICE_INLINE void ncclGinPut(
 
 在机内（同一节点、GPU 之间通过 NVLink 或 PCIe 直连），访问对端内存靠的是**地址映射**。注册阶段 NCCL 会把对端的物理内存映射进本进程的虚拟地址空间，于是 kernel 里一条普通的 `st.global` 写到某个地址，数据就物理上落到了对端的显存里。这条路径不需要密钥、不需要网卡，也没有任何特殊的通信指令——它和访问本地显存没有区别，只是地址翻译的结果指向了另一块 GPU。
 
+这里先说明后面反复出现的 `lsa` 前缀是什么意思，因为它很容易被望文生义成 "local"。NCCL 把「同一节点内能用访存指令直接读写彼此显存的这组 GPU」称为 **LSA team**，LSA 是 **Load/Store Access** 的缩写（官方表述见 `docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:94`："LSA (Load/Store Access) for direct memory-semantic access to other peers within the same node"）。取这个名字强调的是**访问方式**——这组 GPU 之间不需要网络协议栈，用普通的 load/store 指令就能互访内存；它并不表示「本地」，也不限于同一块板卡。窗口结构里的 `lsaFlatBase`、`lsaRank`，以及后面会用到的 `lsaSize`，前缀都来自这个 team。
+
 在机间（跨节点），这条路走不通：对端内存在另一台机器上，根本没有被映射进本进程的页表，写一个这样的地址只会触发访问异常。所以必须换一种方式：把「目标窗口的句柄 + 目标偏移 + 密钥」一起交给网卡，由网卡代替 GPU 完成地址翻译，再把数据通过 RDMA 送过去。这条路径才需要前面提到的 rkey。
 
 两条路径的差别可以归纳成下表。读表时重点看第三、四行，它们解释了为什么同一个窗口结构里要放两套完全不同的字段：
@@ -2313,7 +2315,7 @@ typedef struct ncclWindow_vidmem* ncclWindow_t;
 | `mcOffset4K` | NVLS 组播地址的偏移，以 4 KiB 为单位 | NVLS（本章不展开） |
 | `numSegments` / `ginMultiSegmentWins` | 跨多个物理段时的分段信息 | 机间多段场景 |
 
-表里出现的 **LSA team** 在 1.5 节介绍过，这里再明确一次它的含义：LSA 是 Load/Store Access 的缩写，指同一节点内能用普通 load/store 指令直接读写彼此显存的一组 GPU，通常就是一个 NVLink 域，`ncclTeamLsa` 返回的正是这个集合。取这个名字是因为这组 GPU 之间不需要网络协议，用访存指令就够。
+表里的 `lsaRank`、`lsaFlatBase` 都用到了前面说的 LSA team，`ncclTeamLsa` 返回的就是这个集合，它的大小即 `lsaSize`。这些字段现在不必记住，下面讲机内寻址时会逐个用到。
 
 **注册这一步具体执行了哪些动作。** 现在可以说清 `ncclGinRegister`（`gin_host.cc:374`）做了哪些事。它同时完成两件工作：一是对**每条** GIN 连接各调用一次插件的 `regMrSym`，为这块内存换回两个句柄——host 侧的 `ginHostWins[]` 留作注销时使用，device 侧的 `ginDevWins[]` 就是稍后填进窗口 `ginWins[]` 的那批；二是在本地把各 rank 的物理内存映射进平铺虚拟地址空间，供机内路径直接访问。一份注册同时满足两种访问需求，这就是前面说「一个窗口服务两条路径」的具体含义。
 
@@ -2395,6 +2397,17 @@ raddr.key  = loadConst(loadConst(&dstMh->rkeys) + peer);            // 4. 按 pe
 
 随后 `doca_gpu_dev_verbs_put(qp, raddr, laddr, bytes, ...)` 把这几个参数写进 WQE（`gin_gdaki.h:100-120`）。网卡取到 WQE 后做两件事：先用 rkey 校验发送方是否有权限写这段内存，再把虚拟地址翻译成对端物理地址，最后用 DMA 把数据写进去。**与机内的根本差别就在这里**——地址翻译的执行者从 GPU 的 MMU 换成了网卡，所以必须额外提供 rkey，而机内不需要。
 
+上面代码只截了目标侧（`raddr`），源侧还有一行 `laddr.key = loadConst(&srcMh->lkey)`，两者正好说明了 `put` 为什么要传两个窗口参数。RDMA 的写操作在网卡侧是「从本地内存读、写到远端内存」，两端都必须是已注册的内存区域：远端靠 rkey 校验权限，本地靠 lkey 让网卡定位本地物理页才能发起 DMA 读取。因此 `srcWin` 传的是本 rank 的源窗口句柄，作用是从中取出 `lkey`。这也解释了 `ncclGinGdakiMemHandle` 里两个字段形状不同的原因（`gin_gdaki_device_host_common.h:38-41`）：
+
+```c
+struct ncclGinGdakiMemHandle {
+  __be32* rkeys;   // 远端：按 peer 索引的数组，每个对端一把钥匙
+  __be32 lkey;     // 本地：单值，源永远是本地的
+};
+```
+
+于是两个窗口参数分工明确：`dstWin` 回答「写到哪、凭什么权限写」，`srcWin` 回答「从哪读、这块本地地址能否被网卡访问」。`peer` 参数同时服务两处——既用于 `gdqp + peer` 选 QP，也用于 `rkeys[peer]` 取远端密钥。
+
 上层库看到的调用形式与官方文档给出的两行算法一致（`docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:1055-1062`）：
 
 ```cpp
@@ -2403,7 +2416,11 @@ ncclGinWindow_t dstGinWin = dst->ginWins[connectionId];          // 本 rank 的
 ncclGinPut(ctx, coop, peer, dstGinWin, dst_ginAddr, ...);
 ```
 
-注意这里的 `dst` 是**本 rank 自己**的窗口描述符，不是从对端同步来的结构——对端的信息在注册时就已经收进 `ginWins[connectionId]` 里了。这一步与 4.4.1 讲的连接拆分是配合关系：`connectionId` 决定走哪张网卡、哪组 QP，`peer` 决定组内用哪条 QP、哪个 rkey。
+这里要先说清 `dst` 是什么，因为文档换了个短名字，容易让人以为是「对端的窗口结构」。它的类型是 `struct ncclWindow_vidmem*`，也就是前面那个 `ncclWindow_t`（指针类型本身，代码里去掉 typedef 写成了 `dst`），对应 `ncclGinPut` 签名中的 `dstWin` 参数；`src` 同理，对应 `srcWin`。**两者都是本 rank 自己的窗口描述符**，不是从对端同步来的对象。
+
+名字叫 `dst` 只表示「这次要写的是目标窗口」，而这个窗口对象本身属于本 rank。能让它指向远端的原因在 `ginWins[connectionId]`：这个句柄内部存着按 peer 索引的 rkey 数组，所以「本 rank 的窗口 + 目标 rank 号」就能定位到对端的密钥，不需要拿到对端那个结构。这也是为什么 `put` 只需传 `peer` 而不需要传对端的窗口指针。
+
+这一步与 4.4.1 讲的连接拆分是配合关系：`connectionId` 决定走哪张网卡、哪组 QP，`peer` 决定组内用哪条 QP、哪个 rkey。
 
 **这些参数怎么从 Host 送到设备侧。** 上面那些字段都是 Host 在注册时算好的，但设备无法直接读 Host 内存，所以 NCCL 用「显存副本 + Host 镜像」的配对来做传递，由 shadow pool 统一管理。`ncclShadowPoolAlloc`（`allocator.cc:406-416`）一次分配两样东西并登记它们的对应关系：
 
