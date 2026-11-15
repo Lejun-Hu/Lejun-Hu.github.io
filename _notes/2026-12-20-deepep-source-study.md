@@ -32,8 +32,6 @@ DeepEP 是 DeepSeek 开源的专家并行（Expert Parallelism, EP）通信库�
 
 DeepEP 在同一份内核里按目标 rank 是否可达选择其一，2.4 节 `dst_ptr != nullptr` 的分流与 2.5 节 `put_value` 的两条分支都由这张表决定。
 
-另外几个贯穿全文的术语在此一并交代定位。QP（Queue Pair）是发送队列与接收队列的合称，也是消息语义的队列载体，NCCL 文档在两个 rank 的连接语境下直接称其 queue pairs（`docs/userguide/source/env.rst:1015`）；DeepEP 用 `num_allocated_qps` 申请数量、用 `kGinQPDepth = 1024` 指定队列深度（`deep_ep/include/deep_ep/common/compiled.cuh:84`），2.2 节说明这些数字如何传给 NCCL，2.5 节说明 warp 与 QP 并非一一对应。TMA（Tensor Memory Accelerator，NCCL `contrib/nccl_ep/README.md:36`）是 SM90 起提供的异步批量拷贝单元，负责 global memory 与 shared memory 之间的大块搬运，由专用指令触发、以 mbarrier 通知完成（2.4 节）；它与 load/store 的差别在批量与异步，适合搬整个 token 的 hidden 向量，不适合搬单个计数。SM（Streaming Multiprocessor，`docs/legacy.md:9`）是 GPU 的基本计算单元，内核的 thread block 被调度到 SM 上执行，DeepEP 用 SM 数量度量通信占用的计算资源（`num_sms`）。Team 是 communicator 内的 rank 子集，NCCL 预定义 World、Lsa、Rail 三个（`src/include/nccl_device/core.h:45-47`），DeepEP 用它们判断目标 rank 属于哪个域（2.5 节）。这些能力的内部机制见 NCCL 笔记第四章，本文只关心 DeepEP 调用它们的接口与时机。
-
 按初学者的阅读顺序，全文分三章：先讲清楚「MoE 的通信为什么需要专门的库」，再沿真实调用链逐层读代码，最后归纳设计要点与源码阅读路径。下表给出三章各自的问题与阅读收获，读表时抓住一条因果链：第一章确认通信形态，第二章定位实现层次，第三章归纳设计取舍；第二章是全文重点，第三章建立在它的调用链之上。
 
 | 章节 | 关注的问题 | 读完应掌握 |
@@ -44,7 +42,7 @@ DeepEP 在同一份内核里按目标 rank 是否可达选择其一，2.4 节 `d
 
 若只关心 DeepEP 如何复用 NCCL，可以从第二章直接进入。
 
-前置知识：第二章大量引用 NCCL 的 `ncclDevComm`、`ncclWindow_t` 与 Team 语义。`ncclDevComm` 是 NCCL 为设备侧准备的资源上下文，`ncclWindow_t` 是对称内存窗口句柄，Team 与 QP 的定义见前文术语说明。建议先读 NCCL 笔记的第四章（GIN 详解），特别是设备侧 context、窗口注册与 QP 参数传递部分。
+前置知识：第二章会反复使用 NCCL 的 `ncclDevComm`、`ncclWindow_t` 以及 Team、QP、TMA、SM 等概念，本文不解释其定义与内部机制，统一见《[NCCL 源码学习笔记](/notes/nccl-source-study/)》第四章。继续阅读前可以用这几个概念做一次自检：设备侧上下文、窗口注册、Team 的 rank 划分、warp 与 QP 的关系是否都能说清；有不熟悉的项，先回读该章再进入第二章。
 
 ---
 
