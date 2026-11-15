@@ -18,7 +18,7 @@ DeepEP 是 DeepSeek 开源的专家并行（Expert Parallelism, EP）通信库�
 
 内存语义（memory semantics，也称访存语义）的表现形式是一条 load 或 store 指令，没有独立的「提交」与「完成」步骤。地址本身就是目的地的标识；写入的可见性与先后顺序由指令的内存序（memory order）决定，而 PTX 的内存序通常由「语义」与「作用域」两个独立标注组合而成。DeepEP 发布计数时用的 `st.relaxed.sys` 就是这样一个组合。`relaxed` 是语义标注，表示这次存储不附带任何跨线程的排序约束，只保证写入本身是原子的：其他线程读到的要么是旧值、要么是新值，不会读到写了一半的中间态；如果要求「先把数据写好、再更新计数」这类先后关系，就必须额外插入 fence（内存屏障指令），或改用带 `release` 语义的存储。`sys` 是作用域标注，限定这次写入要让哪些观察者看到：`cta` 只覆盖同一线程块，`gpu` 覆盖同一张卡上的全部线程，`sys` 则覆盖整台机器，包括主机 CPU 与同一 NVLink/PCIe 互联域内的其他 GPU。因此「只保证对系统内可见、不提供排序」的准确含义是：这次写最终会被系统内任意设备观察到，但它不会顺带保证此前对其他地址的写入也已按程序顺序可见。至于这条 store 能否使用，只取决于两端是否处于同一 P2P 可达域——NCCL 以 `nvidia-smi topo -p2p p` 报告的 P2P 连通性判定，涵盖 NVLink 互连与部分 PCIe P2P 互连的设备（`docs/userguide/source/usage/deviceapi.rst:13-17`）。它的局限也来自这里：目标一旦在另一台机器，其显存并不在本进程地址空间内，load/store 无从表达。
 
-消息语义（message semantics）的表现形式是「提交请求 → 网卡执行 → 完成通知」三段。调用方描述的是「把哪段本地数据写到对端窗口的哪个偏移、写到哪个 rank」，请求进入网卡的发送队列后由网卡异步执行，完成情况通过完成队列或信号回告。NCCL 文档在讲 GIN 的 put 实现时给出的正是这个过程：在 QP 的发送队列里分配一个 WQE 槽位、按 IB/RoCE 规范填好（`opcode=RDMA_WRITE`、远端地址、rkey/lkey、SGL）、最后写 doorbell 通知网卡取走（同文档 `:1113-1121`；这些填充内容属 GDAKI/DOCA 后端的实现细节，此处只取其操作模型）。因此消息语义的接口需要窗口句柄、窗口内偏移与目标 rank 三项信息（对应 2.5 节 `handle.cuh:183-196` 的 `gin.put`），而不是一个裸指针；它不受访存域限制，代价是请求队列与完成通知带来的额外延迟。
+消息语义（message semantics）的表现形式是「提交请求 → 网卡执行 → 完成通知」三段。调用方描述的是「把哪段本地数据写到对端窗口的哪个偏移、写到哪个 rank」，请求进入网卡的发送队列后由网卡异步执行，完成情况通过完成队列或信号回告。NCCL 的 GIN 设计文档在讲 put 实现时给出的正是这个过程：在 QP 的发送队列里分配一个 WQE 槽位、按 IB/RoCE 规范填好（`opcode=RDMA_WRITE`、远端地址、rkey/lkey、SGL）、最后写 doorbell 通知网卡取走（`docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:1113-1121`；这些填充内容属 GDAKI/DOCA 后端的实现细节，此处只取其操作模型）。因此消息语义的接口需要窗口句柄、窗口内偏移与目标 rank 三项信息（对应 2.5 节 `handle.cuh:183-196` 的 `gin.put`），而不是一个裸指针；它不受访存域限制，代价是请求队列与完成通知带来的额外延迟。
 
 下表把两类语义的差别归纳成五行，读表时关注「目的地如何标识」与「完成如何得知」两行，它们决定了两套接口的参数形态。
 
@@ -388,7 +388,7 @@ public:
 
 读表结论：注册是一次集合操作，负责建立全局视图；取指针是逐 peer 的本地查询，负责把视图变成可参与地址算术的具体地址，两者缺一不可。
 
-LSA 的定义见 `docs/userguide/source/usage/deviceapi.rst:13`（Load/Store Accessible），GIN 设计文档 `:94` 写作 Load/Store Access，指同节点内对其他 GPU 内存的直接 load/store 访问能力。窗口注册后由 NCCL 建立统一的对称 VA 视图（`docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:306-309`），把各 peer 的物理段映射进本进程的 VA（同文档 `:232`、`:243`、`:265-266`），设备侧访问 peer 的窗口因此只需 `lsaFlatBase + peer*stride + offset` 这样的地址算术（同文档 `:289-290`），无需 CPU 参与。`nvl_window_ptrs[i]` 就是这张地址表在 Host 侧的缓存。
+LSA 的定义见 `docs/userguide/source/usage/deviceapi.rst:13`（Load/Store Accessible），GIN 设计文档 `docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:94` 写作 Load/Store Access，指同节点内对其他 GPU 内存的直接 load/store 访问能力。窗口注册后由 NCCL 建立统一的对称 VA 视图（`docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md:306-309`），把各 peer 的物理段映射进本进程的 VA（`NCCL_Gin_and_Symmetric_Memory.md:232`、`:243`、`:265-266`），设备侧访问 peer 的窗口因此只需 `lsaFlatBase + peer*stride + offset` 这样的地址算术（`NCCL_Gin_and_Symmetric_Memory.md:289-290`），无需 CPU 参与。`nvl_window_ptrs[i]` 就是这张地址表在 Host 侧的缓存。
 
 到这四步结束，初始化期完成：设备侧拿到了 `dev_comm`、`window`、以及机内各 peer 的窗口基址。后面每次 `dispatch` 都复用这些资源，2.3 节接着进入调用期。
 
